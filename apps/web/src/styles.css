@@ -1180,6 +1180,23 @@ textarea:focus {
   background: transparent;
   color: var(--text-muted);
 }
+/* ------------------------------------------------------------------ approvals */
+
+.preview {
+  display: inline-block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.deny-reason {
+  margin-top: 6px;
+  width: 100%;
+  font-size: 12px;
+}
+
 /* ------------------------------------------------------------------ attachments */
 
 .attachments {

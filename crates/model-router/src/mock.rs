@@ -14,11 +14,21 @@ use serde_json::json;
 
 pub struct MockProvider {
     model: String,
+    /// Milliseconds between streamed chunks. Zero in production; a demo and test aid for watching
+    /// a stream arrive, because a deterministic local answer is otherwise written in microseconds
+    /// and no human ever sees it happen.
+    stream_delay_ms: u64,
 }
 
 impl MockProvider {
     pub fn new(model: impl Into<String>) -> Self {
-        Self { model: model.into() }
+        Self { model: model.into(), stream_delay_ms: default_stream_delay_ms() }
+    }
+
+    /// Pace the stream. Used by tests and by a demo that wants to show the console filling in.
+    pub fn with_stream_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.stream_delay_ms = delay_ms;
+        self
     }
 
     /// Detect a plain arithmetic expression inside free text.
@@ -148,6 +158,18 @@ impl Default for MockProvider {
     }
 }
 
+/// The demo pacing knob, read once at construction.
+///
+/// It is an environment variable rather than a configuration field because it exists to be
+/// watched, not to be deployed: nobody should ship a paced placeholder provider, and a deployment
+/// that sets this gets exactly what it asked for.
+fn default_stream_delay_ms() -> u64 {
+    std::env::var("AGENTOS_MOCK_STREAM_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
 #[async_trait]
 impl ModelProvider for MockProvider {
     fn name(&self) -> &str {
@@ -170,9 +192,16 @@ impl ModelProvider for MockProvider {
         on_delta: &(dyn Fn(String) + Send + Sync),
     ) -> Result<ModelResponse> {
         let response = self.complete(request).await?;
-        // Nothing here sleeps: pacing belongs to the transport, not to a test double.
+        // Pacing is off unless someone asked for it: the delay exists so a person can watch the
+        // console render a stream, not because a fake model needs time to think.
         for word in response.content.split_inclusive(' ') {
+            if self.stream_delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.stream_delay_ms)).await;
+            }
             on_delta(word.to_string());
+        }
+        if self.stream_delay_ms > 0 && response.content.is_empty() {
+            on_delta(String::new());
         }
         Ok(response)
     }

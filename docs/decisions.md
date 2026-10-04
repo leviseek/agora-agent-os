@@ -191,3 +191,13 @@ skipped, and a hostile node id cannot escape the directory (it is hashed). Nothi
 path depends on it - `/v1/nodes` reads a cached view that a background heartbeat maintains, and
 join/leave are ordinary events on the bus. Two running instances must still not share a data
 directory; discovery shares knowledge, not state.
+
+## D18 — 配置文档允许缺省（可部分给出）
+
+给配置结构体新增字段，过去等同于对所有部署的破坏性变更：磁盘上的配置文件不再能反序列化，运行时以
+"missing field ..." 拒绝启动。仓库里随源码发布的示例配置**已经这样失效了**——它缺 `approval_timeout_ms`，
+运维照抄示例会得到一个起不来的运行时。
+
+现在每个配置结构体都为其字段派生默认值，缺失的字段回落到默认；**存在但类型错误的值仍然被直接拒绝**——
+这正是关键之处：运行时容忍为旧版本写的文档，不容忍胡说。两条测试钉住这件事：随仓库发布的示例必须能解析
+**并且**通过校验；部分文档必须能加载，而写错的值必须不能。

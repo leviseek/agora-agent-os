@@ -345,6 +345,18 @@ export interface SessionRuntime {
   graphs: GraphSummary[];
 }
 
+/** A capability call parked until an operator decides. */
+export interface PendingApproval {
+  id: string;
+  capability: string;
+  session_id: string;
+  actor_id?: string | null;
+  task_id?: string | null;
+  arguments_preview: string;
+  reason: string;
+  created_at: number;
+}
+
 /** One turn of the conversation, as stored by the session actor. */
 export interface TranscriptEntry {
   id: string;
@@ -803,6 +815,27 @@ export class AgentOsClient {
     return this.request<PostMessageResponse>('/v1/sessions/' + encodeURIComponent(id) + '/messages', {
       method: 'POST',
       json: images.length > 0 ? { text, wait, images } : { text, wait },
+    });
+  }
+
+  /** Capability calls waiting for an operator decision. */
+  listApprovals(): Promise<{ approvals: PendingApproval[]; total: number }> {
+    return this.request<{ approvals: PendingApproval[]; total: number }>('/v1/approvals', {
+      method: 'GET',
+    });
+  }
+
+  /** Decide one. The id is single use. */
+  decideApproval(
+    id: string,
+    approved: boolean,
+    reason?: string,
+  ): Promise<{ approved: boolean }> {
+    const body: Record<string, unknown> = { approved };
+    if (reason !== undefined && reason.length > 0) body.reason = reason;
+    return this.request<{ approved: boolean }>('/v1/approvals/' + encodeURIComponent(id), {
+      method: 'POST',
+      json: body,
     });
   }
 

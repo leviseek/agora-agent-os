@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// The largest window a selective replay will scan before giving up. Bounded so a filter that
+/// matches nothing cannot turn into an unbounded scan of the log.
+const MAX_REPLAY_WINDOW: usize = 50_000;
+
 pub struct LocalEventBus {
     store: Arc<dyn Store>,
     tx: broadcast::Sender<EventRecord>,
@@ -122,16 +126,31 @@ impl EventBus for LocalEventBus {
     async fn replay(&self, filter: EventFilter) -> Result<Vec<EventRecord>> {
         let limit = if filter.limit == 0 { 1000 } else { filter.limit };
         let from = filter.after_seq.map(|s| s + 1).unwrap_or(1);
-        let rows = self.store.read_events(collections::LOG_EVENTS, from, limit).await?;
-        let mut out = Vec::new();
-        for (_, v) in rows {
-            let rec: EventRecord = serde_json::from_value(v)
-                .map_err(|e| RuntimeError::storage(format!("corrupt event record: {e}")))?;
-            if filter.matches(&rec) {
-                out.push(rec);
+
+        // The limit applies to what the caller asked FOR, not to how far we are willing to look.
+        // Reading "the last N events overall, then filtering" silently returns too few: a session's
+        // three events can sit just outside a window filled by heartbeats from other sessions. So
+        // the window grows until the caller has what it asked for or the log runs out.
+        let mut window = limit.max(256);
+        loop {
+            let rows = self.store.read_events(collections::LOG_EVENTS, from, window).await?;
+            let exhausted = rows.len() < window;
+            let mut out = Vec::new();
+            for (_, value) in rows {
+                let record: EventRecord = serde_json::from_value(value)
+                    .map_err(|e| RuntimeError::storage(format!("corrupt event record: {e}")))?;
+                if filter.matches(&record) {
+                    out.push(record);
+                    if out.len() >= limit {
+                        return Ok(out);
+                    }
+                }
             }
+            if exhausted || window >= MAX_REPLAY_WINDOW {
+                return Ok(out);
+            }
+            window = (window * 4).min(MAX_REPLAY_WINDOW);
         }
-        Ok(out)
     }
 
     async fn last_seq(&self) -> Result<u64> {
@@ -156,6 +175,52 @@ mod tests {
 
     async fn bus() -> LocalEventBus {
         LocalEventBus::new(Arc::new(MemoryStore::new()), 64, "node-test").await
+    }
+
+    #[tokio::test]
+    async fn a_selective_replay_is_not_limited_by_unrelated_traffic() {
+        // The bug this pins: three events for one session, buried under a thousand heartbeats from
+        // everywhere else. Asking for that session's events with limit 10 must return three, not
+        // "the last ten events overall, none of which happen to be yours".
+        let b = bus().await;
+        let wanted = agentos_core::SessionId::new();
+        for index in 0..1_000 {
+            b.publish(NewEvent::new(EventKind::WorkerHeartbeat, format!("noise {index}")))
+                .await
+                .unwrap();
+        }
+        for _ in 0..3 {
+            b.publish(NewEvent::new(EventKind::SessionMessageHandled, "mine").session(wanted.clone()))
+                .await
+                .unwrap();
+        }
+        for index in 0..1_000 {
+            b.publish(NewEvent::new(EventKind::WorkerHeartbeat, format!("noise after {index}")))
+                .await
+                .unwrap();
+        }
+
+        let found = b
+            .replay(EventFilter {
+                session_id: Some(wanted.clone()),
+                kinds: vec![EventKind::SessionMessageHandled],
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 3, "the filter decides what is returned, not the window");
+
+        // And the limit still limits what matches.
+        let limited = b
+            .replay(EventFilter {
+                session_id: Some(wanted),
+                limit: 2,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(limited.len(), 2);
     }
 
     #[tokio::test]

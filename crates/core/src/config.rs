@@ -67,7 +67,11 @@ impl ProviderConfig {
     }
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModelConfig {
     /// Provider used when the router has no better opinion.
     pub default_provider: String,
@@ -86,14 +90,22 @@ impl ModelConfig {
     }
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NodeConfig {
     pub name: String,
     pub node_id: Option<String>,
     pub region: String,
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ApiConfig {
     pub http_addr: String,
     pub ws_path: String,
@@ -114,7 +126,11 @@ impl ApiConfig {
     }
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     pub backend: StoreBackend,
     pub data_dir: PathBuf,
@@ -122,7 +138,11 @@ pub struct StorageConfig {
     pub event_log_retention: usize,
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PolicyConfig {
     /// The only directory any filesystem capability may touch. Path traversal is denied.
     pub workspace_root: PathBuf,
@@ -163,7 +183,11 @@ pub struct PolicyConfig {
     pub max_artifact_bytes: u64,
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct P2pConfig {
     pub enabled: bool,
     pub listen: Vec<String>,
@@ -173,7 +197,11 @@ pub struct P2pConfig {
     pub advertise_interval_ms: u64,
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ObservabilityConfig {
     pub log_level: String,
     pub log_format: LogFormat,
@@ -182,7 +210,11 @@ pub struct ObservabilityConfig {
     pub otlp_endpoint: Option<String>,
 }
 
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeLimits {
     pub session_queue_capacity: usize,
     pub default_task_timeout_ms: u64,
@@ -205,7 +237,11 @@ pub struct RuntimeLimits {
 /// no configuration, which is what makes "start a second workspace and see it immediately" work.
 /// A libp2p/mDNS backend exists for cross-machine discovery and is selected by the composition
 /// root, not by this configuration.
+/// Every field falls back to its default when a configuration file omits it, so a file written
+/// for an older version keeps working after a field is added. A wrong value is still a hard error;
+/// an absent one is a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DiscoveryConfig {
     pub enabled: bool,
     /// Shared directory. Defaults to a per-user location; override with AGENTOS_DISCOVERY_DIR.
@@ -253,7 +289,12 @@ pub fn default_discovery_dir() -> PathBuf {
     std::env::temp_dir().join("agora-agent-os").join("nodes")
 }
 
+/// A configuration document may be partial: every section and every field falls back to its
+/// default when absent. That is what makes a config file survive a runtime upgrade - adding a
+/// field must not stop a deployment from starting - while a field that is present and wrong is
+/// still refused outright.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeConfig {
     pub node: NodeConfig,
     pub api: ApiConfig,
@@ -300,146 +341,192 @@ fn default_true() -> bool {
     true
 }
 
-impl Default for RuntimeConfig {
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self { name: "agentos-local".into(), node_id: None, region: "local".into() }
+    }
+}
+
+impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            node: NodeConfig {
-                name: "agentos-local".into(),
-                node_id: None,
-                region: "local".into(),
-            },
-            api: ApiConfig {
-                http_addr: "127.0.0.1:8788".into(),
-                ws_path: "/v1/ws".into(),
-                grpc_addr: "127.0.0.1:8789".into(),
-                auth_token_env: "AGENTOS_AUTH_TOKEN".into(),
-                rate_limit_per_minute: 600,
-                cors_allow_origin: "*".into(),
-                request_timeout_ms: 30_000,
-            },
-            storage: StorageConfig {
-                backend: StoreBackend::File,
-                data_dir: PathBuf::from("./data"),
-                event_log_retention: 20_000,
-            },
-            models: ModelConfig {
-                default_provider: "mock".into(),
-                providers: vec![
-                    ProviderConfig {
-                        name: "mock".into(),
-                        kind: ProviderKind::Mock,
-                        model: "agentos-mock-1".into(),
-                        base_url: "inproc://mock".into(),
-                        api_key_env: "AGENTOS_MOCK_API_KEY".into(),
-                        enabled: true,
-                        priority: 0,
-                        timeout_ms: 5_000,
-                    },
-                    ProviderConfig {
-                        name: "deepseek".into(),
-                        kind: ProviderKind::Deepseek,
-                        model: "deepseek-chat".into(),
-                        base_url: "https://api.deepseek.com".into(),
-                        api_key_env: "DEEPSEEK_API_KEY".into(),
-                        enabled: true,
-                        priority: 30,
-                        timeout_ms: 60_000,
-                    },
-                    ProviderConfig {
-                        name: "openai".into(),
-                        kind: ProviderKind::Openai,
-                        model: "gpt-4o-mini".into(),
-                        base_url: "https://api.openai.com".into(),
-                        api_key_env: "OPENAI_API_KEY".into(),
-                        enabled: true,
-                        priority: 20,
-                        timeout_ms: 60_000,
-                    },
-                    ProviderConfig {
-                        name: "qwen".into(),
-                        kind: ProviderKind::Qwen,
-                        model: "qwen-plus".into(),
-                        base_url: "https://dashscope.aliyuncs.com/compatible-mode".into(),
-                        api_key_env: "DASHSCOPE_API_KEY".into(),
-                        enabled: true,
-                        priority: 15,
-                        timeout_ms: 60_000,
-                    },
-                    ProviderConfig {
-                        name: "local".into(),
-                        kind: ProviderKind::Local,
-                        model: "local-llm".into(),
-                        base_url: "http://127.0.0.1:11434".into(),
-                        api_key_env: "AGENTOS_LOCAL_API_KEY".into(),
-                        enabled: true,
-                        priority: 5,
-                        timeout_ms: 120_000,
-                    },
-                ],
-                request_timeout_ms: 60_000,
-                max_retries: 2,
-            },
-            policy: PolicyConfig {
-                workspace_root: PathBuf::from("./workspace"),
-                allowed_capabilities: vec![],
-                denied_capabilities: vec![],
-                approval_required: vec![],
-                max_steps_per_run: 12,
-                history_messages: 20,
-                history_chars: 8_000,
-                approval_timeout_ms: 120_000,
-                max_pending_approvals: 64,
-                compaction_enabled: true,
-                compaction_min_messages: 4,
-                context_files: vec!["AGENTS.md".into()],
-                context_files_chars: 8_000,
-                memory_recall_limit: 5,
-                memory_recall_chars: 1_200,
-                max_concurrent_tasks: 16,
-                capability_timeout_ms: 10_000,
-                capability_retries: 2,
-                allow_network_capabilities: false,
-                max_artifact_bytes: 8 * 1024 * 1024,
-            },
-            p2p: P2pConfig {
-                enabled: false,
-                listen: vec!["/ip4/0.0.0.0/tcp/0".into()],
-                bootstrap: vec![],
-                mdns: true,
-                advertise_interval_ms: 15_000,
-            },
-            observability: ObservabilityConfig {
-                log_level: "info,agentos=debug".into(),
-                log_format: LogFormat::Text,
-                metrics_enabled: true,
-                otlp_endpoint: None,
-            },
-            // On by default: "start a node, see it from the console" is the point of the feature.
-            // It only writes a small file into a per-user directory, and AGENTOS_DISCOVERY=off
-            // turns it off completely.
-            mcp: McpConfig::default(),
-            warnings: Vec::new(),
-            discovery: DiscoveryConfig {
-                enabled: true,
-                dir: default_discovery_dir(),
-                ttl_ms: 10_000,
-                advertise: true,
-            },
-            limits: RuntimeLimits {
-                session_queue_capacity: 1024,
-                default_task_timeout_ms: 60_000,
-                shutdown_timeout_ms: 5_000,
-                epoch_tick_ms: 50,
-                wasm_timeout_ms: 2_000,
-                wasm_memory_limit_bytes: 32 * 1024 * 1024,
-                wasm_max_instances: 16,
-                actor_snapshot_interval_ms: 30_000,
-                heartbeat_interval_ms: 2_000,
-                worker_lease_ms: 10_000,
-            },
+            http_addr: "127.0.0.1:8788".into(),
+            ws_path: "/v1/ws".into(),
+            grpc_addr: "127.0.0.1:8789".into(),
+            auth_token_env: "AGENTOS_AUTH_TOKEN".into(),
+            rate_limit_per_minute: 600,
+            cors_allow_origin: "*".into(),
+            request_timeout_ms: 30_000,
         }
     }
 }
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: StoreBackend::File,
+            data_dir: PathBuf::from("./data"),
+            event_log_retention: 20_000,
+        }
+    }
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            default_provider: "mock".into(),
+            providers: vec![
+                ProviderConfig {
+                    name: "mock".into(),
+                    kind: ProviderKind::Mock,
+                    model: "agentos-mock-1".into(),
+                    base_url: "inproc://mock".into(),
+                    api_key_env: "AGENTOS_MOCK_API_KEY".into(),
+                    enabled: true,
+                    priority: 0,
+                    timeout_ms: 5_000,
+                },
+                ProviderConfig {
+                    name: "deepseek".into(),
+                    kind: ProviderKind::Deepseek,
+                    model: "deepseek-chat".into(),
+                    base_url: "https://api.deepseek.com".into(),
+                    api_key_env: "DEEPSEEK_API_KEY".into(),
+                    enabled: true,
+                    priority: 30,
+                    timeout_ms: 60_000,
+                },
+                ProviderConfig {
+                    name: "openai".into(),
+                    kind: ProviderKind::Openai,
+                    model: "gpt-4o-mini".into(),
+                    base_url: "https://api.openai.com".into(),
+                    api_key_env: "OPENAI_API_KEY".into(),
+                    enabled: true,
+                    priority: 20,
+                    timeout_ms: 60_000,
+                },
+                ProviderConfig {
+                    name: "qwen".into(),
+                    kind: ProviderKind::Qwen,
+                    model: "qwen-plus".into(),
+                    base_url: "https://dashscope.aliyuncs.com/compatible-mode".into(),
+                    api_key_env: "DASHSCOPE_API_KEY".into(),
+                    enabled: true,
+                    priority: 15,
+                    timeout_ms: 60_000,
+                },
+                ProviderConfig {
+                    name: "local".into(),
+                    kind: ProviderKind::Local,
+                    model: "local-llm".into(),
+                    base_url: "http://127.0.0.1:11434".into(),
+                    api_key_env: "AGENTOS_LOCAL_API_KEY".into(),
+                    enabled: true,
+                    priority: 5,
+                    timeout_ms: 120_000,
+                },
+            ],
+            request_timeout_ms: 60_000,
+            max_retries: 2,
+        }
+    }
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            workspace_root: PathBuf::from("./workspace"),
+            allowed_capabilities: vec![],
+            denied_capabilities: vec![],
+            approval_required: vec![],
+            max_steps_per_run: 12,
+            history_messages: 20,
+            history_chars: 8_000,
+            approval_timeout_ms: 120_000,
+            max_pending_approvals: 64,
+            compaction_enabled: true,
+            compaction_min_messages: 4,
+            context_files: vec!["AGENTS.md".into()],
+            context_files_chars: 8_000,
+            memory_recall_limit: 5,
+            memory_recall_chars: 1_200,
+            max_concurrent_tasks: 16,
+            capability_timeout_ms: 10_000,
+            capability_retries: 2,
+            allow_network_capabilities: false,
+            max_artifact_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for P2pConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: vec!["/ip4/0.0.0.0/tcp/0".into()],
+            bootstrap: vec![],
+            mdns: true,
+            advertise_interval_ms: 15_000,
+        }
+    }
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            log_level: "info,agentos=debug".into(),
+            log_format: LogFormat::Text,
+            metrics_enabled: true,
+            otlp_endpoint: None,
+        }
+    }
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self { enabled: true, dir: default_discovery_dir(), ttl_ms: 10_000, advertise: true }
+    }
+}
+
+impl Default for RuntimeLimits {
+    fn default() -> Self {
+        Self {
+            session_queue_capacity: 1024,
+            default_task_timeout_ms: 60_000,
+            shutdown_timeout_ms: 5_000,
+            epoch_tick_ms: 50,
+            wasm_timeout_ms: 2_000,
+            wasm_memory_limit_bytes: 32 * 1024 * 1024,
+            wasm_max_instances: 16,
+            actor_snapshot_interval_ms: 30_000,
+            heartbeat_interval_ms: 2_000,
+            worker_lease_ms: 10_000,
+        }
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            node: NodeConfig::default(),
+            api: ApiConfig::default(),
+            storage: StorageConfig::default(),
+            models: ModelConfig::default(),
+            policy: PolicyConfig::default(),
+            p2p: P2pConfig::default(),
+            observability: ObservabilityConfig::default(),
+            // On by default: "start a node, see it from the console" is the point of the feature.
+            // It only writes a small file into a per-user directory, and AGENTOS_DISCOVERY=off
+            // turns it off completely.
+            discovery: DiscoveryConfig::default(),
+            limits: RuntimeLimits::default(),
+            mcp: McpConfig::default(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
 
 impl RuntimeConfig {
     /// Load defaults, then a JSON file (if present), then environment overrides.
@@ -770,6 +857,34 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn the_shipped_example_config_is_valid() {
+        // A template that does not load is worse than no template: an operator copies it, the
+        // runtime refuses to start, and the error names a field they never touched.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/agora-agent-os.example.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let config: RuntimeConfig = serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("the example config does not parse: {error}"));
+        config.validate().expect("the example config must validate");
+    }
+
+    #[test]
+    fn a_configuration_file_from_an_older_version_still_loads() {
+        // Fields added later fall back to their defaults, so upgrading the runtime does not
+        // invalidate the configuration a deployment already has. A wrong value is still an error.
+        let partial: RuntimeConfig = serde_json::from_str(r#"{ "api": { "http_addr": "127.0.0.1:9999" } }"#)
+            .expect("a partial config must load");
+        assert_eq!(partial.api.http_addr, "127.0.0.1:9999");
+        assert_eq!(partial.api.ws_path, ApiConfig::default().ws_path, "missing fields default");
+        assert_eq!(partial.policy.max_steps_per_run, PolicyConfig::default().max_steps_per_run);
+        partial.validate().expect("and it is a usable configuration");
+
+        let wrong = serde_json::from_str::<RuntimeConfig>(r#"{ "policy": { "max_steps_per_run": "many" } }"#);
+        assert!(wrong.is_err(), "a wrong type is still refused, not defaulted away");
     }
 
     #[test]

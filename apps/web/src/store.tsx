@@ -14,6 +14,7 @@ import type {
   EventRecord,
   HealthResponse,
   LoginResponse,
+  PendingApproval,
   PostMessageResponse,
   RuntimeMeta,
   SessionDetail,
@@ -37,6 +38,14 @@ const REFRESH_KINDS = new Set([
   'run_failed',
   'session_message_handled',
   'session_closed',
+]);
+
+/** Events that mean the pending-approvals list changed. */
+const APPROVAL_KINDS = new Set([
+  'approval_requested',
+  'approval_granted',
+  'approval_denied',
+  'approval_expired',
 ]);
 
 function readStorage(key: string): string | null {
@@ -84,6 +93,9 @@ export interface AppStoreValue {
   streamed: Map<string, string>;
   /** Images attached to the conversation, newest last, as the transcript refers to them. */
   attachments: AttachedImage[];
+  /** Capability calls waiting for a decision. */
+  approvals: PendingApproval[];
+  decideApproval: (id: string, approved: boolean, reason?: string) => Promise<void>;
   /** URL of an artifact's bytes. */
   artifactUrl: (id: string) => string;
   selectedSessionId: string | null;
@@ -148,6 +160,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Live answer text per run, replaced by the stored answer when the run completes.
   const [streamed, setStreamed] = useState<Map<string, string>>(() => new Map());
   const [attachments, setAttachments] = useState<AttachedImage[]>([]);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
 
   const artifactUrl = useCallback(
     (id: string): string => clientRef.current.artifactUrl(id),
@@ -233,6 +246,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshApprovals = useCallback(async (): Promise<void> => {
+    try {
+      const response = await clientRef.current.listApprovals();
+      setApprovals(response.approvals);
+    } catch {
+      // A console that cannot list approvals is still a working console; the panel says so.
+    }
+  }, []);
+
+  const decideApproval = useCallback(
+    async (id: string, approved: boolean, reason?: string): Promise<void> => {
+      setActionError(null);
+      try {
+        await clientRef.current.decideApproval(id, approved, reason);
+        await refreshApprovals();
+      } catch (cause) {
+        setActionError(toApiError(cause));
+      }
+    },
+    [refreshApprovals],
+  );
+
   const loadSessions = useCallback(async (active: AgentOsClient, query = ''): Promise<void> => {
     setSessionsLoading(true);
     try {
@@ -299,6 +334,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }, 700);
   }, [refreshSessions]);
 
+  // Approvals also refresh on a slow timer, because a request parked while the console was closed
+  // would otherwise stay invisible until some other event happened to arrive.
+  useEffect(() => {
+    void refreshApprovals();
+    const timer = window.setInterval(() => {
+      void refreshApprovals();
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [refreshApprovals]);
+
   // One subscription for the whole app: the buffer feeds every live view.
   useEffect(() => {
     const offEvent = stream.onEvent((event) => {
@@ -336,6 +381,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
             return next;
           });
         }
+      }
+      if (APPROVAL_KINDS.has(event.kind)) {
+        void refreshApprovals();
       }
       if (REFRESH_KINDS.has(event.kind)) {
         if (event.session_id !== null && event.session_id === selectedRef.current) {
@@ -581,6 +629,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsLoading,
       streamed,
       attachments,
+      approvals,
+      decideApproval,
       artifactUrl,
       sessionQuery,
       setSessionQuery,
@@ -627,6 +677,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsLoading,
       streamed,
       attachments,
+      approvals,
+      decideApproval,
       artifactUrl,
       sessionQuery,
       setSessionQuery,
