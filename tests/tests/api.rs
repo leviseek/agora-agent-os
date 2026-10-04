@@ -746,6 +746,76 @@ async fn wait_for_approval(h: &Harness) -> Value {
     panic!("no approval was requested");
 }
 
+/// A restart must not turn a session into a 503.
+///
+/// The session record and its runs are durable; the message-by-message transcript and the actor
+/// state are not, unless a snapshot happened to be taken. This test restarts a kernel on the same
+/// data directory with no snapshot at all - the case that used to answer
+/// "no live actor and no checkpoint to recover from".
+#[tokio::test]
+async fn a_session_survives_a_restart_without_a_snapshot() {
+    let dir = std::env::temp_dir().join(format!("agentos-restart-{}", agentos_core::now_ms()));
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let config = || {
+        let mut config = RuntimeConfig::default();
+        config.storage.backend = StoreBackend::File;
+        config.storage.data_dir = dir.join("data");
+        config.policy.workspace_root = workspace.clone();
+        config.observability.log_level = "error".into();
+        config.api.auth_token_env = "AGENTOS_TEST_RESTART_TOKEN".into();
+        config.discovery.enabled = false;
+        config
+    };
+    std::env::remove_var("AGENTOS_TEST_RESTART_TOKEN");
+
+    // --- first run: one conversation, and deliberately no checkpoint -----------------------
+    let session_id = {
+        let kernel = Kernel::bootstrap(config()).await.unwrap();
+        let session = kernel.sessions.create_session("u1", "survives").await.unwrap();
+        let result = kernel
+            .sessions
+            .post_goal(&session.id, "what is 6*7?", &[])
+            .await
+            .unwrap();
+        assert!(result["answer"].is_string(), "the run answered: {result}");
+        session.id
+    };
+
+    // --- second run: same data directory, nothing running -------------------------------
+    let kernel = Kernel::bootstrap(config()).await.unwrap();
+    let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _kernel: kernel,
+        shutdown,
+        client: reqwest::Client::new(),
+    };
+
+    let (status, transcript) = h.get(&format!("/v1/sessions/{session_id}/transcript")).await;
+    assert_eq!(status, 200, "the session must be served, not 503: {transcript}");
+    let messages = transcript["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "the conversation was rebuilt from the runs: {transcript}");
+    assert_eq!(messages[0]["parts"][0]["text"], json!("what is 6*7?"));
+    assert_eq!(messages[0]["role"], json!("user"));
+    assert_eq!(messages[1]["role"], json!("assistant"));
+
+    // The run history survives too, so the detail view is not blank either.
+    let (status, detail) = h.get(&format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["runtime"]["runs"].as_array().unwrap().len(), 1);
+
+    // And the session still accepts new work after the rebuild.
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{session_id}/messages"), json!({ "text": "and 7*7?", "wait": true }))
+        .await;
+    assert_eq!(status, 200, "a rebuilt session is a working session");
+
+    h.shutdown.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An approval is a real gate: the call parks, a decision releases it, and no decision times out.
 /// The diagnostics bundle explains the runtime without leaking what it must not.
 #[tokio::test]

@@ -15,9 +15,10 @@ use agentos_actor_runtime::runtime::ActorRuntime;
 use agentos_actor_runtime::ActorTransfer;
 use agentos_core::error::{Result, RuntimeError};
 use agentos_core::model::{
-    ActorRecord, Checkpoint, EventFilter, EventKind, EventRecord, MigrationReport, NewEvent,
-    SessionRecord,
+    AgentRun, ActorRecord, Checkpoint, CheckpointMeta, EventFilter, EventKind, EventRecord,
+    MessageRole, MigrationReport, NewEvent, SessionMessage as TranscriptMessage, SessionRecord,
 };
+
 use agentos_core::state::{ActorState, SessionState, StateMachine};
 use agentos_core::telemetry::Correlation;
 use agentos_core::{now_ms, ActorId, SessionId};
@@ -207,10 +208,92 @@ impl SessionManager {
         // The directory knows about it but nothing is running here: recover from a checkpoint.
         match self.actors.recover(&entry.actor_id, self.factory.clone()).await? {
             Some(handle) => Ok(handle),
-            None => Err(RuntimeError::unavailable(format!(
-                "session {session} has no live actor and no checkpoint to recover from"
-            ))),
+            None => {
+                // No snapshot survived the restart. Refusing to serve a session that is still in
+                // the list is the wrong answer: the session record and its runs are durable, so the
+                // actor is rebuilt from those. The conversation returns as goal/answer turns rather
+                // than message by message, because only a snapshot could preserve the exact
+                // transcript - and a session you can use beats a session that answers 503.
+                let Some(state) = self.rebuild_state(session).await? else {
+                    return Err(RuntimeError::unavailable(format!(
+                        "session {session} has no live actor and no record to rebuild from"
+                    )));
+                };
+                let runs = state.runs.len();
+                let checkpoint = Checkpoint {
+                    meta: CheckpointMeta {
+                        id: agentos_core::CheckpointId::new(),
+                        actor_id: entry.actor_id.clone(),
+                        session_id: session.clone(),
+                        generation: 0,
+                        applied_seq: 0,
+                        // Nothing to replay: the rebuilt state already contains every durable fact.
+                        event_offset: self.bus.last_seq().await.unwrap_or(0),
+                        bytes: 0,
+                        state_hash: String::new(),
+                        domain_version: agentos_core::DOMAIN_VERSION.to_string(),
+                        created_at: now_ms(),
+                    },
+                    state: serde_json::to_value(&state)?,
+                };
+                tracing::info!(
+                    session = %session,
+                    runs,
+                    "rebuilt a session actor from its record and runs (no snapshot survived)"
+                );
+                self.restore(checkpoint).await?;
+                self.actors.lookup_session(session).ok_or_else(|| {
+                    RuntimeError::unavailable(format!(
+                        "session {session} was rebuilt but its actor is not registered"
+                    ))
+                })
+            }
         }
+    }
+
+    /// Reconstruct a session actor from what is durable: its record and its runs.
+    async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActorState>> {
+        let record = self
+            .session_collection()
+            .load(self.store.as_ref(), session.as_str())
+            .await?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let stored: Vec<AgentRun> = Collection::new(collections::RUNS)
+            .list(self.store.as_ref(), 10_000)
+            .await?;
+        let mut runs: Vec<AgentRun> = stored
+            .into_iter()
+            .filter(|run: &AgentRun| &run.session_id == session)
+            .collect();
+        runs.sort_by_key(|run| run.created_at);
+
+        let mut state = SessionActorState::new(record);
+        for run in &runs {
+            let mut goal = TranscriptMessage::text(
+                session.clone(),
+                MessageRole::User,
+                run.goal.clone(),
+            );
+            goal.created_at = run.created_at;
+            goal.agent_id = Some(run.id.as_str().to_string());
+            state.transcript.push(goal);
+            if let Some(answer) = &run.final_answer {
+                let mut reply = TranscriptMessage::text(
+                    session.clone(),
+                    MessageRole::Assistant,
+                    answer.clone(),
+                );
+                reply.created_at = run.finished_at.unwrap_or(run.updated_at);
+                reply.agent_id = Some(run.id.as_str().to_string());
+                state.transcript.push(reply);
+            }
+        }
+        state.goals_handled = runs.len() as u64;
+        state.runs = runs;
+        state.session.message_count = state.transcript.len() as u64;
+        Ok(Some(state))
     }
 
     /// Send a goal to a session. Sessions are independent, so this awaits only this session.
