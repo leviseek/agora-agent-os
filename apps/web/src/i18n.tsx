@@ -1,0 +1,1025 @@
+/**
+ * Internationalisation: English and Simplified Chinese.
+ *
+ * Design notes
+ * ------------
+ * * Keys are namespaced by area ("nav.sessions", "state.running", "chat.send"). The English table
+ *   is the source of truth: its keys define the MessageKey union, so a typo is a compile error and
+ *   a missing translation is impossible to ship silently (lookup falls back to English).
+ * * Interpolation is "{name}" style and deliberately tiny - no plural engine, no ICU. The runtime
+ *   speaks snake_case identifiers, so pluralisation lives in the dictionary, not in code.
+ * * format.ts reads the active locale through setFormatLocale() so date and number formatting
+ *   follow the language switch without threading a locale through every call site.
+ */
+
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
+import { setFormatLocale } from './format';
+
+export type Locale = 'en' | 'zh';
+
+export const LOCALES: Locale[] = ['en', 'zh'];
+
+/** Human label for each locale, shown in the switcher in its own language. */
+export const LOCALE_LABELS: Record<Locale, string> = {
+  en: 'English',
+  zh: '中文',
+};
+
+const STORAGE_KEY = 'agentos.locale';
+
+const en = {
+  // ------------------------------------------------------------------ shell
+  'shell.brandSub': 'console',
+  'shell.notConnected': 'not connected',
+  'shell.working': 'working...',
+  'shell.sessionPrefix': 'session: ',
+  'shell.domainPrefix': 'domain v',
+  'shell.wsPrefix': 'ws ',
+  'shell.noSession': 'no session',
+  'shell.console': 'Console',
+  'shell.offlineBanner':
+    'Not connected to a runtime yet - open Connection and press Connect. Requests on this view will surface their error instead of failing silently.',
+  'shell.dismiss': 'Dismiss',
+  'shell.lastAction': 'last action',
+
+  // ------------------------------------------------------------------ navigation
+  'nav.connection': 'Connection',
+  'nav.connection.hint': 'gateway URL, token, health',
+  'nav.sessions': 'Sessions',
+  'nav.sessions.hint': 'list, create, select',
+  'nav.chat': 'Chat',
+  'nav.chat.hint': 'transcript and goals',
+  'nav.agent': 'Agent state',
+  'nav.agent.hint': 'current run and steps',
+  'nav.graph': 'Task graph',
+  'nav.graph.hint': 'plan DAG by state',
+  'nav.capabilities': 'Capabilities',
+  'nav.capabilities.hint': 'discover and invoke',
+  'nav.topology': 'Topology',
+  'nav.topology.hint': 'workers, actors, sessions',
+  'nav.events': 'Events',
+  'nav.events.hint': 'live log with filters',
+  'nav.settings': 'Settings',
+  'nav.settings.hint': 'meta, models, metrics',
+
+  // ------------------------------------------------------------------ switches
+  'switch.language': 'Language',
+  'switch.language.hint': 'Interface language',
+  'switch.theme': 'Theme',
+  'switch.theme.hint': 'Light, dark or follow the system',
+  'switch.theme.light': 'Light',
+  'switch.theme.dark': 'Dark',
+  'switch.theme.system': 'System',
+
+  // ------------------------------------------------------------------ shared components
+  'common.loading': 'loading...',
+  'common.noData': 'no data',
+  'common.retry': 'Retry',
+  'common.retryable': 'retryable',
+  'common.details': 'details',
+  'common.refresh': 'Refresh',
+  'common.reload': 'Reload',
+  'common.cancel': 'Cancel',
+  'common.close': 'Close',
+  'common.create': 'Create',
+  'common.save': 'Save',
+  'common.delete': 'Delete',
+  'common.copy': 'Copy',
+  'common.copied': 'Copied',
+  'common.clear': 'Clear',
+  'common.search': 'Search',
+  'common.filter': 'Filter',
+  'common.pause': 'Pause',
+  'common.resume': 'Resume',
+  'common.all': 'All',
+  'common.none': 'None',
+  'common.yes': 'yes',
+  'common.no': 'no',
+  'common.unknown': 'unknown',
+  'common.id': 'id',
+  'common.name': 'name',
+  'common.state': 'state',
+  'common.kind': 'kind',
+  'common.version': 'version',
+  'common.description': 'description',
+  'common.session': 'session',
+  'common.worker': 'worker',
+  'common.actor': 'actor',
+  'common.capability': 'capability',
+  'common.task': 'task',
+  'common.event': 'event',
+  'common.model': 'model',
+  'common.duration': 'duration',
+  'common.attempts': 'attempts',
+  'common.created': 'created',
+  'common.updated': 'updated',
+  'common.actions': 'actions',
+  'common.total': 'total',
+  'common.count': 'count',
+  'common.show': 'show',
+  'common.hide': 'hide',
+  'common.refreshing': 'Refreshing...',
+  'common.creating': 'Creating...',
+  'common.reloading': 'Reloading...',
+  'common.send': 'Send',
+  'common.rawJson': 'raw JSON',
+  'common.pickSession': 'Pick a session first',
+  'common.goToSessions': 'Go to Sessions',
+  'common.goToChat': 'Go to Chat',
+
+  // ------------------------------------------------------------------ socket and API diagnostics
+  'ws.closedWithCode': 'closed with code {code}',
+  'ws.closedByClient': 'closed by the client',
+  'ws.autoReconnectOff': 'auto-reconnect is off',
+  'ws.retrying': 'retrying in {delay} ms (attempt {n})',
+  'error.noSession': 'select a session first',
+  'error.noSessionOrCreate': 'select or create a session first',
+  'error.noRunInFlight': 'this session has no run in flight',
+  'error.socketNotOpen': 'the event socket is not open',
+  'error.decode': 'the runtime returned a body that is not JSON',
+  'error.network': 'cannot reach the runtime at {url}: {reason}',
+
+  // ------------------------------------------------------------------ connection and socket status
+  'connection.status.online': 'online',
+  'connection.status.connecting': 'connecting',
+  'connection.status.disconnected': 'disconnected',
+  'connection.status.error': 'error',
+  'ws.status.idle': 'idle',
+  'ws.status.connecting': 'connecting',
+  'ws.status.open': 'open',
+  'ws.status.reconnecting': 'reconnecting',
+  'ws.status.closed': 'closed',
+
+  // ------------------------------------------------------------------ severity
+  'severity.debug': 'debug',
+  'severity.info': 'info',
+  'severity.warn': 'warning',
+  'severity.error': 'error',
+
+  // ------------------------------------------------------------------ lifecycle states (mirror core::state)
+  'state.creating': 'creating',
+  'state.active': 'active',
+  'state.idle': 'idle',
+  'state.suspended': 'suspended',
+  'state.closing': 'closing',
+  'state.closed': 'closed',
+  'state.failed': 'failed',
+  'state.spawning': 'spawning',
+  'state.draining': 'draining',
+  'state.migrating': 'migrating',
+  'state.stopped': 'stopped',
+  'state.pending': 'pending',
+  'state.ready': 'ready',
+  'state.running': 'running',
+  'state.retrying': 'retrying',
+  'state.succeeded': 'succeeded',
+  'state.cancelled': 'cancelled',
+  'state.joining': 'joining',
+  'state.offline': 'offline',
+  'state.lost': 'lost',
+  'state.goal': 'goal',
+  'state.planning': 'planning',
+  'state.thinking': 'thinking',
+  'state.acting': 'acting',
+  'state.observing': 'observing',
+  'state.finalizing': 'finalizing',
+  'state.completed': 'completed',
+  'state.checkpointing': 'checkpointing',
+  'state.snapshotting': 'snapshotting',
+  'state.transferring': 'transferring',
+  'state.restoring': 'restoring',
+  'state.replaying': 'replaying',
+  'state.healthy': 'healthy',
+  'state.degraded': 'degraded',
+  'state.unavailable': 'unavailable',
+  'state.unknown': 'unknown',
+
+  // ------------------------------------------------------------------ connection
+  'connection.title': 'Gateway connection',
+  'connection.subtitle': 'Point the console at a runtime, then connect. The token is kept in this browser only.',
+  'connection.baseUrl': 'Runtime base URL',
+  'connection.baseUrlHint': 'Defaults to the origin serving this page; the Vite dev server proxies /v1 to the runtime.',
+  'connection.token': 'Bearer token',
+  'connection.tokenHint': 'Only needed when the runtime has AGENTOS_AUTH_TOKEN set.',
+  'connection.connect': 'Connect',
+  'connection.disconnect': 'Disconnect',
+  'connection.connecting': 'Connecting...',
+  'connection.connectedTo': 'Connected to',
+  'connection.health': 'Health',
+  'connection.meta': 'Runtime metadata',
+  'connection.notConnected': 'Not connected',
+  'connection.storageHint': 'Storage, workspace and limits reported by GET /v1/meta.',
+  'connection.wsHint': 'The event socket carries live updates for every view.',
+  'connection.clearToken': 'Clear stored token',
+  'connection.baseUrlPlaceholder': 'same-origin (e.g. http://127.0.0.1:8788)',
+  'connection.storageNote': 'The token is stored in localStorage under {tokenKey}; the base URL under {baseUrlKey}. Connect calls /healthz, then /v1/meta, then /v1/auth/login when the node requires authentication.',
+  'connection.tokenAccepted': 'token accepted',
+  'connection.openNode': 'open node',
+  'connection.healthHint': 'Liveness probe of the runtime process.',
+  'connection.noResponse': 'No response yet - press Connect.',
+  'connection.metaHint': 'Node identity, backends, limits and the negotiated socket path.',
+
+  // ------------------------------------------------------------------ sessions
+  'sessions.title': 'Sessions',
+  'sessions.subtitle': 'One session is one actor; messages inside a session are strictly ordered.',
+  'sessions.new': 'New session',
+  'sessions.userId': 'User id',
+  'sessions.sessionTitle': 'Title',
+  'sessions.create': 'Create session',
+  'sessions.empty': 'No sessions yet - create one to start talking to the runtime.',
+  'sessions.messages': 'messages',
+  'sessions.state': 'state',
+  'sessions.open': 'Open chat',
+  'sessions.close': 'Close session',
+  'sessions.selected': 'selected',
+  'sessions.count': '{n} session(s)',
+  'sessions.titlePlaceholder': 'investigate flaky deploy',
+  'sessions.userPlaceholder': 'anonymous',
+  'sessions.loading': 'loading sessions...',
+  'sessions.emptyTitle': 'No sessions yet',
+  'sessions.emptyHint': 'Create one above, or start the runtime and refresh. Sessions appear here as soon as the actor is registered.',
+  'sessions.sessionId': 'Session id',
+  'sessions.user': 'User',
+  'sessions.msgs': 'Msgs',
+  'sessions.selectedTitle': 'Selected session runtime',
+  'sessions.selectedHint': 'GET /v1/sessions/{id}/status, embedded in the detail call',
+  'sessions.actorLine': 'actor {actor} - worker {worker} - created {created}',
+  'sessions.unassigned': 'unassigned',
+  'sessions.noRuntime': 'The runtime has no status for this session yet.',
+  'sessions.runtimeLine': '{messages} transcript message(s), {goals} goal(s) handled, {runs} run(s), {graphs} graph(s)',
+  'sessions.run': 'Run',
+  'sessions.noRuns': 'No runs yet - send a goal from the Chat view.',
+
+  // ------------------------------------------------------------------ chat
+  'chat.title': 'Chat',
+  'chat.subtitle': 'The transcript is the session actor state; goals run through the agent loop.',
+  'chat.placeholder': 'Describe a goal, for example: what is 21*2 and then read notes.txt',
+  'chat.send': 'Send goal',
+  'chat.sendAsync': 'Queue without waiting',
+  'chat.wait': 'Wait for completion',
+  'chat.cancel': 'Cancel run',
+  'chat.empty': 'No messages yet.',
+  'chat.you': 'you',
+  'chat.agent': 'agent',
+  'chat.system': 'system',
+  'chat.tool': 'tool',
+  'chat.noSession': 'Select a session first.',
+  'chat.running': 'running...',
+  'chat.answer': 'answer',
+  'chat.steps': 'steps',
+  'chat.titleWithSession': 'Chat - {title}',
+  'chat.summary': '{messages} message(s), {goals} goal(s), {runs} run(s)',
+  'chat.runInFlight': 'run in flight',
+  'chat.emptyHint': 'Send the first goal below to start a run.',
+  'chat.runLabel': 'run {id}',
+  'chat.modelLabel': 'model {model}',
+  'chat.stepsCount': '{n} step(s)',
+  'chat.workingHint': 'working... live events stream in above as the run advances.',
+  'chat.sessionEvents': '{n} session-level event(s)',
+  'chat.sendAndWait': 'Send and wait',
+  'chat.waitLabel': 'wait for completion (blocking POST; off = stream over the socket)',
+  'chat.accepted': 'Goal accepted - streaming the run below.',
+  'chat.resultFinished': 'Run finished: state={state}, steps={steps}',
+  'chat.resultFinishedError': 'Run finished: state={state}, steps={steps}, error={error}',
+
+  // ------------------------------------------------------------------ agent state
+  'agent.title': 'Agent state',
+  'agent.subtitle': 'Goal -> Plan -> Act -> Observe -> Finalize, with the capability observations attached.',
+  'agent.goal': 'Goal',
+  'agent.phase': 'Phase',
+  'agent.model': 'Model',
+  'agent.finalAnswer': 'Final answer',
+  'agent.errorField': 'Error',
+  'agent.steps': 'Steps',
+  'agent.noRun': 'No run recorded for this session yet.',
+  'agent.thought': 'thought',
+  'agent.action': 'action',
+  'agent.observation': 'observation',
+  'agent.stepKind': 'step',
+  'agent.titleWithSession': 'Agent state - {title}',
+  'agent.runChip': 'run {n} - {state}',
+  'agent.stepTimeline': 'Step timeline',
+  'agent.noSteps': 'no step events for this run yet',
+  'agent.seqLabel': 'seq {n}',
+  'agent.attemptLabel': 'attempt {n}',
+  'agent.notFinalised': 'Not finalised yet.',
+  'agent.noError': 'No error recorded.',
+
+  // ------------------------------------------------------------------ task graph
+  'graph.title': 'Task graph',
+  'graph.subtitle': 'Nodes are tasks, edges are dependencies; the scheduler parallelises independent nodes.',
+  'graph.empty': 'No task graph for this session yet - run a goal that needs a capability.',
+  'graph.nodes': 'nodes',
+  'graph.succeeded': 'succeeded',
+  'graph.failed': 'failed',
+  'graph.legend': 'Legend',
+  'graph.resetView': 'Fit view',
+  'graph.nodeDetail': 'Node detail',
+  'graph.titleWithSession': 'Task graph - {title}',
+  'graph.subtitleDetail': 'GET /v1/sessions/{id}/graph plus live task_* events over the socket; the graph is re-read every 5s.',
+  'graph.nodeCount': '{n} node(s)',
+  'graph.emptyHint': 'The agent materialises a graph while it plans a goal. Send one from the Chat view and it will show up here.',
+  'graph.succeededCount': '{n} succeeded',
+  'graph.failedCount': '{n} failed',
+  'graph.updatedAt': 'updated {time}',
+  'graph.nodeAttempts': 'attempt {n}/{max}',
+  'graph.notStarted': 'not started',
+  'graph.result': 'result',
+  'graph.noResult': 'no result yet',
+
+  // ------------------------------------------------------------------ capabilities
+  'capabilities.title': 'Capabilities',
+  'capabilities.subtitle': 'Discovery and direct invocation. Output is validated against the output schema.',
+  'capabilities.search': 'Filter by name',
+  'capabilities.healthyOnly': 'Healthy only',
+  'capabilities.permission': 'permission',
+  'capabilities.tags': 'tags',
+  'capabilities.invoke': 'Invoke',
+  'capabilities.input': 'Input (JSON)',
+  'capabilities.output': 'Output',
+  'capabilities.invalidJson': 'Input must be valid JSON.',
+  'capabilities.empty': 'No capability matches the filter.',
+  'capabilities.schema': 'Schema',
+  'capabilities.inflight': 'inflight',
+  'capabilities.calls': 'calls',
+  'capabilities.searchPlaceholder': 'fs, http, echo...',
+  'capabilities.tagsPlaceholder': 'io,net',
+  'capabilities.loading': 'loading capabilities...',
+  'capabilities.emptyHint': 'Clear the filters, or check that the runtime registered any.',
+  'capabilities.health': 'Health',
+  'capabilities.provider': 'Provider',
+  'capabilities.timeout': 'Timeout',
+  'capabilities.load': 'Load',
+  'capabilities.pure': 'pure',
+  'capabilities.loadDetail': '{inflight} in flight / {calls} calls / {latency} ms avg',
+  'capabilities.invokeHint': 'Pick a capability row, then edit the JSON input and invoke it.',
+  'capabilities.invokePath': 'POST /v1/capabilities/{name}/invoke',
+  'capabilities.invoking': 'Invoking...',
+  'capabilities.noSelection': 'No capability selected.',
+  'capabilities.idempotent': 'Idempotent',
+  'capabilities.noOutput': 'the capability returned no output',
+  'capabilities.invalidJsonDetail': 'Input must be valid JSON: {reason}',
+
+  // ------------------------------------------------------------------ topology
+  'topology.title': 'Topology',
+  'topology.subtitle': 'Placement view: workers host actors, actors back sessions.',
+  'topology.workers': 'Workers',
+  'topology.actors': 'Actors',
+  'topology.cache': 'Directory cache',
+  'topology.cacheHits': 'cache hits',
+  'topology.cacheMisses': 'cache misses',
+  'topology.empty': 'No workers registered yet.',
+  'topology.load': 'load',
+  'topology.pressure': 'pressure',
+  'topology.subtitleDetail': 'GET /v1/workers + /v1/actors + /v1/sessions, refreshed every 5s.',
+  'topology.workerCount': '{n} worker(s)',
+  'topology.actorCount': '{n} live actor(s)',
+  'topology.directoryCount': '{n} directory entr(ies)',
+  'topology.cacheEntries': 'directory cache entries',
+  'topology.hitRate': 'cache hit rate',
+  'topology.emptyHint': 'No workers, actors or sessions reported. Start the runtime and connect, then refresh.',
+  'topology.actorTitle': '{kind} actor',
+  'topology.directoryActorTitle': '{kind} actor (directory)',
+  'topology.generation': 'gen {n}',
+  'topology.mailbox': 'mailbox {depth} - seq {seq}',
+  'topology.workerLoad': 'actors {actors}/{max} - tasks {tasks}',
+  'topology.messageCount': '{n} message(s)',
+  'topology.unknownNode': 'unknown node',
+  'topology.detailTitle': 'Detail - {kind}',
+  'topology.openInChat': 'Open in Chat',
+  'topology.capacityValue': '{actors} actors / {tasks} tasks',
+  'topology.loadValue': '{actors} actors, {tasks} running tasks, cpu {cpu}%, mem {mem}',
+  'topology.staleNode': 'This node exists in the directory but has no live record - the actor is likely stopped.',
+
+  // ------------------------------------------------------------------ events
+  'events.title': 'Events',
+  'events.subtitle': 'One ordered, replayable stream: audit log, UI feed and replay source.',
+  'events.empty': 'No events yet.',
+  'events.pause': 'Pause',
+  'events.resume': 'Resume',
+  'events.clear': 'Clear',
+  'events.filterKind': 'Filter by kind',
+  'events.filterSeverity': 'Minimum severity',
+  'events.count': '{n} event(s)',
+  'events.seq': 'seq',
+  'events.kind': 'kind',
+  'events.time': 'time',
+  'events.message': 'message',
+  'events.payload': 'payload',
+  'events.paused': 'paused',
+  'events.subtitleLive': 'streaming - {source} event(s) buffered; newest first, {limit} rows max',
+  'events.subtitlePaused': 'PAUSED - frozen snapshot; {source} event(s) buffered; newest first, {limit} rows max',
+  'events.ping': 'Ping',
+  'events.reloadHistory': 'Reload history',
+  'events.autoReconnect': 'auto-reconnect the socket',
+  'events.sessionOnly': 'selected session only',
+  'events.searchPlaceholder': 'message, kind or payload text',
+  'events.allKinds': 'all kinds',
+  'events.severity': 'Severity',
+  'events.noMatchTitle': 'No events match',
+  'events.noMatchHint': 'Clear the filters, or send a goal so the runtime emits run/step/task events.',
+  'events.noPayload': 'this event carries no payload',
+
+  // ------------------------------------------------------------------ settings
+  'settings.title': 'Settings',
+  'settings.subtitle': 'Node metadata, model providers, appearance and the raw metrics export.',
+  'settings.appearance': 'Appearance',
+  'settings.appearanceHint': 'Both switches apply immediately and are remembered per browser.',
+  'settings.node': 'Node',
+  'settings.models': 'Model providers',
+  'settings.defaultProvider': 'Default provider',
+  'settings.configured': 'configured',
+  'settings.notConfigured': 'not configured',
+  'settings.metrics': 'Metrics',
+  'settings.metricsHint': 'Prometheus text export from GET /v1/metrics.',
+  'settings.calls': 'calls',
+  'settings.failures': 'failures',
+  'settings.latency': 'avg latency',
+  'settings.tokens': 'tokens',
+  'settings.workspace': 'Workspace root',
+  'settings.limits': 'Limits',
+  'settings.socket': 'Socket',
+  'settings.socketHint': 'One WebSocket carries events out and goal/cancel/snapshot/health commands in.',
+  'settings.reconnect': 'Reconnect',
+  'settings.autoReconnect': 'auto-reconnect (exponential backoff, 500 ms to 8 s). With this off, a dropped socket stays down until you press Reconnect.',
+  'settings.connectionLabel': 'connection',
+  'settings.sameOrigin': 'same-origin',
+  'settings.socketDetail': 'socket detail',
+  'settings.lastFrame': 'last frame',
+  'settings.noFrame': 'nothing received yet',
+  'settings.notConnectedHint': 'Not connected. Open the Connection view and press Connect.',
+  'settings.modelsHint': 'GET /v1/models - provider health and the routing configuration.',
+  'settings.defaultProviderValue': 'default provider: {name}',
+  'settings.noneConfigured': 'none configured',
+  'settings.noProviders': 'No provider has been exercised yet.',
+  'settings.configuredProviders': 'configured providers',
+  'settings.noConfigured': 'The runtime reported no configured provider.',
+  'settings.enabled': 'Enabled',
+  'settings.keyEnv': 'Key env',
+  'settings.missingKey': 'missing key',
+  'settings.metricsCount': 'GET /v1/metrics (Prometheus text) - {n} sample line(s)',
+  'settings.metricsCountAuto': 'GET /v1/metrics (Prometheus text) - {n} sample line(s), refreshing every 5s',
+  'settings.autoRefresh': 'auto-refresh',
+  'settings.noMetrics': 'No metrics yet.',
+  'settings.lastHealth': 'Last /healthz',
+  'settings.lastHealthHint': 'Fetched when the console connected.',
+} as const;
+
+export type MessageKey = keyof typeof en;
+
+const zh: Partial<Record<MessageKey, string>> = {
+  // ------------------------------------------------------------------ shell
+  'shell.brandSub': '控制台',
+  'shell.notConnected': '未连接',
+  'shell.working': '处理中…',
+  'shell.sessionPrefix': '会话：',
+  'shell.domainPrefix': '领域版本 v',
+  'shell.wsPrefix': '事件通道 ',
+  'shell.noSession': '未选择会话',
+  'shell.console': '控制台',
+  'shell.offlineBanner':
+    '尚未连接到运行时——请打开「连接」并点击连接。此视图上的请求会显示错误，而不是静默失败。',
+  'shell.dismiss': '忽略',
+  'shell.lastAction': '上一个操作',
+
+  // ------------------------------------------------------------------ navigation
+  'nav.connection': '连接',
+  'nav.connection.hint': '网关地址、令牌、健康状态',
+  'nav.sessions': '会话',
+  'nav.sessions.hint': '列表、创建、选择',
+  'nav.chat': '对话',
+  'nav.chat.hint': '消息记录与目标',
+  'nav.agent': '智能体状态',
+  'nav.agent.hint': '当前运行与步骤',
+  'nav.graph': '任务图',
+  'nav.graph.hint': '按状态展示计划 DAG',
+  'nav.capabilities': '能力',
+  'nav.capabilities.hint': '发现与调用',
+  'nav.topology': '拓扑',
+  'nav.topology.hint': '工作节点、Actor、会话',
+  'nav.events': '事件',
+  'nav.events.hint': '带过滤的实时日志',
+  'nav.settings': '设置',
+  'nav.settings.hint': '元数据、模型、指标',
+
+  // ------------------------------------------------------------------ switches
+  'switch.language': '语言',
+  'switch.language.hint': '界面语言',
+  'switch.theme': '主题',
+  'switch.theme.hint': '亮色、暗色或跟随系统',
+  'switch.theme.light': '亮色',
+  'switch.theme.dark': '暗色',
+  'switch.theme.system': '跟随系统',
+
+  // ------------------------------------------------------------------ shared components
+  'common.loading': '加载中…',
+  'common.noData': '暂无数据',
+  'common.retry': '重试',
+  'common.retryable': '可重试',
+  'common.details': '详情',
+  'common.refresh': '刷新',
+  'common.reload': '重新加载',
+  'common.cancel': '取消',
+  'common.close': '关闭',
+  'common.create': '创建',
+  'common.save': '保存',
+  'common.delete': '删除',
+  'common.copy': '复制',
+  'common.copied': '已复制',
+  'common.clear': '清空',
+  'common.search': '搜索',
+  'common.filter': '过滤',
+  'common.pause': '暂停',
+  'common.resume': '继续',
+  'common.all': '全部',
+  'common.none': '无',
+  'common.yes': '是',
+  'common.no': '否',
+  'common.unknown': '未知',
+  'common.id': '标识',
+  'common.name': '名称',
+  'common.state': '状态',
+  'common.kind': '类型',
+  'common.version': '版本',
+  'common.description': '描述',
+  'common.session': '会话',
+  'common.worker': '工作节点',
+  'common.actor': 'Actor',
+  'common.capability': '能力',
+  'common.task': '任务',
+  'common.event': '事件',
+  'common.model': '模型',
+  'common.duration': '耗时',
+  'common.attempts': '尝试次数',
+  'common.created': '创建时间',
+  'common.updated': '更新时间',
+  'common.actions': '操作',
+  'common.total': '总计',
+  'common.count': '数量',
+  'common.show': '显示',
+  'common.hide': '隐藏',
+  'common.refreshing': '刷新中…',
+  'common.creating': '创建中…',
+  'common.reloading': '重新加载中…',
+  'common.send': '发送',
+  'common.rawJson': '原始 JSON',
+  'common.pickSession': '请先选择会话',
+  'common.goToSessions': '前往会话',
+  'common.goToChat': '前往对话',
+
+  // ------------------------------------------------------------------ socket and API diagnostics
+  'ws.closedWithCode': '连接已关闭（代码 {code}）',
+  'ws.closedByClient': '已由客户端断开',
+  'ws.autoReconnectOff': '自动重连已关闭',
+  'ws.retrying': '{delay} 毫秒后重试（第 {n} 次）',
+  'error.noSession': '请先选择一个会话',
+  'error.noSessionOrCreate': '请先选择或创建一个会话',
+  'error.noRunInFlight': '该会话当前没有运行中的任务',
+  'error.socketNotOpen': '事件通道尚未连接',
+  'error.decode': '运行时返回了非 JSON 响应体',
+  'error.network': '无法连接到运行时 {url}：{reason}',
+
+  // ------------------------------------------------------------------ connection and socket status
+  'connection.status.online': '在线',
+  'connection.status.connecting': '连接中',
+  'connection.status.disconnected': '未连接',
+  'connection.status.error': '错误',
+  'ws.status.idle': '空闲',
+  'ws.status.connecting': '连接中',
+  'ws.status.open': '已连接',
+  'ws.status.reconnecting': '重连中',
+  'ws.status.closed': '已关闭',
+
+  // ------------------------------------------------------------------ severity
+  'severity.debug': '调试',
+  'severity.info': '信息',
+  'severity.warn': '警告',
+  'severity.error': '错误',
+
+  // ------------------------------------------------------------------ lifecycle states
+  'state.creating': '创建中',
+  'state.active': '活跃',
+  'state.idle': '空闲',
+  'state.suspended': '已挂起',
+  'state.closing': '关闭中',
+  'state.closed': '已关闭',
+  'state.failed': '失败',
+  'state.spawning': '启动中',
+  'state.draining': '排空中',
+  'state.migrating': '迁移中',
+  'state.stopped': '已停止',
+  'state.pending': '待调度',
+  'state.ready': '就绪',
+  'state.running': '运行中',
+  'state.retrying': '重试中',
+  'state.succeeded': '成功',
+  'state.cancelled': '已取消',
+  'state.joining': '加入中',
+  'state.offline': '离线',
+  'state.lost': '失联',
+  'state.goal': '目标',
+  'state.planning': '规划',
+  'state.thinking': '思考',
+  'state.acting': '行动',
+  'state.observing': '观察',
+  'state.finalizing': '总结',
+  'state.completed': '已完成',
+  'state.checkpointing': '生成检查点',
+  'state.snapshotting': '生成快照',
+  'state.transferring': '传输中',
+  'state.restoring': '恢复中',
+  'state.replaying': '回放中',
+  'state.healthy': '健康',
+  'state.degraded': '降级',
+  'state.unavailable': '不可用',
+  'state.unknown': '未知',
+
+  // ------------------------------------------------------------------ connection
+  'connection.title': '网关连接',
+  'connection.subtitle': '把控制台指向一个运行时，然后连接。令牌只保存在本浏览器。',
+  'connection.baseUrl': '运行时地址',
+  'connection.baseUrlHint': '默认使用当前页面的源；Vite 开发服务器会把 /v1 代理到运行时。',
+  'connection.token': 'Bearer 令牌',
+  'connection.tokenHint': '仅当运行时设置了 AGENTOS_AUTH_TOKEN 时才需要。',
+  'connection.connect': '连接',
+  'connection.disconnect': '断开',
+  'connection.connecting': '连接中…',
+  'connection.connectedTo': '已连接到',
+  'connection.health': '健康检查',
+  'connection.meta': '运行时元数据',
+  'connection.notConnected': '未连接',
+  'connection.storageHint': 'GET /v1/meta 返回的存储、工作区与限额。',
+  'connection.wsHint': '事件通道为所有视图推送实时更新。',
+  'connection.clearToken': '清除已保存令牌',
+  'connection.baseUrlPlaceholder': '同源（例如 http://127.0.0.1:8788）',
+  'connection.storageNote': '令牌保存在 localStorage 的 {tokenKey} 下，地址保存在 {baseUrlKey} 下。连接会依次调用 /healthz、/v1/meta，并在节点要求认证时调用 /v1/auth/login。',
+  'connection.tokenAccepted': '令牌已接受',
+  'connection.openNode': '开放节点',
+  'connection.healthHint': '运行时进程的存活探针。',
+  'connection.noResponse': '暂无响应——请点击「连接」。',
+  'connection.metaHint': '节点标识、后端、限额以及协商后的事件通道路径。',
+
+  // ------------------------------------------------------------------ sessions
+  'sessions.title': '会话',
+  'sessions.subtitle': '一个会话就是一个 Actor；会话内消息严格有序。',
+  'sessions.new': '新建会话',
+  'sessions.userId': '用户标识',
+  'sessions.sessionTitle': '标题',
+  'sessions.create': '创建会话',
+  'sessions.empty': '还没有会话——创建一个即可开始与运行时对话。',
+  'sessions.messages': '消息数',
+  'sessions.state': '状态',
+  'sessions.open': '打开对话',
+  'sessions.close': '关闭会话',
+  'sessions.selected': '已选中',
+  'sessions.count': '{n} 个会话',
+  'sessions.titlePlaceholder': '排查不稳定的发布',
+  'sessions.userPlaceholder': '匿名',
+  'sessions.loading': '正在加载会话…',
+  'sessions.emptyTitle': '还没有会话',
+  'sessions.emptyHint': '请在上方创建，或启动运行时后刷新。Actor 注册完成后会话会立即出现在这里。',
+  'sessions.sessionId': '会话标识',
+  'sessions.user': '用户',
+  'sessions.msgs': '消息',
+  'sessions.selectedTitle': '已选会话的运行时状态',
+  'sessions.selectedHint': 'GET /v1/sessions/{id}/status，随详情请求一并返回',
+  'sessions.actorLine': 'Actor {actor} - 工作节点 {worker} - 创建于 {created}',
+  'sessions.unassigned': '未分配',
+  'sessions.noRuntime': '运行时尚未返回该会话的状态。',
+  'sessions.runtimeLine': '{messages} 条消息记录，已处理 {goals} 个目标，{runs} 次运行，{graphs} 个任务图',
+  'sessions.run': '运行',
+  'sessions.noRuns': '尚无运行——请在「对话」中发送一个目标。',
+
+  // ------------------------------------------------------------------ chat
+  'chat.title': '对话',
+  'chat.subtitle': '消息记录即会话 Actor 的状态；目标会经智能体循环执行。',
+  'chat.placeholder': '描述一个目标，例如：21*2 等于多少，然后读取 notes.txt',
+  'chat.send': '发送目标',
+  'chat.sendAsync': '入队不等待',
+  'chat.wait': '等待执行完成',
+  'chat.cancel': '取消本次运行',
+  'chat.empty': '暂无消息。',
+  'chat.you': '你',
+  'chat.agent': '智能体',
+  'chat.system': '系统',
+  'chat.tool': '工具',
+  'chat.noSession': '请先选择一个会话。',
+  'chat.running': '运行中…',
+  'chat.answer': '回答',
+  'chat.steps': '步骤',
+  'chat.titleWithSession': '对话 - {title}',
+  'chat.summary': '{messages} 条消息，{goals} 个目标，{runs} 次运行',
+  'chat.runInFlight': '运行进行中',
+  'chat.emptyHint': '在下方发送第一个目标即可开始运行。',
+  'chat.runLabel': '运行 {id}',
+  'chat.modelLabel': '模型 {model}',
+  'chat.stepsCount': '{n} 个步骤',
+  'chat.workingHint': '处理中……随着运行推进，实时事件会显示在上方。',
+  'chat.sessionEvents': '{n} 条会话级事件',
+  'chat.sendAndWait': '发送并等待',
+  'chat.waitLabel': '等待执行完成（阻塞式 POST；关闭则通过事件通道流式返回）',
+  'chat.accepted': '目标已接受——运行过程将在下方流式显示。',
+  'chat.resultFinished': '运行结束：状态={state}，步骤={steps}',
+  'chat.resultFinishedError': '运行结束：状态={state}，步骤={steps}，错误={error}',
+
+  // ------------------------------------------------------------------ agent state
+  'agent.title': '智能体状态',
+  'agent.subtitle': '目标 → 规划 → 行动 → 观察 → 总结，并附带能力调用观察结果。',
+  'agent.goal': '目标',
+  'agent.phase': '阶段',
+  'agent.model': '模型',
+  'agent.finalAnswer': '最终回答',
+  'agent.errorField': '错误',
+  'agent.steps': '步骤',
+  'agent.noRun': '该会话尚无运行记录。',
+  'agent.thought': '思考',
+  'agent.action': '动作',
+  'agent.observation': '观察',
+  'agent.stepKind': '步骤',
+  'agent.titleWithSession': '智能体状态 - {title}',
+  'agent.runChip': '运行 {n} - {state}',
+  'agent.stepTimeline': '步骤时间线',
+  'agent.noSteps': '该运行尚无步骤事件',
+  'agent.seqLabel': '序号 {n}',
+  'agent.attemptLabel': '第 {n} 次尝试',
+  'agent.notFinalised': '尚未生成最终回答。',
+  'agent.noError': '未记录错误。',
+
+  // ------------------------------------------------------------------ task graph
+  'graph.title': '任务图',
+  'graph.subtitle': '节点是任务，边是依赖；调度器会并行执行互不依赖的节点。',
+  'graph.empty': '该会话暂无任务图——运行一个需要调用能力的目标即可。',
+  'graph.nodes': '节点',
+  'graph.succeeded': '成功',
+  'graph.failed': '失败',
+  'graph.legend': '图例',
+  'graph.resetView': '适应视图',
+  'graph.nodeDetail': '节点详情',
+  'graph.titleWithSession': '任务图 - {title}',
+  'graph.subtitleDetail': 'GET /v1/sessions/{id}/graph，并叠加事件通道上的 task_* 实时事件；任务图每 5 秒重新读取。',
+  'graph.nodeCount': '{n} 个节点',
+  'graph.emptyHint': '智能体在规划目标时会生成任务图。在「对话」中发送一个目标后即可在此查看。',
+  'graph.succeededCount': '{n} 个成功',
+  'graph.failedCount': '{n} 个失败',
+  'graph.updatedAt': '更新于 {time}',
+  'graph.nodeAttempts': '第 {n}/{max} 次尝试',
+  'graph.notStarted': '未开始',
+  'graph.result': '结果',
+  'graph.noResult': '暂无结果',
+
+  // ------------------------------------------------------------------ capabilities
+  'capabilities.title': '能力',
+  'capabilities.subtitle': '能力发现与直接调用；输出会按输出 Schema 校验。',
+  'capabilities.search': '按名称过滤',
+  'capabilities.healthyOnly': '仅健康',
+  'capabilities.permission': '权限',
+  'capabilities.tags': '标签',
+  'capabilities.invoke': '调用',
+  'capabilities.input': '输入（JSON）',
+  'capabilities.output': '输出',
+  'capabilities.invalidJson': '输入必须是合法 JSON。',
+  'capabilities.empty': '没有符合过滤条件的能力。',
+  'capabilities.schema': 'Schema',
+  'capabilities.inflight': '在途',
+  'capabilities.calls': '调用次数',
+  'capabilities.searchPlaceholder': 'fs、http、echo…',
+  'capabilities.tagsPlaceholder': 'io,net',
+  'capabilities.loading': '正在加载能力…',
+  'capabilities.emptyHint': '请清除过滤条件，或确认运行时已注册能力。',
+  'capabilities.health': '健康',
+  'capabilities.provider': '提供方',
+  'capabilities.timeout': '超时',
+  'capabilities.load': '负载',
+  'capabilities.pure': '无需权限',
+  'capabilities.loadDetail': '{inflight} 个在途 / {calls} 次调用 / 平均 {latency} ms',
+  'capabilities.invokeHint': '请选择一行能力，然后编辑 JSON 输入并调用。',
+  'capabilities.invokePath': 'POST /v1/capabilities/{name}/invoke',
+  'capabilities.invoking': '调用中…',
+  'capabilities.noSelection': '未选择能力。',
+  'capabilities.idempotent': '幂等',
+  'capabilities.noOutput': '该能力没有返回输出',
+  'capabilities.invalidJsonDetail': '输入必须是合法 JSON：{reason}',
+
+  // ------------------------------------------------------------------ topology
+  'topology.title': '拓扑',
+  'topology.subtitle': '调度视图：工作节点承载 Actor，Actor 支撑会话。',
+  'topology.workers': '工作节点',
+  'topology.actors': 'Actor',
+  'topology.cache': '目录缓存',
+  'topology.cacheHits': '缓存命中',
+  'topology.cacheMisses': '缓存未命中',
+  'topology.empty': '尚未注册任何工作节点。',
+  'topology.load': '负载',
+  'topology.pressure': '压力',
+  'topology.subtitleDetail': 'GET /v1/workers + /v1/actors + /v1/sessions，每 5 秒刷新。',
+  'topology.workerCount': '{n} 个工作节点',
+  'topology.actorCount': '{n} 个在线 Actor',
+  'topology.directoryCount': '{n} 条目录记录',
+  'topology.cacheEntries': '目录缓存条目',
+  'topology.hitRate': '缓存命中率',
+  'topology.emptyHint': '没有工作节点、Actor 或会话。请启动运行时并连接后刷新。',
+  'topology.actorTitle': '{kind} Actor',
+  'topology.directoryActorTitle': '{kind} Actor（目录）',
+  'topology.generation': '代数 {n}',
+  'topology.mailbox': '信箱 {depth} - 序号 {seq}',
+  'topology.workerLoad': 'Actor {actors}/{max} - 任务 {tasks}',
+  'topology.messageCount': '{n} 条消息',
+  'topology.unknownNode': '未知节点',
+  'topology.detailTitle': '详情 - {kind}',
+  'topology.openInChat': '在对话中打开',
+  'topology.capacityValue': '{actors} 个 Actor / {tasks} 个任务',
+  'topology.loadValue': '{actors} 个 Actor，{tasks} 个运行中的任务，CPU {cpu}%，内存 {mem}',
+  'topology.staleNode': '该节点存在于目录中但没有实时记录——对应的 Actor 很可能已停止。',
+
+  // ------------------------------------------------------------------ events
+  'events.title': '事件',
+  'events.subtitle': '唯一有序、可回放的流：既是审计日志，也是界面推送与回放来源。',
+  'events.empty': '暂无事件。',
+  'events.pause': '暂停',
+  'events.resume': '继续',
+  'events.clear': '清空',
+  'events.filterKind': '按类型过滤',
+  'events.filterSeverity': '最低级别',
+  'events.count': '{n} 条事件',
+  'events.seq': '序号',
+  'events.kind': '类型',
+  'events.time': '时间',
+  'events.message': '内容',
+  'events.payload': '载荷',
+  'events.paused': '已暂停',
+  'events.subtitleLive': '流式接收中 - 已缓冲 {source} 条事件；最新的在前，最多 {limit} 行',
+  'events.subtitlePaused': '已暂停 - 显示冻结快照；已缓冲 {source} 条事件；最新的在前，最多 {limit} 行',
+  'events.ping': 'Ping',
+  'events.reloadHistory': '重新加载历史',
+  'events.autoReconnect': '自动重连事件通道',
+  'events.sessionOnly': '仅所选会话',
+  'events.searchPlaceholder': '消息、类型或载荷文本',
+  'events.allKinds': '全部类型',
+  'events.severity': '级别',
+  'events.noMatchTitle': '没有匹配的事件',
+  'events.noMatchHint': '请清除过滤条件，或发送一个目标，让运行时产生 run/step/task 事件。',
+  'events.noPayload': '该事件没有载荷',
+
+  // ------------------------------------------------------------------ settings
+  'settings.title': '设置',
+  'settings.subtitle': '节点元数据、模型提供方、外观设置与原始指标导出。',
+  'settings.appearance': '外观',
+  'settings.appearanceHint': '两个开关立即生效，并按浏览器记忆。',
+  'settings.node': '节点',
+  'settings.models': '模型提供方',
+  'settings.defaultProvider': '默认提供方',
+  'settings.configured': '已配置',
+  'settings.notConfigured': '未配置',
+  'settings.metrics': '指标',
+  'settings.metricsHint': '来自 GET /v1/metrics 的 Prometheus 文本导出。',
+  'settings.calls': '调用次数',
+  'settings.failures': '失败次数',
+  'settings.latency': '平均延迟',
+  'settings.tokens': '令牌数',
+  'settings.workspace': '工作区根目录',
+  'settings.limits': '限额',
+  'settings.socket': '事件通道',
+  'settings.socketHint': '同一个 WebSocket 向外推送事件，向内接收 goal/cancel/snapshot/health 命令。',
+  'settings.reconnect': '重连',
+  'settings.autoReconnect': '自动重连（指数退避，500 毫秒至 8 秒）。关闭后，连接断开将保持断开，直到点击「重连」。',
+  'settings.connectionLabel': '连接状态',
+  'settings.sameOrigin': '同源',
+  'settings.socketDetail': '通道详情',
+  'settings.lastFrame': '最近一帧',
+  'settings.noFrame': '尚未收到数据',
+  'settings.notConnectedHint': '尚未连接。请打开「连接」视图并点击「连接」。',
+  'settings.modelsHint': 'GET /v1/models - 提供方健康状态与路由配置。',
+  'settings.defaultProviderValue': '默认提供方：{name}',
+  'settings.noneConfigured': '未配置',
+  'settings.noProviders': '尚未调用过任何提供方。',
+  'settings.configuredProviders': '已配置的提供方',
+  'settings.noConfigured': '运行时未报告任何已配置的提供方。',
+  'settings.enabled': '启用',
+  'settings.keyEnv': '密钥环境变量',
+  'settings.missingKey': '缺少密钥',
+  'settings.metricsCount': 'GET /v1/metrics（Prometheus 文本）- {n} 行样本',
+  'settings.metricsCountAuto': 'GET /v1/metrics（Prometheus 文本）- {n} 行样本，每 5 秒刷新',
+  'settings.autoRefresh': '自动刷新',
+  'settings.noMetrics': '暂无指标。',
+  'settings.lastHealth': '最近一次 /healthz',
+  'settings.lastHealthHint': '控制台连接时获取。',
+};
+
+const DICTIONARIES: Record<Locale, Partial<Record<MessageKey, string>>> = { en, zh };
+
+export type MessageParams = Record<string, string | number>;
+
+/** Replace {name} placeholders. Unknown placeholders are left untouched on purpose. */
+function interpolate(template: string, params?: MessageParams): string {
+  if (params === undefined) return template;
+  return template.replace(/\{(\w+)\}/g, (match, name: string) => {
+    const value = params[name];
+    return value === undefined ? match : String(value);
+  });
+}
+
+/**
+ * Locale mirror for non-React modules (the socket client, the API client, the store).
+ * I18nProvider keeps it in sync with the React state, exactly like setFormatLocale for dates.
+ */
+let moduleLocale: Locale = 'en';
+
+export function setModuleLocale(next: Locale): void {
+  moduleLocale = next;
+}
+
+/** Translate outside React. Prefer useI18n() inside components so re-renders are automatic. */
+export function tGlobal(key: MessageKey | (string & {}), params?: MessageParams): string {
+  return translate(moduleLocale, key, params);
+}
+
+export function translate(locale: Locale, key: MessageKey | (string & {}), params?: MessageParams): string {
+  const table = DICTIONARIES[locale];
+  const text = table[key as MessageKey] ?? en[key as MessageKey] ?? key;
+  return interpolate(text, params);
+}
+
+export interface I18nValue {
+  locale: Locale;
+  setLocale: (next: Locale) => void;
+  /** Translate a key. Falls back to English, then to the key itself. */
+  t: (key: MessageKey | (string & {}), params?: MessageParams) => string;
+  /**
+   * Translate a lifecycle state coming from the runtime ("running", "migrating", ...).
+   * Unknown values are returned verbatim, so a new backend state is never blank.
+   */
+  tState: (value: string) => string;
+  /** Translate an event severity ("info", "warn", ...), same fallback rule. */
+  tSeverity: (value: string) => string;
+}
+
+const I18nContext = createContext<I18nValue | null>(null);
+
+function detectLocale(): Locale {
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (stored === 'en' || stored === 'zh') return stored;
+  } catch {
+    // Ignore storage failures and fall through to the browser preference.
+  }
+  const candidates = [navigator.language, ...(navigator.languages ?? [])];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.toLowerCase().startsWith('zh')) return 'zh';
+  }
+  return 'en';
+}
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [locale, setLocaleState] = useState<Locale>(() => detectLocale());
+
+  useEffect(() => {
+    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
+    setFormatLocale(locale === 'zh' ? 'zh-CN' : 'en-US');
+    setModuleLocale(locale);
+  }, [locale]);
+
+  const setLocale = useCallback((next: Locale) => {
+    setLocaleState(next);
+    try {
+      window.localStorage.setItem(STORAGE_KEY, next);
+    } catch {
+      // Preference is best-effort.
+    }
+  }, []);
+
+  const t = useCallback(
+    (key: MessageKey | (string & {}), params?: MessageParams) => translate(locale, key, params),
+    [locale],
+  );
+
+  const tState = useCallback(
+    (value: string) => translateIdentifier(locale, 'state', value),
+    [locale],
+  );
+  const tSeverity = useCallback(
+    (value: string) => translateIdentifier(locale, 'severity', value),
+    [locale],
+  );
+
+  const value = useMemo<I18nValue>(
+    () => ({ locale, setLocale, t, tState, tSeverity }),
+    [locale, setLocale, t, tState, tSeverity],
+  );
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+export function useI18n(): I18nValue {
+  const value = useContext(I18nContext);
+  if (value === null) throw new Error('useI18n() must be used inside <I18nProvider>');
+  return value;
+}
+
+/** * Translate a runtime identifier (state, severity, connection status) without importing the
+ * hook, for pure helpers. Falls back to the raw identifier so a new backend value is never blank.
+ */
+export function translateIdentifier(locale: Locale, namespace: string, identifier: string): string {
+  const key = namespace + '.' + identifier;
+  const table = DICTIONARIES[locale];
+  return table[key as MessageKey] ?? en[key as MessageKey] ?? identifier;
+}

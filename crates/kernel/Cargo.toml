@@ -1,0 +1,27 @@
+[package]
+name = "agentos-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+agentos-storage.workspace = true
+agentos-event-bus.workspace = true
+agentos-actor-runtime.workspace = true
+agentos-agent-runtime.workspace = true
+agentos-task-scheduler.workspace = true
+agentos-capability-runtime.workspace = true
+agentos-model-router.workspace = true
+agentos-control-plane.workspace = true
+agentos-wasm-runtime.workspace = true
+agentos-network.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+futures.workspace = true
+uuid.workspace = true

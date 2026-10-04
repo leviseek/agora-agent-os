@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package agentos.v1;
+
+// Shared wire types.
+//
+// Design decision: domain payloads travel as opaque JSON strings. The runtime domain model
+// evolves much faster than a transport contract should, and JSON keeps the .proto files stable
+// across those changes. Structured fields are used only where routing depends on them.
+
+message Empty {}
+
+message Ack {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message ErrorInfo {
+  // Machine readable kind: invalid_input, not_found, policy_denied, timeout, cancelled, ...
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  map<string, string> details = 4;
+}
+
+// JSON payload carried as text so any domain type can cross the wire unchanged.
+message JsonPayload {
+  string json = 1;
+}
+
+message SessionIdRequest {
+  string session_id = 1;
+}
+
+// Correlation identifiers propagated across nodes.
+message Correlation {
+  string request_id = 1;
+  string trace_id = 2;
+  string session_id = 3;
+  string actor_id = 4;
+  string task_id = 5;
+}

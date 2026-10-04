@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package agentos.v1;
+
+import "agentos/v1/common.proto";
+
+// Agent-facing RPC. Used by the CLI, by the TypeScript control server and by peer nodes that
+// want to drive a remote runtime.
+service AgentService {
+  rpc CreateSession(CreateSessionRequest) returns (SessionReply);
+  rpc ListSessions(Empty) returns (JsonPayload);
+  rpc CloseSession(SessionIdRequest) returns (Ack);
+  rpc GetSession(SessionIdRequest) returns (JsonPayload);
+
+  rpc PostGoal(PostGoalRequest) returns (JsonPayload);
+  rpc Cancel(SessionIdRequest) returns (Ack);
+
+  rpc Snapshot(SessionIdRequest) returns (JsonPayload);
+  rpc Restore(JsonPayload) returns (SessionReply);
+  rpc Migrate(MigrateRequest) returns (JsonPayload);
+
+  rpc ListEvents(EventQuery) returns (JsonPayload);
+  rpc Health(Empty) returns (JsonPayload);
+}
+
+message CreateSessionRequest {
+  string user_id = 1;
+  string title = 2;
+}
+
+message SessionReply {
+  string session_id = 1;
+  string actor_id = 2;
+  string state = 3;
+  ErrorInfo error = 4;
+}
+
+message PostGoalRequest {
+  string session_id = 1;
+  string goal = 2;
+  bool wait = 3;
+  Correlation correlation = 4;
+}
+
+message MigrateRequest {
+  string session_id = 1;
+  // Empty means "let the placement service choose".
+  string target_worker = 2;
+}
+
+message EventQuery {
+  string session_id = 1;
+  uint32 limit = 2;
+  uint64 after_seq = 3;
+  repeated string kinds = 4;
+}

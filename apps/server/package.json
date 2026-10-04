@@ -1,0 +1,24 @@
+{
+  "name": "@agentos/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript control server: runtime proxy, WebSocket fan-out and agent orchestration",
+  "scripts": {
+    "dev": "node --watch src/index.ts",
+    "start": "node src/index.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0",
+    "@types/ws": "^8.5.13"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

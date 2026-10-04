@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package agentos.v1;
+
+import "agentos/v1/common.proto";
+
+// Remote capability invocation. This is the RPC path used when a capability lives on another
+// worker or behind an external service; the caller still sees one Capability interface.
+service CapabilityService {
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+  rpc List(ListCapabilitiesRequest) returns (ListCapabilitiesResponse);
+  rpc Health(Empty) returns (JsonPayload);
+}
+
+message InvokeRequest {
+  string capability = 1;
+  // Loose version requirement: "1", "1.2", "1.2.3" or "*".
+  string version = 2;
+  string input_json = 3;
+  string session_id = 4;
+  string actor_id = 5;
+  string task_id = 6;
+  Correlation correlation = 7;
+  uint64 timeout_ms = 8;
+}
+
+message InvokeResponse {
+  string output_json = 1;
+  uint64 duration_ms = 2;
+  uint32 attempts = 3;
+  string provider = 4;
+  ErrorInfo error = 5;
+}
+
+message ListCapabilitiesRequest {
+  string name_contains = 1;
+  repeated string tags = 2;
+  bool healthy_only = 3;
+}
+
+message CapabilityInfo {
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  string kind = 5;
+  repeated string tags = 6;
+  string input_schema_json = 7;
+  string output_schema_json = 8;
+  string permission = 9;
+  string health = 10;
+  uint32 inflight = 11;
+  uint64 total_calls = 12;
+}
+
+message ListCapabilitiesResponse {
+  repeated CapabilityInfo capabilities = 1;
+}

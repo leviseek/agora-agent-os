@@ -1,0 +1,15 @@
+[package]
+name = "agentos-event-bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+agentos-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true

@@ -1,0 +1,8 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# esbuild (a Vite dependency) has a postinstall step that installs its platform binary.
+# pnpm blocks lifecycle scripts by default; this is the explicit allow-list for this workspace.
+allowBuilds:
+  esbuild: true

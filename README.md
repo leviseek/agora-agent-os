@@ -1,0 +1,400 @@
+# Agent OS - Distributed Agent Runtime
+
+A runnable **Agent Operating System** skeleton: session actors, an agent loop, a capability mesh,
+a task scheduler, durable state, an event log, artifacts, a model router, a Wasm sandbox, gRPC
+and libp2p transports, a React/Tauri client and a CLI.
+
+> Agent OS = Actor Runtime + Agent Loop + Capability Mesh + Task Scheduler + State/Memory +
+> Artifact System + Model Router + Trust Plane
+
+This is not a multi-agent demo. The point of the codebase is the **boundaries**: Agent != Model,
+Agent != Process, Capability != Worker, control plane != data plane. Replacing a model, adding a
+capability, migrating an actor or deploying a second node must not require rewriting the runtime.
+
+---
+
+## 1. Quick start (four commands)
+
+```bash
+# 1. build everything (Rust workspace)
+cargo build
+
+# 2. run the full acceptance scenario in one process and print a report
+cargo run -p agentos-cli -- demo
+
+# 3. start the runtime (HTTP/WS on :8788, gRPC on :8789)
+cargo run -p agentos-server
+
+# 4. (optional) the TypeScript control server and the web client / desktop shell
+pnpm install
+pnpm dev              # runtime + control server + web dev server
+pnpm desktop          # Tauri 2 desktop shell
+```
+
+No API key is required: the runtime ships a deterministic offline provider, so the whole
+acceptance suite and the demo run with no network. Add `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` /
+`DASHSCOPE_API_KEY` (or point `local` at an Ollama endpoint) to use a real model.
+
+### Verified commands
+
+| command | what it proves |
+|---|---|
+| `cargo test --workspace` | 123 tests across 35 suites: state machines, scheduler, policy, migration, gateway, gRPC, acceptance |
+| `cargo run -p agentos-cli -- demo` | Goal -> LLM -> Capability -> Observation -> Final, two parallel sessions, snapshot/restore, migration |
+| `cargo run -p agentos-cli -- doctor` | configuration, storage, capabilities, provider readiness |
+| `cargo run -p agentos-server` | the one-command runtime: HTTP/WS + gRPC |
+| `pnpm --filter @agentos/web build` | the client compiles (206 modules, ~149 KB gzipped) |
+| language and theme switches | English/中文 and light/dark/system apply instantly, no reload |
+| `pnpm dev` | runtime + TypeScript control server + web dev server in one command |
+| `node apps/server/src/index.ts` | control server proxy, WebSocket fan-out, multi-session orchestration |
+| `cargo check` in `apps/desktop/src-tauri` | the Tauri 2 desktop shell compiles |
+| `agentos --remote <grpc> session create/message` | a CLI on one machine driving a runtime on another |
+| `pwsh -File scripts/test.ps1` | everything above in one shot |
+
+---
+
+## 2. Repository layout
+
+```
+agent-os/
+├── Cargo.toml                     Rust workspace
+├── package.json / pnpm-workspace.yaml
+├── crates/
+│   ├── core/                      IDs, domain model, state machines, errors, config, telemetry
+│   ├── storage/                   Store / BlobStore / ArtifactStore + memory, file, redb backends
+│   ├── event-bus/                 ordered, replayable event stream
+│   ├── actor-runtime/             typed mailboxes, checkpoints, migration pipeline
+│   ├── task-scheduler/            task graph, parallel execution, retry, cancel
+│   ├── capability-runtime/        Capability trait, registry, mesh, policy seam, built-ins,
+│   │                              workspace jail, JSON-Schema validation, remote transport seam
+│   ├── model-router/              ModelProvider trait + DeepSeek/OpenAI/Qwen/local/mock adapters
+│   ├── control-plane/             Actor Directory, Worker Registry, Placement, Policy engine
+│   ├── agent-runtime/             SessionActor, AgentLoop, MemoryStore, SessionManager
+│   ├── wasm-runtime/              Wasmtime sandbox, JSON ABI, host functions, epoch timeouts
+│   ├── network/                   gRPC server/clients (proto/), libp2p node, discovery
+│   ├── kernel/                    COMPOSITION ROOT: wires every plane, gRPC adapters
+│   ├── api/                       HTTP + WebSocket gateway (auth, rate limit, correlation)
+│   ├── cli/                       agentos binary
+│   └── server/                    agentos-server binary
+├── proto/agentos/v1/              common, capability, control, agent service contracts
+├── capabilities/                  built-in docs + wasm examples (echo.wat, spin.wat)
+├── apps/
+│   ├── web/                       React + TypeScript + React Flow client
+│   ├── desktop/                   Tauri 2 shell around the same client
+│   └── server/                    Node control server: proxy, WS fan-out, TS orchestration
+├── scripts/                       dev.mjs, demo.ps1, test.ps1
+├── tests/                         cross-crate acceptance and gateway test suites
+└── docs/                          architecture, migration, decisions, api
+```
+
+`crates/kernel` is the one addition to the suggested layout: a composition root. Without it, either
+the gateway or the binary would have to know every concrete backend, which is exactly the coupling
+this design avoids. See `docs/decisions.md` D1.
+
+---
+
+## 3. Architecture in one page
+
+```
+Gateway (crates/api)          auth - rate limit - request id - session routing - WS fanout
+        |
+Control Plane (crates/control-plane)     Placement - Actor Directory - Workers - Policy
+        |                                 consulted ONLY on cache miss / migration / recovery
+Agent Runtime (crates/agent-runtime)      SessionManager -> SessionActor -> AgentLoop
+        |                                     Goal -> Plan -> Act -> Observe -> Finalize
+   +----+----------------+------------------+
+   |                     |                  |
+Task Scheduler     Capability Mesh     Model Router
+   |                     |                  |
+Data Plane: Actor Runtime - Wasm Sandbox - Workers - P2P - Blobs
+   |
+State: Store (memory|file|redb) - Event Bus - Artifacts - Memory
+```
+
+Details, including the full request path and the failure model: `docs/architecture.md`.
+
+### The entities and their lifecycles
+
+Every entity has its own id type and its own explicit state machine - no booleans model lifecycle
+anywhere in the codebase (`crates/core/src/state.rs`).
+
+| entity | id | states |
+|---|---|---|
+| Session | `ses_*` | creating, active, idle, suspended, closing, closed, failed |
+| Actor | `act_*` | spawning, active, idle, draining, migrating, stopped, failed |
+| Agent run | `agt_*` | goal, planning, thinking, acting, observing, finalizing, succeeded, failed, cancelled |
+| Task | `tsk_*` | pending, ready, running, retrying, succeeded, failed, cancelled |
+| Capability | `cap_*` | health: unknown, healthy, degraded, unavailable |
+| Worker | `wkr_*` | joining, ready, draining, offline, lost |
+| Migration | `ckp_*` | idle, checkpointing, snapshotting, transferring, restoring, replaying, completed, failed |
+| Artifact | `art_*` | immutable |
+| Memory | `mem_*` | versioned by record |
+| Event | `evt_*` | append-only, monotonically sequenced |
+
+---
+
+## 4. Data flow: one goal, end to end
+
+1. `POST /v1/sessions/{id}/messages` hits the gateway: bearer auth (when configured), rate limit,
+   request id, latency metric.
+2. `SessionManager.actor_for` resolves the actor from the in-process registry; on a miss it asks the
+   Actor Directory and, if the actor is gone, recovers it from the latest checkpoint.
+3. The typed message enters the session mailbox: **strictly ordered inside the session**, and
+   sessions never block each other.
+4. `AgentLoop` runs `Goal -> Plan -> Act -> Observe -> Finalize`:
+   * **Plan** asks the Model Router (JSON mode) for a plan of think/capability/respond steps;
+   * **Act** turns the plan into a task graph and runs it through the Scheduler, so independent
+     capability calls execute in parallel with per-node timeout, retry and cancellation;
+   * every capability call goes through the mesh: policy gate, input schema, execution with a
+     timeout, output schema, load accounting, `tool_call`/`tool_result` events;
+   * **Observe** records each outcome as an `AgentStep` with an `Observation`;
+   * **Finalize** asks the router for the final answer and writes an episodic memory record.
+5. The transcript, the run and the task graph are persisted; every transition was already
+   published as an event, so the UI and the audit log are the same stream.
+
+---
+
+## 5. Migration model
+
+```
+Checkpoint -> Snapshot -> Transfer -> Restore -> Replay -> Resume
+```
+
+An actor is data, not a process. `cargo run -p agentos-cli -- session migrate <session-id>` walks
+the whole pipeline, emits an `actor_migrated` event per stage and bumps the actor generation.
+Transfer is an interface (`ActorTransfer`) with a real local implementation and a reserved `fetch`
+for cross-node pulls. Cloning is the same checkpoint with a new identity.
+Full detail: `docs/migration.md`.
+
+---
+
+## 6. Configuration
+
+Precedence: built-in defaults < JSON file < environment. Copy `config/agent-os.example.json` to
+`config/agent-os.json` (or point `AGENTOS_CONFIG` at it) and edit.
+
+**Secrets are never stored**: a provider records only the *name* of the environment variable that
+carries its key, and the key is read at call time.
+
+| variable | meaning |
+|---|---|
+| `AGENTOS_CONFIG` | path to the JSON configuration |
+| `AGENTOS_NODE_NAME`, `AGENTOS_NODE_ID` | node identity in the mesh |
+| `AGENTOS_HTTP_ADDR`, `AGENTOS_GRPC_ADDR`, `AGENTOS_WS_PATH` | listen addresses |
+| `AGENTOS_DATA_DIR`, `AGENTOS_STORE_BACKEND` (`memory`/`file`/`redb`) | storage |
+| `AGENTOS_WORKSPACE_ROOT` | the only directory filesystem capabilities may touch |
+| `AGENTOS_AUTH_TOKEN` | gateway bearer token (unset = open, for local development) |
+| `AGENTOS_ALLOWED_CAPABILITIES`, `AGENTOS_DENIED_CAPABILITIES` | policy lists (comma separated) |
+| `AGENTOS_MODEL_DEFAULT` | default provider |
+| `AGENTOS_MODEL_<NAME>_MODEL` / `_BASE_URL` / `_ENABLED` | per-provider overrides |
+| `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `DASHSCOPE_API_KEY` | provider keys |
+| `AGENTOS_LOG`, `AGENTOS_LOG_FORMAT` (`text`/`json`) | observability |
+| `AGENTOS_P2P_ENABLED`, `AGENTOS_P2P_LISTEN`, `AGENTOS_P2P_BOOTSTRAP` | peer-to-peer discovery |
+
+Policy defaults are deliberately conservative: writes to the workspace, network access and
+process execution are **denied** unless a capability is explicitly allow-listed. Path traversal and
+absolute paths are rejected before any IO happens (`Workspace`).
+
+---
+
+## 7. What is implemented
+
+**Runtime**
+
+* Actor runtime with typed mailboxes, per-actor serialization, panic isolation and supervision
+  hooks; checkpoint, restore, replay, clone and the migration pipeline.
+* Agent loop `Goal -> Plan -> Act -> Observe -> Finalize` with step budget, wall-clock timeout,
+  cancellation and retry.
+* Task graph: DAG validation (dangling deps, cycles), parallel execution with a concurrency
+  window, per-node timeout and attempt budget, failure cascade to dependents.
+* Capability mesh: registration, semantic-free version matching, health and load aware selection,
+  policy gate, JSON-Schema validation in and out, timeouts, retries, remote capability proxy.
+* Built-in capabilities: `echo`, `calculator` (own parser), `clock`, `filesystem-list`,
+  `filesystem-read`, `filesystem-write` - all workspace-jailed and permissioned.
+* Model router with `deepseek`, `openai`, `qwen`, `local` (all OpenAI-compatible) plus a
+  deterministic `mock` provider; failover, per-provider statistics, no secrets in config.
+* Wasm sandbox: Wasmtime engine, module compilation at registration, per-call instantiation,
+  memory and instance limits, epoch-based timeouts, permission-gated host functions, JSON ABI.
+* Control plane: actor directory with a local cache and hit/miss metrics, worker registry with
+  leases, least-pressure placement, policy engine, rebalance suggestions.
+* Data plane: `Store` (memory/file/redb), event bus with durable replay, content-addressed
+  artifact store, memory store, session router.
+
+**Interfaces**
+
+* Gateway: REST + WebSocket, bearer auth, sliding-window rate limiting, request correlation,
+  uniform error taxonomy with HTTP mapping.
+* gRPC: capability, control and agent services defined in Protobuf, with servers, clients and a
+  transport adapter that makes a remote capability indistinguishable from a local one.
+* libp2p (feature `p2p`): mDNS discovery, identify, ping and a gossipsub control channel.
+  Deliberately not on the hot path.
+* CLI: `start`, `doctor`, `demo`, session/task/capability/worker/actor/agent subcommands.
+* Clients: React + React Flow web client (sessions, chat, agent state, task graph, capabilities,
+  topology, events, settings) and a Tauri 2 shell that reuses it.
+* Internationalisation: the console ships **English and Simplified Chinese**, switchable at runtime
+  from the sidebar or Settings; the choice is remembered per browser and seeded from the browser
+  language. Keys are typed from the English table, so a missing translation fails the build, and
+  runtime lifecycle values fall back to their raw identifier.
+* Theming: **light, dark or follow the system**, switchable at runtime. Every colour is a CSS custom
+  property defined once per theme; no component and no CSS rule outside the two palette blocks
+  contains a literal colour, and React Flow's variables are mapped onto the same tokens.
+
+  | light + English | dark + 中文 |
+  |---|---|
+  | ![light console](docs/screenshots/console-light-en.png) | ![dark console](docs/screenshots/console-dark-zh.png) |
+
+  Both images were captured from a real browser (headless Edge over CDP) *after clicking* the
+  switches in the sidebar, which is what proves the change is live rather than a reload.
+* TypeScript layer: typed runtime client, control server with proxy and WS fan-out, and a
+  multi-session orchestration layer.
+
+**Observability**: structured logging with request/trace/session/actor/task correlation, a
+dependency-free metrics registry exported as Prometheus text, and an audit-grade event log.
+
+**Verification evidence** (all commands run in this repository, Windows, Rust 1.95 / Node 24):
+
+* `cargo test --workspace` -> **123 passed, 0 failed** across 35 suites.
+* `cargo build --release -p agentos-server -p agentos-cli` -> finished in 3m03s.
+* `agentos demo` -> two sessions in parallel, a closed Goal -> LLM -> Capability -> Observation ->
+  Final loop per session, snapshot/restore, a completed migration pipeline, 59 events, 2 task graphs.
+* `agentos-server` + HTTP -> `POST /v1/sessions/{id}/messages` returned
+  `state=succeeded steps=6` with `19*3 = 57` in the answer, and `/v1/metrics` exported counters.
+* `agentos --remote http://127.0.0.1:18889 session message <id> "what is 13*13?"` -> `169.0`,
+  proving the CLI -> gRPC -> runtime -> agent loop path.
+* `node apps/server/src/index.ts` + `POST /api/orchestrate` -> two parallel sessions,
+  `11*11 = 121` and `12*12 = 144`, 38 runtime events, 40 ms.
+* `pnpm --filter @agentos/web build` -> 206 modules transformed, 149 KB gzipped;
+  `pnpm -r typecheck` clean; `cargo check` in the Tauri shell clean.
+
+---
+
+## 8. Reserved interfaces (implemented as seams, not as features)
+
+| area | what exists | what is deliberately missing |
+|---|---|---|
+| Cross-node transfer | `ActorTransfer` trait, `LocalTransfer`, per-stage events | a network implementation; `fetch` returns `None` |
+| Placement | least-pressure policy, worker leases, rebalance suggestions | live migration driven by the rebalance output |
+| Trust plane | `CapabilityPolicy`, policy engine, per-capability load counters | capability tokens, DID, reputation scoring, billing |
+| Decentralised storage | `BlobStore` trait | Arweave/Filecoin/Walrus backends |
+| Memory | `MemoryStore` trait, `MemoryRecord.embedding` | a vector index and an embedding provider |
+| Model | `ModelProvider` trait | streaming responses, embeddings, fine-tuned routing |
+| P2P | mDNS, identify, ping, gossipsub control topic | using P2P for anything on the request path |
+| WASI | JSON ABI + host functions | WASI preview 1 filesystem preopens |
+| gRPC `--remote` CLI mode | `session create/list/show/message/cancel/close/events/snapshot/migrate` run against a remote node | `session restore` and the other verb families are in-process only |
+| Approval flow | `PolicyDecision.requires_approval` | an interactive approval UI |
+
+---
+
+## 9. Testing
+
+```bash
+cargo test --workspace          # unit + integration
+cargo test -p agentos-tests     # acceptance and gateway suites
+```
+
+The acceptance suite (`tests/tests/acceptance.rs`) maps one-to-one onto the acceptance list:
+
+| # | test | asserts |
+|---|---|---|
+| 1 | `acceptance_1_two_sessions_are_parallel_but_each_session_is_ordered` | two sessions overlap in wall clock (peak concurrency >= 2), runs inside a session are recorded in arrival order |
+| 2 | `acceptance_2_agent_loop_closes_goal_llm_capability_observation_final` | the answer contains the capability result, `tool_call` events exist, steps include `act` with a successful observation and a `finalize` |
+| 3 | `acceptance_3_task_graph_runs_independent_nodes_in_parallel` | two 300ms nodes finish well under 600ms, both succeed |
+| 4 | `acceptance_4_capability_registry_discovers_and_invokes_examples` | built-ins discoverable and invocable, schema violations rejected |
+| 5 | `acceptance_5_directory_placement_and_worker_heartbeat` | directory entry exists, heartbeat advances the lease, repeat lookups are cache hits |
+| 6 | `acceptance_6_session_actor_snapshot_export_and_restore` | snapshot has a hash, actor stops, restore preserves runs, the restored session keeps working |
+| 7 | `acceptance_7_policy_blocks_traversal_and_unlisted_writes` | traversal and unlisted writes are denied and audited, legitimate reads work |
+| 8 | `acceptance_8_retry_recovers_a_transient_failure` | two failures then success (attempts == 3), permanent failure reported after retries |
+| 9 | `acceptance_9_cancellation_and_step_budget` | a run in flight can be cancelled from outside the mailbox |
+| 10 | `acceptance_10_wasm_capability_runs_in_the_sandbox` | a wasm guest echoes JSON; a spinning guest is stopped by the watchdog |
+
+All of it passes: `cargo test --workspace` reports **123 passed, 0 failed** across 35 suites.
+
+The gRPC suite (`crates/network/tests/grpc_roundtrip.rs`, `tests/tests/grpc.rs`) proves the
+capability service round trip, error mapping over the wire, the transport adapter, and a remote
+client creating a session, running a goal and invoking a capability on a kernel served over gRPC.
+
+The gateway suite (`tests/tests/api.rs`) covers health/meta/error shape, the full session
+lifecycle over HTTP, capability listing/invocation and policy denial over HTTP, workers/actors/
+models/metrics, bearer auth enforcement, rate limiting, and the WebSocket protocol (hello, ping,
+live event streaming, driving a goal over the socket).
+
+Crate-level suites cover the state machines (legal and illegal transitions), the actor runtime
+(ordering, isolation, checkpoint/restore/replay, migration stages, cloning), the scheduler (DAG
+validation, cycles, retries), the capability runtime (workspace jail, calculator parsing,
+permissions, registry discovery), the model router (failover, resolution order, statistics), the
+control plane (directory cache behaviour, placement, worker leases) and storage (durability,
+key hashing, atomic writes, event sequence recovery).
+
+---
+
+## 10. Extension points
+
+**Add a capability** - implement `Capability`, register it, declare its permission. If it mutates
+the host, add it to `policy.allowed_capabilities`; the default policy denies mutation.
+
+**Add a model provider** - implement `ModelProvider` (one method) or, for anything
+OpenAI-compatible, just add a provider entry to the configuration.
+
+**Add an agent** - write an `AgentSpec` (prompt, capability allow-list, step budget) and pass a
+different spec when spawning a session actor. The loop itself needs no change.
+
+**Add a store backend** - implement `Store` (nine methods) and add one arm to `open_store`.
+
+**Add a transport for capabilities** - implement `CapabilityTransport` (one method) and wrap a
+descriptor in `RemoteCapability`. The mesh is unchanged.
+
+**Migrate actors across nodes** - implement `ActorTransfer` over gRPC; the pipeline, the events
+and every caller stay as they are.
+
+**Swap the memory implementation** - implement `MemoryStore`; `MemoryRecord` already reserves an
+embedding field for a vector store.
+
+---
+
+## 11. Known limitations of v1
+
+* Single node: placement, worker leases and migration are real but everything runs in one process.
+  Cross-node transfer is an interface (`docs/migration.md`).
+* The default file store is not a database: no transactions across keys, no compaction. It is
+  durable, inspectable and dependency-free; `redb` and a future SQLite adapter sit behind the
+  same trait.
+* The v1 JSON Schema validator supports the subset the runtime publishes (type, required,
+  properties, additionalProperties, enum, bounds, items). Anything outside the subset is ignored,
+  which is the safe direction.
+* The plan is produced in one shot; there is no incremental re-planning loop yet.
+* Nested agent tasks (`TaskPayload::Agent`) are declared but not executed.
+* The web client polls some views on an interval; only the event log is fully pushed.
+
+---
+
+## 12. Next steps
+
+1. **GrpcTransfer + remote placement**: make `ActorTransfer` real, register remote workers over
+   `ControlService`, and let placement span nodes.
+2. **Streaming models**: extend `ModelProvider` with a streamed response so the UI can render
+   tokens while the loop runs.
+3. **Memory retrieval**: add an embedding provider and a vector index behind `MemoryStore`.
+4. **Approval flow**: surface `requires_approval` to the client, persist decisions, audit them.
+5. **Policy as data**: move the policy rules into the store so they can be edited at runtime and
+   distributed to workers.
+6. **Multi-tenant quotas**: today `user_id` is attribution only; add per-tenant budgets on top of
+   the existing per-provider and per-capability counters.
+7. **Snapshot compaction**: keep the last N checkpoints per actor and stream large states to the
+   blob store.
+8. **P2P capability advertisement**: gossip capability descriptors over the existing control topic
+   so a node can discover remote capabilities without a static registry.
+
+---
+
+## 13. Documentation map
+
+| document | contents |
+|---|---|
+| `docs/architecture.md` | layers, request path, concurrency, failure model |
+| `docs/migration.md` | checkpoint/restore/replay, clone, recovery, transfer seam |
+| `docs/decisions.md` | 14 engineering decisions with rejected alternatives |
+| `docs/api.md` | HTTP, WebSocket, gRPC and CLI reference |
+| `capabilities/README.md` | capability model, wasm ABI, how to add your own |
+| `apps/server/README.md` | control server and TypeScript orchestration |
+| `apps/desktop/README.md` | desktop shell |
+| `apps/web/README.md` | web client |

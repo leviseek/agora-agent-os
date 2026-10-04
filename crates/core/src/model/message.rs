@@ -1,0 +1,80 @@
+use crate::ids::{MessageId, SessionId};
+use crate::time::Timestamp;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl MessageRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        }
+    }
+}
+
+/// Multi-part content so that artifacts and tool results can travel with a message without
+/// inventing a second message type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    Artifact { artifact_id: String, name: String },
+    Json { value: serde_json::Value },
+}
+
+/// A single turn in a session transcript. User input is untrusted: it is stored as data and
+/// never interpreted as instructions by the runtime itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessage {
+    pub id: MessageId,
+    pub session_id: SessionId,
+    pub role: MessageRole,
+    pub parts: Vec<ContentPart>,
+    pub created_at: Timestamp,
+    pub correlation_id: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+impl SessionMessage {
+    pub fn text(session_id: SessionId, role: MessageRole, text: impl Into<String>) -> Self {
+        Self {
+            id: MessageId::new(),
+            session_id,
+            role,
+            parts: vec![ContentPart::Text { text: text.into() }],
+            created_at: crate::now_ms(),
+            correlation_id: None,
+            agent_id: None,
+        }
+    }
+
+    pub fn user(session_id: SessionId, text: impl Into<String>) -> Self {
+        Self::text(session_id, MessageRole::User, text)
+    }
+
+    pub fn assistant(session_id: SessionId, text: impl Into<String>) -> Self {
+        Self::text(session_id, MessageRole::Assistant, text)
+    }
+
+    pub fn plain_text(&self) -> String {
+        let mut out = String::new();
+        for p in &self.parts {
+            match p {
+                ContentPart::Text { text } => out.push_str(text),
+                ContentPart::Artifact { name, .. } => out.push_str(&format!("[artifact {name}]")),
+                ContentPart::Json { value } => out.push_str(&value.to_string()),
+            }
+        }
+        out
+    }
+}

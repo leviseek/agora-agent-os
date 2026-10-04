@@ -1,0 +1,50 @@
+{
+  "name": "wasm-echo",
+  "version": "1.0.0",
+  "description": "Echo JSON through the Wasmtime sandbox (agentos.wasm.v1 ABI)",
+  "kind": "wasm",
+  "module": "echo.wat",
+  "tags": [
+    "wasm",
+    "example",
+    "echo"
+  ],
+  "timeout_ms": 2000,
+  "idempotent": true,
+  "permission": {
+    "fs_read": false,
+    "fs_write": false,
+    "network": false,
+    "process_exec": false,
+    "secret_names": []
+  },
+  "host_policy": {
+    "allow_log": true,
+    "allow_emit": false,
+    "allow_clock": true
+  },
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "text"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "text": {
+        "type": "string",
+        "maxLength": 65536
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "text"
+    ],
+    "properties": {
+      "text": {
+        "type": "string"
+      }
+    }
+  }
+}

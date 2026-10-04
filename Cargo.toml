@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/core",
+  "crates/storage",
+  "crates/event-bus",
+  "crates/actor-runtime",
+  "crates/agent-runtime",
+  "crates/task-scheduler",
+  "crates/capability-runtime",
+  "crates/model-router",
+  "crates/control-plane",
+  "crates/kernel",
+  "crates/wasm-runtime",
+  "crates/network",
+  "crates/api",
+  "crates/cli",
+  "crates/server",
+  "tests",
+]
+exclude = ["apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+# --- internals ---
+agentos-core = { path = "crates/core" }
+agentos-storage = { path = "crates/storage" }
+agentos-event-bus = { path = "crates/event-bus" }
+agentos-actor-runtime = { path = "crates/actor-runtime" }
+agentos-agent-runtime = { path = "crates/agent-runtime" }
+agentos-task-scheduler = { path = "crates/task-scheduler" }
+agentos-capability-runtime = { path = "crates/capability-runtime" }
+agentos-model-router = { path = "crates/model-router" }
+agentos-control-plane = { path = "crates/control-plane" }
+agentos-kernel = { path = "crates/kernel" }
+agentos-wasm-runtime = { path = "crates/wasm-runtime" }
+agentos-network = { path = "crates/network" }
+agentos-api = { path = "crates/api" }
+
+# --- external ---
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+parking_lot = "0.12"
+clap = { version = "4", features = ["derive", "env"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 1

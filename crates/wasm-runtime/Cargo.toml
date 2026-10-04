@@ -1,0 +1,21 @@
+[package]
+name = "agentos-wasm-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+agentos-capability-runtime.workspace = true
+agentos-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+
+[dependencies.wasmtime]
+version = "48"
+features = ["cranelift", "runtime", "wat"]
+default-features = false

@@ -1,0 +1,22 @@
+{
+  "name": "agent-os",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Distributed Agent Runtime / Agent OS - TypeScript workspace",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "pnpm --filter @agentos/web dev",
+    "dev:server": "pnpm --filter @agentos/server dev",
+    "dev:runtime": "cargo run -p agentos-server",
+    "build": "pnpm --filter @agentos/web build",
+    "typecheck": "pnpm -r typecheck",
+    "desktop": "pnpm --filter @agentos/desktop tauri dev",
+    "desktop:build": "pnpm --filter @agentos/desktop tauri build",
+    "runtime:build": "cargo build --release -p agentos-server -p agentos-cli",
+    "test:rust": "cargo test --workspace",
+    "cli": "cargo run -p agentos-cli --"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

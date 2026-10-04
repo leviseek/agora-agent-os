@@ -1,0 +1,28 @@
+{
+  "name": "@agentos/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Agent OS Console - the web client for the Agent OS runtime gateway",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.12.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
+  }
+}

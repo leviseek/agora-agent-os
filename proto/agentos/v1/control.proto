@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package agentos.v1;
+
+import "agentos/v1/common.proto";
+
+// Control plane RPC: worker membership, actor directory and placement.
+//
+// Note the deliberate asymmetry with the data plane: these calls are rare (join, heartbeat,
+// cache miss, failure recovery). Nothing in the per-message path depends on them.
+service ControlService {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (WorkerReply);
+  rpc Heartbeat(HeartbeatRequest) returns (WorkerReply);
+  rpc DeregisterWorker(WorkerIdRequest) returns (Ack);
+  rpc ListWorkers(Empty) returns (ListWorkersReply);
+
+  rpc RegisterActor(RegisterActorRequest) returns (Ack);
+  rpc LookupActor(LookupActorRequest) returns (ActorReply);
+  rpc UnregisterActor(SessionIdRequest) returns (Ack);
+
+  rpc Place(PlaceRequest) returns (PlaceReply);
+}
+
+message WorkerIdRequest {
+  string worker_id = 1;
+}
+
+message RegisterWorkerRequest {
+  string name = 1;
+  string addr = 2;
+  string node_id = 3;
+  uint32 max_actors = 4;
+  uint32 max_tasks = 5;
+  repeated string capabilities = 6;
+  map<string, string> labels = 7;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  uint32 actors = 2;
+  uint32 running_tasks = 3;
+  float cpu_percent = 4;
+  uint64 memory_bytes = 5;
+}
+
+message WorkerReply {
+  string id = 1;
+  string name = 2;
+  // joining | ready | draining | offline | lost
+  string state = 3;
+  ErrorInfo error = 4;
+}
+
+message ListWorkersReply {
+  string workers_json = 1;
+}
+
+message RegisterActorRequest {
+  string session_id = 1;
+  string actor_id = 2;
+  string kind = 3;
+  string worker_id = 4;
+  uint64 generation = 5;
+  // active | idle | draining | migrating | stopped | failed
+  string state = 6;
+}
+
+message LookupActorRequest {
+  string session_id = 1;
+}
+
+message ActorReply {
+  bool found = 1;
+  string session_id = 2;
+  string actor_id = 3;
+  string worker_id = 4;
+  string node_id = 5;
+  uint64 generation = 6;
+  string state = 7;
+  repeated string endpoints = 8;
+}
+
+message PlaceRequest {
+  string session_id = 1;
+  string actor_id = 2;
+  string kind = 3;
+}
+
+message PlaceReply {
+  string worker_id = 1;
+  float score = 2;
+  string reason = 3;
+  ErrorInfo error = 4;
+}

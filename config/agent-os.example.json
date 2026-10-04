@@ -1,0 +1,117 @@
+{
+  "node": {
+    "name": "agentos-local",
+    "node_id": null,
+    "region": "local"
+  },
+  "api": {
+    "http_addr": "127.0.0.1:8788",
+    "ws_path": "/v1/ws",
+    "grpc_addr": "127.0.0.1:8789",
+    "auth_token_env": "AGENTOS_AUTH_TOKEN",
+    "rate_limit_per_minute": 600,
+    "cors_allow_origin": "*",
+    "request_timeout_ms": 30000
+  },
+  "storage": {
+    "backend": "file",
+    "data_dir": "./data",
+    "event_log_retention": 20000
+  },
+  "models": {
+    "default_provider": "mock",
+    "request_timeout_ms": 60000,
+    "max_retries": 2,
+    "providers": [
+      {
+        "name": "mock",
+        "kind": "mock",
+        "model": "agentos-mock-1",
+        "base_url": "inproc://mock",
+        "api_key_env": "AGENTOS_MOCK_API_KEY",
+        "enabled": true,
+        "priority": 0,
+        "timeout_ms": 5000
+      },
+      {
+        "name": "deepseek",
+        "kind": "deepseek",
+        "model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "enabled": true,
+        "priority": 30,
+        "timeout_ms": 60000
+      },
+      {
+        "name": "openai",
+        "kind": "openai",
+        "model": "gpt-4o-mini",
+        "base_url": "https://api.openai.com",
+        "api_key_env": "OPENAI_API_KEY",
+        "enabled": true,
+        "priority": 20,
+        "timeout_ms": 60000
+      },
+      {
+        "name": "qwen",
+        "kind": "qwen",
+        "model": "qwen-plus",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "enabled": true,
+        "priority": 15,
+        "timeout_ms": 60000
+      },
+      {
+        "name": "local",
+        "kind": "local",
+        "model": "local-llm",
+        "base_url": "http://127.0.0.1:11434",
+        "api_key_env": "AGENTOS_LOCAL_API_KEY",
+        "enabled": true,
+        "priority": 5,
+        "timeout_ms": 120000
+      }
+    ]
+  },
+  "policy": {
+    "workspace_root": "./workspace",
+    "allowed_capabilities": [],
+    "denied_capabilities": [],
+    "approval_required": [],
+    "max_steps_per_run": 12,
+    "max_concurrent_tasks": 16,
+    "capability_timeout_ms": 10000,
+    "capability_retries": 2,
+    "allow_network_capabilities": false,
+    "max_artifact_bytes": 8388608
+  },
+  "p2p": {
+    "enabled": false,
+    "listen": [
+      "/ip4/0.0.0.0/tcp/0"
+    ],
+    "bootstrap": [],
+    "mdns": true,
+    "advertise_interval_ms": 15000
+  },
+  "observability": {
+    "log_level": "info,agentos=debug",
+    "log_format": "text",
+    "metrics_enabled": true,
+    "otlp_endpoint": null
+  },
+  "limits": {
+    "session_queue_capacity": 1024,
+    "default_task_timeout_ms": 60000,
+    "shutdown_timeout_ms": 5000,
+    "epoch_tick_ms": 50,
+    "wasm_timeout_ms": 2000,
+    "wasm_memory_limit_bytes": 33554432,
+    "wasm_max_instances": 16,
+    "actor_snapshot_interval_ms": 30000,
+    "heartbeat_interval_ms": 2000,
+    "worker_lease_ms": 10000
+  }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "agentos-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+agentos-kernel.workspace = true
+agentos-api.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[[bin]]
+name = "agentos-server"
+path = "src/main.rs"

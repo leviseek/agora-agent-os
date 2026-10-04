@@ -1,0 +1,28 @@
+[package]
+name = "agentos-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-core.workspace = true
+agentos-kernel.workspace = true
+agentos-api.workspace = true
+agentos-storage.workspace = true
+agentos-actor-runtime.workspace = true
+agentos-agent-runtime.workspace = true
+agentos-capability-runtime.workspace = true
+agentos-model-router.workspace = true
+agentos-task-scheduler.workspace = true
+agentos-control-plane.workspace = true
+agentos-event-bus.workspace = true
+agentos-wasm-runtime.workspace = true
+agentos-network.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+futures-util = "0.3"
+tokio-util.workspace = true
