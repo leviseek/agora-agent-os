@@ -38,7 +38,10 @@ pub struct ProviderInfo {
     pub name: String,
     pub kind: ProviderKind,
     pub model: String,
+    /// Always a bare identifier: ready, degraded, unconfigured or down.
     pub health: ProviderHealth,
+    /// Why the provider is in that state; empty when healthy or when there is nothing to say.
+    pub health_reason: String,
     pub calls: u64,
     pub failures: u64,
     pub avg_latency_ms: f64,
@@ -230,11 +233,16 @@ impl ModelRouter {
                 kind: provider.kind(),
                 model: provider.model().to_string(),
                 health: provider.health().await,
+                health_reason: String::new(),
                 calls: s.calls,
                 failures: s.failures,
                 avg_latency_ms: if s.calls == 0 { 0.0 } else { s.latency_sum / s.calls as f64 },
                 total_tokens: s.tokens,
             });
+        }
+        // Filled in from the health that was just read, so no construction site has to remember.
+        for info in &mut out {
+            info.health_reason = info.health.reason();
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out

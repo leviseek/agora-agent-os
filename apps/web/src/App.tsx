@@ -1,6 +1,6 @@
 /** Console shell: sidebar view switcher + one main panel per view. */
 
-import { ApiErrorBanner, Badge, StatusDetailText } from './components';
+import { ApiErrorBanner, Badge, StatusDetailText, ViewBoundary } from './components';
 import { I18nProvider, useI18n } from './i18n';
 import { NavProvider, VIEWS, useNav } from './navigation';
 import { AppProvider, useApp } from './store';
@@ -131,7 +131,7 @@ function Console() {
               <p>{t('shell.offlineBanner')}</p>
             </div>
           ) : null}
-          {renderView(view)}
+          <ViewBoundary resetKey={view}>{renderView(view)}</ViewBoundary>
         </div>
       </main>
     </div>

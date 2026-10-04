@@ -1,10 +1,57 @@
 /** Small shared presentational pieces. No data fetching happens here. */
 
-import type { ReactNode } from 'react';
+import { Component } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
 import { jsonText } from './api';
 import type { ApiError } from './api';
-import { useI18n } from './i18n';
+import { tGlobal, useI18n } from './i18n';
 import type { WsDetail } from './ws';
+
+/**
+ * Keeps one broken view from taking the console with it.
+ *
+ * React unmounts the whole tree when a render throws, which turns any bad value into a blank
+ * page with no way back. The boundary shows what happened and lets the user move on: changing the
+ * view resets it.
+ */
+export class ViewBoundary extends Component<
+  { children: ReactNode; resetKey: string },
+  { error: Error | null }
+> {
+  constructor(props: { children: ReactNode; resetKey: string }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error('[console] view crashed', error, info.componentStack);
+  }
+
+  override componentDidUpdate(previous: { resetKey: string }): void {
+    if (previous.resetKey !== this.props.resetKey && this.state.error !== null) {
+      this.setState({ error: null });
+    }
+  }
+
+  override render(): ReactNode {
+    if (this.state.error === null) return this.props.children;
+    return (
+      <div className="banner banner-error">
+        <div className="banner-head">
+          <span className="banner-scope">{tGlobal('error.viewCrashed', { message: this.state.error.message })}</span>
+        </div>
+        <p className="muted small">{tGlobal('error.viewCrashedHint')}</p>
+        <button type="button" className="btn btn-small" onClick={() => window.location.reload()}>
+          {tGlobal('error.reload')}
+        </button>
+      </div>
+    );
+  }
+}
 
 export type Tone = 'neutral' | 'info' | 'ok' | 'warn' | 'error' | 'muted';
 

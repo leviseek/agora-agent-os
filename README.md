@@ -52,6 +52,7 @@ acceptance suite and the demo run with no network. Add `DEEPSEEK_API_KEY` / `OPE
 | `pwsh -File scripts/test.ps1` | everything above in one shot |
 | `pwsh -File scripts/instances.ps1 new/start/status -Name a` | several isolated nodes on one machine |
 | start two nodes, open one console | the other appears by itself in Discovered nodes (see 1c) |
+| `node scripts/cdp-errors.mjs <cdp-endpoint> <console-url> <runtime-url>` | drives a headless browser through connect and the views, printing browser-side errors |
 
 ---
 

@@ -160,8 +160,7 @@ impl ModelResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum ProviderHealth {
     Ready,
     Degraded(String),
@@ -174,13 +173,86 @@ impl ProviderHealth {
     pub fn is_ready(&self) -> bool {
         matches!(self, ProviderHealth::Ready)
     }
+
+    /// The tag a client switches on. Always a plain identifier, never a structure.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProviderHealth::Ready => "ready",
+            ProviderHealth::Degraded(_) => "degraded",
+            ProviderHealth::Unconfigured(_) => "unconfigured",
+            ProviderHealth::Down(_) => "down",
+        }
+    }
+
+    /// The human-readable explanation, empty when there is nothing to explain.
     pub fn reason(&self) -> String {
         match self {
-            ProviderHealth::Ready => "ready".into(),
-            ProviderHealth::Degraded(r) => r.clone(),
-            ProviderHealth::Unconfigured(r) => r.clone(),
-            ProviderHealth::Down(r) => r.clone(),
+            ProviderHealth::Ready => String::new(),
+            ProviderHealth::Degraded(r) | ProviderHealth::Unconfigured(r) | ProviderHealth::Down(r) => {
+                r.clone()
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    /// The bug this guards against: one field with two shapes.
+    ///
+    /// The derived Serialize wrote a bare string for Ready and an object for the variants that
+    /// carry a reason, so a client that rendered the value as text crashed the whole console on
+    /// the first provider that was unconfigured.
+    #[test]
+    fn every_variant_is_a_bare_identifier_on_the_wire() {
+        let cases = [
+            ProviderHealth::Ready,
+            ProviderHealth::Degraded("slow".into()),
+            ProviderHealth::Unconfigured("OPENAI_API_KEY is not set".into()),
+            ProviderHealth::Down("connection refused".into()),
+        ];
+        for health in cases {
+            let json = serde_json::to_value(&health).unwrap();
+            assert!(json.is_string(), "expected a string, got {json}");
+            assert_eq!(json.as_str().unwrap(), health.as_str());
+            let round_tripped: ProviderHealth = serde_json::from_value(json).unwrap();
+            assert_eq!(round_tripped.as_str(), health.as_str());
+        }
+    }
+
+    #[test]
+    fn the_reason_is_reported_separately_and_never_as_the_identifier() {
+        let unconfigured = ProviderHealth::Unconfigured("DEEPSEEK_API_KEY is not set".into());
+        assert_eq!(unconfigured.as_str(), "unconfigured");
+        assert!(unconfigured.reason().contains("DEEPSEEK_API_KEY"));
+        assert_eq!(ProviderHealth::Ready.reason(), "");
+    }
+}
+
+/// Serialised as a bare identifier.
+///
+/// The derived representation was a string for unit variants and an *object* for the three
+/// variants carrying a reason (for example {"unconfigured": "..."}). One field with two shapes
+/// made a client that renders it as text crash the whole view, so the reason now travels in its
+/// own field and this one is always a string.
+impl Serialize for ProviderHealth {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderHealth {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let tag = String::deserialize(deserializer)?;
+        // A round trip keeps the tag and drops the reason text, which is why the API exposes it
+        // separately as health_reason.
+        Ok(match tag.as_str() {
+            "ready" => ProviderHealth::Ready,
+            "degraded" => ProviderHealth::Degraded(String::new()),
+            "unconfigured" => ProviderHealth::Unconfigured(String::new()),
+            _ => ProviderHealth::Down(String::new()),
+        })
     }
 }
 

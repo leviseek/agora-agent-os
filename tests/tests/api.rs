@@ -218,6 +218,21 @@ async fn capabilities_workers_actors_models_and_metrics() {
     assert_eq!(status, 200);
     assert!(models["providers"].as_array().unwrap().iter().any(|p| p["name"] == "mock"));
 
+    // Provider health must be a bare identifier for every provider, healthy or not: this endpoint
+    // once serialised the unhealthy variants as objects ({"unconfigured": "..."}), and the console
+    // rendered that object as a React child, which unmounted the whole page.
+    for provider in models["providers"].as_array().unwrap() {
+        let health = &provider["health"];
+        assert!(
+            health.is_string(),
+            "health must be a string on the wire, got {health} for {provider}"
+        );
+        assert!(
+            provider["health_reason"].is_string(),
+            "health_reason must accompany it, got {provider}"
+        );
+    }
+
     let response = h.client.get(h.url("/v1/metrics")).send().await.unwrap();
     assert_eq!(response.status().as_u16(), 200);
     let text = response.text().await.unwrap();

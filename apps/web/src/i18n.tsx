@@ -139,6 +139,10 @@ const en = {
   'error.socketNotOpen': 'the event socket is not open',
   'error.decode': 'the runtime returned a body that is not JSON',
   'error.network': 'cannot reach the runtime at {url}: {reason}',
+  'error.viewCrashed': 'This view hit an error: {message}',
+  'error.viewCrashedHint':
+    'The rest of the console is still working - switch to another view and back, or reload. The full error is in the browser console.',
+  'error.reload': 'Reload',
 
   // ------------------------------------------------------------------ connection and socket status
   'connection.status.online': 'online',
@@ -193,6 +197,8 @@ const en = {
   'state.healthy': 'healthy',
   'state.degraded': 'degraded',
   'state.unavailable': 'unavailable',
+  'state.unconfigured': 'unconfigured',
+  'state.down': 'down',
   'state.unknown': 'unknown',
 
   // ------------------------------------------------------------------ connection
@@ -595,6 +601,9 @@ const zh: Partial<Record<MessageKey, string>> = {
   'error.socketNotOpen': '事件通道尚未连接',
   'error.decode': '运行时返回了非 JSON 响应体',
   'error.network': '无法连接到运行时 {url}：{reason}',
+  'error.viewCrashed': '此视图出错：{message}',
+  'error.viewCrashedHint': '控制台其余部分仍可用——切换到其他视图再切回，或刷新页面；完整错误在浏览器控制台。',
+  'error.reload': '刷新页面',
 
   // ------------------------------------------------------------------ connection and socket status
   'connection.status.online': '在线',
@@ -649,6 +658,8 @@ const zh: Partial<Record<MessageKey, string>> = {
   'state.healthy': '健康',
   'state.degraded': '降级',
   'state.unavailable': '不可用',
+  'state.unconfigured': '未配置密钥',
+  'state.down': '不可达',
   'state.unknown': '未知',
 
   // ------------------------------------------------------------------ connection
@@ -980,9 +991,9 @@ export interface I18nValue {
    * Translate a lifecycle state coming from the runtime ("running", "migrating", ...).
    * Unknown values are returned verbatim, so a new backend state is never blank.
    */
-  tState: (value: string) => string;
+  tState: (value: unknown) => string;
   /** Translate an event severity ("info", "warn", ...), same fallback rule. */
-  tSeverity: (value: string) => string;
+  tSeverity: (value: unknown) => string;
 }
 
 const I18nContext = createContext<I18nValue | null>(null);
@@ -1025,11 +1036,11 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   );
 
   const tState = useCallback(
-    (value: string) => translateIdentifier(locale, 'state', value),
+    (value: unknown) => translateIdentifier(locale, 'state', value),
     [locale],
   );
   const tSeverity = useCallback(
-    (value: string) => translateIdentifier(locale, 'severity', value),
+    (value: unknown) => translateIdentifier(locale, 'severity', value),
     [locale],
   );
 
@@ -1049,8 +1060,29 @@ export function useI18n(): I18nValue {
 /** * Translate a runtime identifier (state, severity, connection status) without importing the
  * hook, for pure helpers. Falls back to the raw identifier so a new backend value is never blank.
  */
-export function translateIdentifier(locale: Locale, namespace: string, identifier: string): string {
-  const key = namespace + '.' + identifier;
+/**
+ * Reduce whatever the runtime sent to a readable identifier.
+ *
+ * A field that is "sometimes a string, sometimes an object" is a backend contract bug, but the
+ * console must not blank itself over one: an earlier build serialised a health enum as
+ * {"unconfigured": "..."} for some variants and a bare string for others, and passing that object
+ * through to a component made React unmount the entire tree.
+ */
+function identifierText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>);
+    // The externally tagged enum shape: a single key naming the variant.
+    if (keys.length === 1) return keys[0];
+    return 'object';
+  }
+  return 'unknown';
+}
+
+export function translateIdentifier(locale: Locale, namespace: string, identifier: unknown): string {
+  const raw = identifierText(identifier);
+  const key = namespace + '.' + raw;
   const table = DICTIONARIES[locale];
-  return table[key as MessageKey] ?? en[key as MessageKey] ?? identifier;
+  return table[key as MessageKey] ?? en[key as MessageKey] ?? raw;
 }
