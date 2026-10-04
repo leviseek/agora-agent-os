@@ -132,6 +132,12 @@ pub struct PolicyConfig {
     /// Capabilities that require an explicit approval decision.
     pub approval_required: Vec<String>,
     pub max_steps_per_run: u32,
+    /// How many previous transcript messages may be replayed into a model request.
+    /// Zero switches history off: every goal is then answered from scratch.
+    pub history_messages: usize,
+    /// Character budget for that history. The oldest turns are dropped first, and the newest turn
+    /// is truncated rather than dropped, so the immediate context is never lost.
+    pub history_chars: usize,
     pub max_concurrent_tasks: usize,
     pub capability_timeout_ms: u64,
     pub capability_retries: u32,
@@ -327,6 +333,8 @@ impl Default for RuntimeConfig {
                 denied_capabilities: vec![],
                 approval_required: vec![],
                 max_steps_per_run: 12,
+                history_messages: 20,
+                history_chars: 8_000,
                 max_concurrent_tasks: 16,
                 capability_timeout_ms: 10_000,
                 capability_retries: 2,
@@ -422,6 +430,12 @@ impl RuntimeConfig {
         if let Some(v) = Self::env_str("AGENTOS_WORKSPACE_ROOT") { self.policy.workspace_root = PathBuf::from(v); }
         if let Some(v) = Self::env_str("AGENTOS_MAX_STEPS") {
             if let Ok(n) = v.parse() { self.policy.max_steps_per_run = n; }
+        if let Some(v) = Self::env_str("AGENTOS_HISTORY_MESSAGES") {
+            if let Ok(n) = v.parse() { self.policy.history_messages = n; }
+        }
+        if let Some(v) = Self::env_str("AGENTOS_HISTORY_CHARS") {
+            if let Ok(n) = v.parse() { self.policy.history_chars = n; }
+        }
         }
         if let Some(v) = Self::env_str("AGENTOS_MAX_CONCURRENT_TASKS") {
             if let Ok(n) = v.parse() { self.policy.max_concurrent_tasks = n; }
@@ -498,6 +512,11 @@ impl RuntimeConfig {
         }
         if self.limits.session_queue_capacity == 0 {
             return Err(RuntimeError::invalid_input("limits.session_queue_capacity must be > 0"));
+        }
+        if self.policy.history_messages > 0 && self.policy.history_chars == 0 {
+            return Err(RuntimeError::invalid_input(
+                "policy.history_chars must be > 0 when history_messages > 0",
+            ));
         }
         if self.policy.max_steps_per_run == 0 {
             return Err(RuntimeError::invalid_input("policy.max_steps_per_run must be > 0"));

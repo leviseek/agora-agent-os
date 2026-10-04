@@ -231,6 +231,8 @@ impl Kernel {
             },
             node_id: node.clone(),
             run_timeout_ms: config.limits.default_task_timeout_ms * 4,
+            history_messages: config.policy.history_messages,
+            history_chars: config.policy.history_chars,
             run_tokens: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         });
 

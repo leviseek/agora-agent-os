@@ -168,6 +168,14 @@ impl ModelRouter {
 
     /// Ask for a completion, failing over across providers on retryable errors.
     pub async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+        // What the model was actually sent is the first thing to check when a follow-up question
+        // behaves as if it had no history.
+        tracing::debug!(
+            task = ?request.task,
+            messages = request.messages.len(),
+            tools = request.tools.len(),
+            "model request"
+        );
         let candidates = self.resolve(&request);
         if candidates.is_empty() {
             return Err(RuntimeError::model("no model provider is registered"));

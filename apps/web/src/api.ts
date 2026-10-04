@@ -303,11 +303,21 @@ export interface SessionSummary {
   message_count: number;
 }
 
+/** Token accounting for one run or one session. All zero means "nobody recorded it". */
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  calls: number;
+}
+
 export interface RunSummary {
   agent_id: string;
   state: AgentRunState | string;
   goal: string;
   steps: number;
+  /** What this run cost across every model call it made, including parallel task calls. */
+  usage?: TokenUsage;
   /** Who actually answered the planning call; null on records written before it was recorded. */
   provider?: string | null;
   model: string | null;
@@ -329,6 +339,8 @@ export interface SessionRuntime {
   title: string;
   messages: number;
   goals_handled: number;
+  /** Summed from the runs, so it cannot drift from them. */
+  usage?: TokenUsage;
   runs: RunSummary[];
   graphs: GraphSummary[];
 }

@@ -37,6 +37,7 @@ Everything else under `/v1` requires `Authorization: Bearer <token>` when the no
 | GET | `/v1/sessions/{id}/status` | - | runtime view: state, runs, graphs |
 | POST | `/v1/sessions/{id}/messages` | `{text, wait?}` | run result or `{accepted:true}` |
 | POST | `/v1/sessions/{id}/cancel` | - | `{cancelled}` |
+| GET | `/v1/sessions/{id}` | - | detail: session record + runtime summary; `runtime.usage` sums the runs' token totals |
 | GET | `/v1/sessions/{id}/transcript` | `?limit` | `{messages:[TranscriptEntry], total, truncated}` - the conversation; how a client that posted with `wait:false` reads the reply |
 | GET | `/v1/sessions/{id}/events` | `?limit` | `{events:[EventRecord]}` |
 | GET | `/v1/sessions/{id}/graph` | - | `{graphs:[TaskGraphRecord]}` |

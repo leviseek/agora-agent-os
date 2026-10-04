@@ -158,6 +158,11 @@ export function ChatView() {
         }
         actions={
           <>
+            {detail !== null && detail.runtime !== null && (detail.runtime.usage?.calls ?? 0) > 0 ? (
+              <Badge tone="muted">
+                {t('chat.sessionTokens', { tokens: detail.runtime.usage?.total_tokens ?? 0 })}
+              </Badge>
+            ) : null}
             {streaming ? (
               <Badge tone="warn">{t('chat.runInFlight')}</Badge>
             ) : (
@@ -202,6 +207,11 @@ export function ChatView() {
                     )
                   ) : null}
                   <span className="muted small">{t('chat.stepsCount', { n: run.steps })}</span>
+                  {run.usage !== undefined && run.usage.calls > 0 ? (
+                    <span className="muted small">
+                      {t('chat.tokenUsage', { tokens: run.usage.total_tokens, calls: run.usage.calls })}
+                    </span>
+                  ) : null}
                 </header>
 
                 <div className="bubble bubble-user">

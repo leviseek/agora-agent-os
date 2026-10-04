@@ -114,6 +114,45 @@ pub struct AgentStep {
 
 /// One execution of the agent loop for one goal. Long-lived and fully serializable, which is
 /// what makes checkpoint/restore of a session actor possible mid-run.
+/// Token accounting for a run or a session.
+///
+/// Every field defaults to zero, and zero means "nobody recorded it" - an old record without the
+/// field parses fine and simply reports no usage rather than a wrong number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// How many model calls contributed to the totals above.
+    #[serde(default)]
+    pub calls: u64,
+}
+
+impl TokenUsage {
+    /// Add one model call. The total is taken from the provider rather than recomputed, because
+    /// providers disagree about what counts (cached prompt tokens, reasoning tokens).
+    pub fn record(&mut self, prompt_tokens: u64, completion_tokens: u64, total_tokens: u64) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(prompt_tokens);
+        self.completion_tokens = self.completion_tokens.saturating_add(completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(total_tokens);
+        self.calls = self.calls.saturating_add(1);
+    }
+
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self.completion_tokens.saturating_add(other.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.calls = self.calls.saturating_add(other.calls);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.calls == 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRun {
     pub id: AgentId,
@@ -137,6 +176,10 @@ pub struct AgentRun {
     pub updated_at: Timestamp,
     pub finished_at: Option<Timestamp>,
     pub task_graph_id: Option<TaskId>,
+    /// What this run cost in tokens, across every model call it made - including the parallel
+    /// task-graph calls.
+    #[serde(default)]
+    pub usage: TokenUsage,
 }
 
 impl AgentRun {
@@ -158,10 +201,47 @@ impl AgentRun {
             updated_at: now,
             finished_at: None,
             task_graph_id: None,
+            usage: TokenUsage::default(),
         }
     }
 
     pub fn is_finished(&self) -> bool {
         self.state.is_terminal()
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn token_usage_accumulates_across_calls() {
+        let mut usage = TokenUsage::default();
+        assert!(usage.is_empty());
+        usage.record(100, 20, 120);
+        usage.record(300, 45, 345);
+        assert_eq!(usage.calls, 2);
+        assert_eq!(usage.prompt_tokens, 400);
+        assert_eq!(usage.completion_tokens, 65);
+        assert_eq!(usage.total_tokens, 465);
+    }
+
+    #[test]
+    fn sessions_add_up_their_runs() {
+        let mut run = TokenUsage::default();
+        run.record(100, 20, 120);
+        let mut session = TokenUsage::default();
+        session.add(&run);
+        session.add(&run);
+        assert_eq!(session.total_tokens, 240);
+        assert_eq!(session.calls, 2);
+    }
+
+    #[test]
+    fn totals_saturate_instead_of_wrapping() {
+        let mut usage = TokenUsage { total_tokens: u64::MAX, ..Default::default() };
+        usage.record(u64::MAX, u64::MAX, u64::MAX);
+        assert_eq!(usage.total_tokens, u64::MAX);
+        assert_eq!(usage.calls, 1);
     }
 }

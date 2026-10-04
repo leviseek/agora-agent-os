@@ -108,6 +108,7 @@ What has to differ per instance, and why:
 |---|---|
 | `AGENTOS_HTTP_ADDR` / `AGENTOS_GRPC_ADDR` | two listeners cannot share a port. The runtime now rejects identical addresses at startup instead of silently losing its gateway |
 | `AGENTOS_NODE_ID` | the identity stamped on every event, directory entry and worker record. Normally you do not set it: an identity is generated on first start and kept in `<data_dir>/node.id`, so it is unique per instance and stable across restarts. Two nodes with the same *name* are still two nodes |
+| `AGENTOS_HISTORY_MESSAGES` / `AGENTOS_HISTORY_CHARS` | how much of the conversation is replayed into each model request (default 20 turns / 8000 chars; `0` turns history off). Every request logs `task=.. messages=N`, and each run emits a `conversation history assembled` event, so "did the model see the previous turn?" is answerable from the log |
 | `AGENTOS_NODE_NAME` | the human label shown in the console and the log. Two checkouts of the same repository share a directory name, so `pnpm dev` labels each stack `<directory>-<http port>`; the console appends the port when two nodes do end up with the same name |
 | working directory | `./data` and `./workspace` resolve against it. Set `AGENTOS_DATA_DIR` / `AGENTOS_WORKSPACE_ROOT` explicitly if you would rather keep them elsewhere |
 

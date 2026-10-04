@@ -6,13 +6,14 @@
 //!   * the whole state (transcript, runs, task graphs) is serializable, which is what makes
 //!     checkpoint, restore and migration work.
 
-use crate::agent_loop::AgentLoop;
+use crate::agent_loop::{history_for_model, AgentLoop};
 use crate::memory::{episode, MemoryStore};
 use agentos_actor_runtime::actor::{Actor, ActorContext, ErasedActor, TypedActor};
 use agentos_actor_runtime::checkpoint::CheckpointStore;
 use agentos_core::error::{Result, RuntimeError};
 use agentos_core::model::{
     AgentRun, AgentSpec, EventKind, EventRecord, NewEvent, SessionMessage as TranscriptMessage,
+    TokenUsage,
     SessionRecord, TaskGraphRecord,
 };
 use agentos_core::state::{AgentRunState, SessionState, StateMachine};
@@ -61,6 +62,9 @@ pub struct SessionDeps {
     pub spec: AgentSpec,
     pub node_id: String,
     pub run_timeout_ms: u64,
+    /// Conversation budget for model requests (see PolicyConfig history_messages).
+    pub history_messages: usize,
+    pub history_chars: usize,
     /// Live cancellation tokens per session. Deliberately OUTSIDE the actor mailbox: cancelling a
     /// run must not queue behind the run that is being cancelled.
     pub run_tokens: Arc<RwLock<std::collections::HashMap<SessionId, CancellationToken>>>,
@@ -195,10 +199,30 @@ impl SessionActor {
             .write()
             .insert(self.session_id.clone(), token.clone());
 
+        // The conversation so far, minus the goal that was just appended: the loop adds the
+        // current goal itself, so passing it here would duplicate the newest turn.
+        let prior = &self.state.transcript[..self.state.transcript.len().saturating_sub(1)];
+        let history = history_for_model(prior, self.deps.history_messages, self.deps.history_chars);
+        self.deps
+            .bus
+            .publish(
+                NewEvent::new(EventKind::AgentStep, "conversation history assembled")
+                    .session(self.session_id.clone())
+                    .agent(run.id.clone())
+                    .node(self.deps.node_id.clone())
+                    .payload(serde_json::json!({
+                        "history_messages": history.len(),
+                        "transcript_messages": prior.len(),
+                        "budget_messages": self.deps.history_messages,
+                        "budget_chars": self.deps.history_chars,
+                    })),
+            )
+            .await?;
+
         let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone());
         let outcome = match tokio::time::timeout(
             std::time::Duration::from_millis(self.deps.run_timeout_ms.max(1)),
-            loop_.run(&mut run, &goal),
+            loop_.run(&mut run, &goal, &history),
         )
         .await
         {
@@ -317,7 +341,18 @@ impl SessionActor {
                 "model": r.model,
                 "final_answer": r.final_answer,
                 "error": r.error,
+                "usage": r.usage,
             })).collect::<Vec<_>>(),
+            // Session totals are summed from the runs rather than kept beside them: one source of
+            // truth cannot drift, and a run restored from a checkpoint is counted exactly once.
+            "usage": self
+                .state
+                .runs
+                .iter()
+                .fold(TokenUsage::default(), |mut total, run| {
+                    total.add(&run.usage);
+                    total
+                }),
             "graphs": self.state.graphs.iter().map(|g| serde_json::json!({
                 "graph_id": g.id.as_str(),
                 "title": g.title,

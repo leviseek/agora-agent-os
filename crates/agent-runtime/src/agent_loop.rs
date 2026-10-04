@@ -15,9 +15,41 @@ struct Answerer {
     model: String,
 }
 
+/// Token accounting shared by every model call of one run.
+///
+/// Shared rather than returned because the parallel task-graph calls happen inside a TaskRunner:
+/// the loop never sees their responses, but the run still has to pay for them.
+#[derive(Debug, Clone, Default)]
+pub struct UsageMeter {
+    inner: Arc<parking_lot::Mutex<TokenUsage>>,
+}
+
+impl UsageMeter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&self, usage: &agentos_model_router::Usage) {
+        // Scoped on purpose: holding this guard across an await would make the future non-Send.
+        let mut inner = self.inner.lock();
+        // Providers report u32 (that is what the wire formats use); the runtime keeps u64 totals so
+        // a long session cannot overflow what a single response carries.
+        inner.record(
+            u64::from(usage.prompt_tokens),
+            u64::from(usage.completion_tokens),
+            u64::from(usage.total_tokens),
+        );
+    }
+
+    pub fn snapshot(&self) -> TokenUsage {
+        *self.inner.lock()
+    }
+}
+
 use agentos_core::model::{
-    ActionCall, AgentRun, AgentStep, EventKind, NewEvent, Observation, Plan, PlanStep, PlanStepKind,
-    StepKind, TaskGraphRecord, TaskKind, TaskPayload, TaskRecord,
+    ActionCall, AgentRun, AgentStep, ContentPart, EventKind, MessageRole, NewEvent, Observation,
+    Plan, PlanStep, PlanStepKind, SessionMessage as TranscriptMessage, StepKind, TaskGraphRecord,
+    TaskKind, TaskPayload, TaskRecord, TokenUsage,
 };
 use agentos_core::state::{AgentRunState, StateMachine};
 use agentos_core::telemetry::Correlation;
@@ -28,6 +60,78 @@ use agentos_task_scheduler::scheduler::{TaskContext, TaskRunner};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+/// Turn the stored conversation into model messages, oldest first.
+///
+/// Two rules matter here:
+///   * the budget is spent on the *newest* turns - dropping the oldest is the only sane way to
+///     shrink a conversation, because old turns are the ones a follow-up question is least likely
+///     to depend on;
+///   * the newest turn is truncated, never dropped, so an oversized message cannot silently
+///     remove the very context the goal refers to.
+///
+/// Only text parts take part: a future non-text part must be handled explicitly rather than
+/// stringified by accident.
+pub fn history_for_model(
+    transcript: &[TranscriptMessage],
+    max_messages: usize,
+    max_chars: usize,
+) -> Vec<ChatMessage> {
+    if max_messages == 0 || max_chars == 0 {
+        return Vec::new();
+    }
+
+    let mut converted: Vec<ChatMessage> = transcript
+        .iter()
+        .filter_map(|message| {
+            let role = match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                // System and tool turns are reconstructed per run; replaying them would duplicate
+                // the live tool exchange the loop is about to build.
+                _ => return None,
+            };
+            // Text parts only, on purpose: stringifying a JSON or artifact part would put a
+            // machine payload into the conversation as if the user had typed it.
+            let text: String = message
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(ChatMessage { role: role.to_string(), content: text, name: None, tool_call_id: None })
+        })
+        .collect();
+
+    // Newest first while spending the budget, then flip back.
+    let mut kept: Vec<ChatMessage> = Vec::new();
+    let mut chars = 0usize;
+    for message in converted.drain(..).rev() {
+        if kept.len() >= max_messages {
+            break;
+        }
+        let remaining = max_chars.saturating_sub(chars);
+        if remaining == 0 {
+            break;
+        }
+        if message.content.chars().count() <= remaining {
+            chars += message.content.chars().count();
+            kept.push(message);
+        } else {
+            let truncated: String = message.content.chars().take(remaining).collect();
+            kept.push(ChatMessage { content: truncated, ..message });
+            break;
+        }
+    }
+    kept.reverse();
+    kept
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentLoopOutcome {
@@ -103,9 +207,19 @@ impl AgentLoop {
         }
     }
 
-    pub async fn run(&mut self, run: &mut AgentRun, goal: &str) -> Result<AgentLoopOutcome> {
+    /// Run one goal to completion.
+    ///
+    /// History is the conversation so far, already bounded by the caller: the loop does not read
+    /// the transcript itself, so it stays testable without a session actor.
+    pub async fn run(
+        &mut self,
+        run: &mut AgentRun,
+        goal: &str,
+        history: &[ChatMessage],
+    ) -> Result<AgentLoopOutcome> {
         let tools = self.all_tool_specs();
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        let meter = UsageMeter::new();
 
         // ---- Goal ---------------------------------------------------------------
         Self::transition(run, AgentRunState::Goal)?;
@@ -134,7 +248,10 @@ impl AgentLoop {
         Self::transition(run, AgentRunState::Planning)?;
         steps += 1;
         let plan_started = now_ms();
-        let (plan, answerer) = self.plan(goal, tools.clone()).await?;
+        let (plan, answerer) = self.plan(goal, tools.clone(), history, &meter).await?;
+        // Recorded after every phase, not only at the end: a run that fails halfway still cost
+        // what it cost, and a caller looking at the record deserves the real number.
+        run.usage = meter.snapshot();
         run.plan = Some(plan.clone());
         // Recorded from the response, not from what we asked for: the router may have failed over.
         run.provider = Some(answerer.provider);
@@ -164,6 +281,7 @@ impl AgentLoop {
                 agent_id: run.id.clone(),
                 cancellation: self.cancellation.clone(),
                 correlation: self.correlation.clone(),
+                usage: meter.clone(),
             });
             let scheduler = agentos_task_scheduler::scheduler::Scheduler::new(
                 self.deps.store.clone(),
@@ -225,6 +343,7 @@ impl AgentLoop {
                     correlation_id: Some(agentos_core::CorrelationId::new()),
                 });
             }
+            run.usage = meter.snapshot();
             let collection: Collection<TaskGraphRecord> = Collection::new(collections::GRAPHS);
             let graph_record = result_to_graph(result, &graph_id, &run.session_id);
             collection.save(self.deps.store.as_ref(), graph_id.as_str(), &graph_record).await?;
@@ -233,7 +352,8 @@ impl AgentLoop {
         // ---- Finalize -----------------------------------------------------------
         Self::transition(run, AgentRunState::Finalizing)?;
         let final_started = now_ms();
-        let answer = self.finalise(goal, &plan, &observations, tools).await?;
+        let answer = self.finalise(goal, &plan, &observations, history, &meter, tools).await?;
+        run.usage = meter.snapshot();
         steps += 1;
         Self::push_step(run, AgentStep {
             index: steps,
@@ -260,14 +380,27 @@ impl AgentLoop {
         Ok(AgentLoopOutcome { answer, steps, plan: run.plan.clone(), graph_id: Some(graph_id) })
     }
 
-    async fn plan(&self, goal: &str, tools: Vec<ToolSpec>) -> Result<(Plan, Answerer)> {
+    async fn plan(
+        &self,
+        goal: &str,
+        tools: Vec<ToolSpec>,
+        history: &[ChatMessage],
+        meter: &UsageMeter,
+    ) -> Result<(Plan, Answerer)> {
         let system = format!(
             "{}\nRespond with JSON only: {{\"goal\": string, \"reasoning\": string, \"steps\": [{{\"id\": string, \"description\": string, \"kind\": \"think\"|\"capability\"|\"respond\", \"capability\": string|null, \"input\": object, \"depends_on\": [string]}}]}}",
             self.deps.spec.system_prompt
         );
         let request = ModelRequest::new(
             ModelTask::Plan,
-            vec![ChatMessage::system(system), ChatMessage::user(goal.to_string())],
+            {
+                // The plan is where a follow-up like "now do the same for the other file" is
+                // understood, so the conversation goes in front of the goal, not behind it.
+                let mut messages = vec![ChatMessage::system(system)];
+                messages.extend(history.iter().cloned());
+                messages.push(ChatMessage::user(goal.to_string()));
+                messages
+            },
         )
         .with_tools(tools)
         .with_json();
@@ -285,6 +418,7 @@ impl AgentLoop {
             tracing::warn!(error = %e, "failed to publish model call event");
         }
         let response = self.deps.models.complete(request).await?;
+        meter.record(&response.usage);
 
         self.deps
             .bus
@@ -381,6 +515,8 @@ impl AgentLoop {
         goal: &str,
         plan: &Plan,
         observations: &[(String, serde_json::Value)],
+        history: &[ChatMessage],
+        meter: &UsageMeter,
         tools: Vec<ToolSpec>,
     ) -> Result<String> {
         // A respond step with a concrete answer short-circuits the second model call.
@@ -398,10 +534,10 @@ impl AgentLoop {
             }
         }
 
-        let mut messages = vec![
-            ChatMessage::system(self.deps.spec.system_prompt.clone()),
-            ChatMessage::user(goal.to_string()),
-        ];
+        // Same rule as planning: conversation first, then the goal, then this run's exchange.
+        let mut messages = vec![ChatMessage::system(self.deps.spec.system_prompt.clone())];
+        messages.extend(history.iter().cloned());
+        messages.push(ChatMessage::user(goal.to_string()));
         if !observations.is_empty() {
             messages.push(ChatMessage::assistant(format!(
                 "I ran {} step(s): {}",
@@ -426,6 +562,7 @@ impl AgentLoop {
             .await;
         match response {
             Ok(r) => {
+                meter.record(&r.usage);
                 if !r.content.trim().is_empty() {
                     return Ok(r.content);
                 }
@@ -512,6 +649,9 @@ pub struct PlanTaskRunner {
     agent_id: agentos_core::AgentId,
     cancellation: CancellationToken,
     correlation: Correlation,
+    /// Parallel task-graph model calls report their cost here, because the loop never sees their
+    /// responses.
+    usage: UsageMeter,
 }
 
 #[async_trait]
@@ -547,6 +687,7 @@ impl TaskRunner for PlanTaskRunner {
                 );
                 request.model_hint = model_hint.clone();
                 let response = self.deps.models.complete(request).await?;
+                self.usage.record(&response.usage);
                 Ok(serde_json::json!({
                     "content": response.content,
                     "provider": response.provider,
@@ -566,5 +707,73 @@ impl TaskRunner for PlanTaskRunner {
     async fn on_cancel(&self, node: &TaskRecord) -> Result<()> {
         tracing::debug!(task = %node.id, "plan task cancelled");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use agentos_core::SessionId;
+
+    fn turns(count: usize) -> Vec<TranscriptMessage> {
+        let session = SessionId::new();
+        (0..count)
+            .map(|i| {
+                if i % 2 == 0 {
+                    TranscriptMessage::user(session.clone(), format!("user turn {i}"))
+                } else {
+                    TranscriptMessage::assistant(session.clone(), format!("assistant turn {i}"))
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keeps_the_newest_turns_and_drops_the_oldest() {
+        let history = history_for_model(&turns(10), 4, 10_000);
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[0].content, "user turn 6");
+        assert_eq!(history[3].content, "assistant turn 9");
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[3].role, "assistant");
+    }
+
+    #[test]
+    fn spends_the_character_budget_on_the_newest_turns() {
+        let history = history_for_model(&turns(10), 50, 30);
+        assert!(history.len() < 10, "the budget must bite: kept {}", history.len());
+        assert_eq!(history.last().unwrap().content, "assistant turn 9");
+        let chars: usize = history.iter().map(|m| m.content.chars().count()).sum();
+        assert!(chars <= 30, "kept {chars} chars, budget was 30");
+    }
+
+    #[test]
+    fn truncates_an_oversized_newest_turn_instead_of_dropping_it() {
+        let session = SessionId::new();
+        let long = TranscriptMessage::user(session, "x".repeat(500));
+        let history = history_for_model(&[long], 10, 100);
+        assert_eq!(history.len(), 1, "the newest turn is never dropped");
+        assert_eq!(history[0].content.chars().count(), 100);
+    }
+
+    #[test]
+    fn ignores_empty_turns_and_non_text_parts() {
+        let session = SessionId::new();
+        let mut artifact_only = TranscriptMessage::assistant(session.clone(), "");
+        artifact_only.parts = vec![ContentPart::Artifact { artifact_id: "a1".into(), name: "x".into() }];
+        let transcript = vec![
+            TranscriptMessage::user(session.clone(), "   "),
+            artifact_only,
+            TranscriptMessage::user(session, "real turn"),
+        ];
+        let history = history_for_model(&transcript, 10, 1_000);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "real turn");
+    }
+
+    #[test]
+    fn a_zero_budget_switches_history_off() {
+        assert!(history_for_model(&turns(4), 0, 1_000).is_empty());
+        assert!(history_for_model(&turns(4), 4, 0).is_empty());
     }
 }

@@ -423,6 +423,20 @@ async fn a_goal_posted_without_waiting_is_readable_from_the_transcript() {
     assert_eq!(run["provider"], json!("mock"));
     assert_eq!(run["model"], json!("agentos-mock-1"));
 
+    // And what it cost: the mock provider reports usage like any other, so a run that planned,
+    // executed a task graph and summarised must show several calls and non-zero tokens.
+    let usage = &run["usage"];
+    assert!(
+        usage["calls"].as_u64().unwrap() >= 2,
+        "a run makes more than one model call: {usage}"
+    );
+    assert!(usage["total_tokens"].as_u64().unwrap() > 0, "usage: {usage}");
+    assert_eq!(
+        detail["runtime"]["usage"]["calls"], usage["calls"],
+        "a single run's session total is that run"
+    );
+    assert_eq!(detail["runtime"]["usage"]["total_tokens"], usage["total_tokens"]);
+
     h.shutdown.cancel();
 }
 

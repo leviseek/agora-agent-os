@@ -19,7 +19,10 @@ pub mod worker;
 pub use actor::{
     ActorRecord, ActorSnapshotMeta, Checkpoint, CheckpointMeta, CloneRequest, MigrationReport,
 };
-pub use agent::{ActionCall, AgentRun, AgentSpec, AgentStep, Observation, Plan, PlanStep, PlanStepKind, StepKind};
+pub use agent::{
+    ActionCall, AgentRun, AgentSpec, AgentStep, Observation, Plan, PlanStep, PlanStepKind, StepKind,
+    TokenUsage,
+};
 pub use artifact::{ArtifactKind, ArtifactRecord};
 pub use capability::{
     CapabilityDescriptor, CapabilityKind, CapabilityLoad, CapabilityPermission, CapabilityProvider, VersionReq,

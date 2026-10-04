@@ -6,6 +6,10 @@
 
 ---
 
+## 0.0 勘误（本报告自身的错误）
+
+- **初版误判"记忆从未接线"**：初版用单行 grep（`memory\.(write|recall)`）检索，而调用是跨行书写的（`self.deps\n    .memory\n    .write(...)`），因此漏掉了两个写入点。**实际情况是"只写不读"**：写入已接线（session.rs:284、agent_loop.rs:323），召回从未被调用。§2 与 §7 的对应行已更正。教训：跨行调用的检索不能只用单行匹配。
+
 ## 0.1 证据的边界（先说不可靠的地方）
 
 - **"文档里有"不等于"生产在用"**：pi 的自动压缩与分支摘要在文档与代码中确凿存在，但本机 126 个会话的条目直方图是 message 35706 / custom 162 / thinking_level_change 140 / model_change 136 / session 126 / custom_message 87 / **context_edit 13** / session_info 2，而 **compaction 0、branch_summary 0**——只有溢出恢复留下的 13 条 context_edit 痕迹。也就是说：这两套机制在该用户的真实负载下从未触发过。**这直接影响下面的优先级判定：压缩（A2）的紧迫性应低于"历史进请求"（A1）与"预算兜底"。**
@@ -49,7 +53,7 @@
 | 自动压缩 | 有：contextTokens > window - reserve（默认 reserve 16384 / keep 20000），compaction 条目落盘 | 无 | 核心缺口 |
 | 溢出恢复 | 有：provider 溢出或截断后压缩重试；context_edit 追加式改写历史（本机 13 条） | 无 | 核心缺口 |
 | 摘要式压缩 | 有（/compact 可带保留指令，可被扩展拦截/自定义） | 无 | 核心缺口 |
-| 长期记忆 | **明确没有**（memory 34 处全是 in-memory；无跨会话记忆、无向量检索） | 接口 + 本地实现**已存在但从未接线**（agent_loop 不 write/recall，全仓无调用点） | 双方都缺，我们缺的是"接线" |
+| 长期记忆 | **明确没有**（memory 34 处全是 in-memory；无跨会话记忆、无向量检索） | **只写不读**：每次运行写两条（session.rs:284 会话级 episode、agent_loop.rs:323 答案级 semantic），但 recall/recent 仅存在于 trait/实现/测试，运行时从不调用 | 双方都缺；我们是"写了没人看" |
 | 上下文文件 | AGENTS.md / CLAUDE.md 自动加载、SYSTEM.md 替换、APPEND_SYSTEM.md 追加 | 无（AgentSpec.system_prompt 是静态字符串，core/src/model/agent.rs:11） | **pi 领先且便宜可追** |
 | 技能/提示模板 | skills 渐进披露、prompts 变 slash 命令 | 无 | pi 领先 |
 | 提示缓存计量 | 有：5 分钟 TTL、1024 token 噪声阈值、缓存浪费统计 | 无 | pi 领先（成本优化） |
@@ -112,7 +116,7 @@
 |---|---|---|---|
 | **A1 历史进模型请求** | **值得，最高优先** | 现在每轮 goal 都从零开始（agent_loop.rs:402-412），"会话"实为任务容器而非对话。这是任何多轮 agent 的地基；不修，后面所有上下文能力都无处附着 | 小（装配 + 截断） |
 | **A3 run/session 级 token 记账** | **值得，便宜** | provider 已返回 usage；把它记到 AgentStep/Run 并在会话汇总，是费用、配额、以及设计里"预留支付接口"的前提 | 小 |
-| **A4 记忆接线** | **值得** | MemoryStore 已实现却零调用点——不接线就是死代码，且这是我们对 pi 的**差异化**（pi 明确没有长期记忆） | 中 |
+| **A4 记忆召回接线** | **值得** | 写入已接线（每运行两条），但**召回从未被调用**——写进去的记忆没有任何读者，等于只写不读。补上"规划前按会话召回并注入"即可闭环；这也是我们对 pi 的**差异化**（pi 明确没有长期记忆） | 小-中 |
 | **B4 上下文文件装配** | **值得** | pi 的 AGENTS.md/SYSTEM.md 机制是"让 agent 好用"的关键且成本低；我们有工作区 jail，天然有边界 | 小-中 |
 
 ### 第二批：上下文可持续 + 工具够用
@@ -161,9 +165,20 @@
 
 ## 9. 建议路线（三批）
 
-1. **第一批（会话语义奠基）**：A1 历史进请求 → A3 token 记账 → A4 记忆接线 → B4 上下文文件。
-   → 完成后，"会话"才真正是多轮对话，成本可见，记忆与约定文件生效。
-2. **第二批（可持续 + 够用）**：A2 预算/压缩 → B1 edit+grep（shell 视策略进度）→ A5 导出/派分支 + A6 rename/搜索。
+1. **第一批（会话语义奠基）**：A1 历史进请求 → A3 token 记账 → A4 记忆召回 → B4 上下文文件。
+2. **第二批（可持续 + 够用）**：A2 预算/压缩 → B1 edit+grep（+ shell 视策略）→ A5 导出/派分支 + A6 rename/搜索。
 3. **第三批（生态与体验）**：B2 MCP → E1 流式 → E2 多模态 → D2 诊断包 → C1 审批回路。
 
-**一句话结论**：agora-agent-os 不缺"更漂亮的终端"，缺的是**把已有骨架接上对话语义**——历史、token 预算、记忆接线、上下文装配这四件事做完，它才从"能跑闭环的运行时"变成"能承载真实长对话的运行时"；其余多为客户端功能或按需的生态适配。
+---
+
+## 10. 实施进度
+
+> 每完成一项在这里记一行，附带可复核的证据（测试名 / 命令 / 提交）。未完成的不写。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| **A1 历史进模型请求** | ✅ 完成 | `history_for_model`（agent_loop.rs）+ 5 个单测；配置 `policy.history_messages`(20)/`history_chars`(8000)；实测两轮对话：Plan 请求 messages 2 → 4，事件 `conversation history assembled` 显示 history_messages 0 → 2 |
+| **A3 run/session token 记账** | ✅ 完成 | `TokenUsage`（core/model/agent.rs，3 个单测）；`UsageMeter` 汇总 plan/finalise/并行任务三类调用；`/v1/sessions/{id}` 暴露 `runtime.usage` 与 `runs[].usage`；契约测试断言 calls ≥ 2、tokens > 0、会话合计 = 单次运行；控制台显示每轮 tokens 与会话累计 |
+| A4 记忆召回接线 | ⏳ 待做 | 写入已存在（session.rs:284 episode、agent_loop.rs:323 semantic），需补召回与注入 |
+| B4 工作区上下文文件装配 | ⏳ 待做 | |
+| A2 上下文预算与压缩 | ⏳ 待做 | 预算兜底已由 A1 的 `history_messages/history_chars` 提供；摘要压缩未做 |
