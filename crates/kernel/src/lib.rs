@@ -44,7 +44,10 @@ pub mod transports;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KernelHealth {
+    /// Human label, from AGENTOS_NODE_NAME.
     pub node: String,
+    /// Stable identity used in events and the directory: AGENTOS_NODE_ID, falling back to the name.
+    pub node_id: String,
     pub uptime_ms: u64,
     pub store: agentos_storage::store::StoreHealth,
     pub events: agentos_event_bus::bus::BusStats,
@@ -87,7 +90,11 @@ impl Kernel {
     pub async fn bootstrap(config: RuntimeConfig) -> Result<Arc<Self>> {
         config.validate()?;
         config.ensure_dirs()?;
-        let node = config.node.name.clone();
+        // Identity vs. label: node_id is the stable, unique identity that appears in events, the
+        // actor directory and worker records; node.name is the human label. When no explicit id is
+        // configured the name doubles as the id, which keeps single-instance setups zero-config and
+        // lets several instances on one machine be told apart.
+        let node = config.effective_node_id();
 
         // --- data plane: storage ---------------------------------------------------
         let store = open_store(&config.storage).await?;
@@ -367,6 +374,7 @@ impl Kernel {
     pub async fn health(&self) -> Result<KernelHealth> {
         Ok(KernelHealth {
             node: self.config.node.name.clone(),
+            node_id: self.config.effective_node_id(),
             uptime_ms: now_ms().saturating_sub(self.started_at),
             store: self.store.health().await?,
             events: self.bus.stats(),

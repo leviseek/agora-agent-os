@@ -34,7 +34,10 @@ async fn run() -> Result<()> {
         let token = shutdown.clone();
         tokio::spawn(async move {
             if let Err(e) = agentos_api::serve(kernel, token).await {
-                tracing::error!(error = %e, "http gateway stopped");
+                // A runtime without its gateway answers nothing: fail loudly instead of leaving a
+                // process that looks alive under a supervisor.
+                tracing::error!(error = %e, "http gateway stopped, exiting");
+                std::process::exit(1);
             }
         });
     }

@@ -403,6 +403,20 @@ impl RuntimeConfig {
         if self.api.http_addr.trim().is_empty() {
             return Err(RuntimeError::invalid_input("api.http_addr must not be empty"));
         }
+        // Two listeners on one address is a configuration error that used to surface as "the
+        // process is up but the gateway is dead": the gRPC server won the bind and the gateway
+        // failed silently. Catch it where it can still be explained.
+        let http = self.api.http_addr.parse::<std::net::SocketAddr>().map_err(|e| {
+            RuntimeError::invalid_input(format!("api.http_addr {:?} is not host:port: {e}", self.api.http_addr))
+        })?;
+        let grpc = self.api.grpc_addr.parse::<std::net::SocketAddr>().map_err(|e| {
+            RuntimeError::invalid_input(format!("api.grpc_addr {:?} is not host:port: {e}", self.api.grpc_addr))
+        })?;
+        if http == grpc {
+            return Err(RuntimeError::invalid_input(format!(
+                "api.http_addr and api.grpc_addr must differ (both are {http})"
+            )));
+        }
         if self.limits.session_queue_capacity == 0 {
             return Err(RuntimeError::invalid_input("limits.session_queue_capacity must be > 0"));
         }
@@ -419,6 +433,17 @@ impl RuntimeConfig {
             )));
         }
         Ok(())
+    }
+
+    /// The identity this node uses in events, the actor directory and worker records.
+    /// An explicit AGENTOS_NODE_ID wins so identity survives a rename; otherwise the name is used,
+    /// which keeps a single-instance setup zero-config.
+    pub fn effective_node_id(&self) -> String {
+        self.node
+            .node_id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| self.node.name.clone())
     }
 
     /// Ensure directories exist; called at bootstrap, not in constructors.
@@ -476,6 +501,34 @@ mod tests {
     fn unknown_default_provider_is_rejected() {
         let mut cfg = RuntimeConfig::default();
         cfg.models.default_provider = "nope".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn node_id_falls_back_to_the_name() {
+        let mut cfg = RuntimeConfig::default();
+        cfg.node.name = "agora-a".into();
+        assert_eq!(cfg.effective_node_id(), "agora-a", "name doubles as id when unset");
+
+        cfg.node.node_id = Some("   ".into());
+        assert_eq!(cfg.effective_node_id(), "agora-a", "blank ids are ignored");
+
+        cfg.node.node_id = Some("node-a-01".into());
+        assert_eq!(cfg.effective_node_id(), "node-a-01", "explicit identity wins");
+    }
+
+    #[test]
+    fn two_listeners_cannot_share_one_address() {
+        let mut cfg = RuntimeConfig::default();
+        cfg.api.grpc_addr = cfg.api.http_addr.clone();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.message.contains("must differ"), "got: {err}");
+    }
+
+    #[test]
+    fn bind_addresses_must_be_host_port() {
+        let mut cfg = RuntimeConfig::default();
+        cfg.api.http_addr = "not-an-address".into();
         assert!(cfg.validate().is_err());
     }
 }

@@ -6,3 +6,6 @@
 /data
 *.log
 .env
+
+# 多实例运行目录（scripts/instances.ps1）：每个实例带自己的 data/workspace/bin/run
+/instances

@@ -50,6 +50,69 @@ acceptance suite and the demo run with no network. Add `DEEPSEEK_API_KEY` / `OPE
 | `cargo check` in `apps/desktop/src-tauri` | the Tauri 2 desktop shell compiles |
 | `agentos --remote <grpc> session create/message` | a CLI on one machine driving a runtime on another |
 | `pwsh -File scripts/test.ps1` | everything above in one shot |
+| `pwsh -File scripts/instances.ps1 new/start/status -Name a` | several isolated nodes on one machine |
+
+---
+
+## 1b. Several instances on one machine
+
+One physical machine can host any number of **independent nodes**: nothing in the runtime is
+global except the ports. Data, workspace, event log, artifacts and memory are all relative to the
+instance's working directory, so two instances started from two directories are fully isolated -
+and they can be joined later through gRPC or the P2P plane if a cluster is what you want.
+
+```bash
+pwsh -File scripts/instances.ps1 new   -Name a      # allocates a free port pair, copies the binary
+pwsh -File scripts/instances.ps1 new   -Name b
+pwsh -File scripts/instances.ps1 start -Name a
+pwsh -File scripts/instances.ps1 start -Name b
+pwsh -File scripts/instances.ps1 status
+```
+
+Each instance gets its own directory:
+
+```
+instances/<name>/
+  instance.json    identity + ports (node_id, node_name, http, grpc)
+  config.json      optional: used as AGENTOS_CONFIG when present
+  bin/             this instance's own copy of agentos-server
+  data/            state store, event log, artifacts
+  workspace/       the only directory its filesystem capabilities may touch
+  run/             pid, stdout, stderr
+```
+
+Doing it by hand is the same three variables, if you prefer your own process manager:
+
+```bash
+# terminal 1                                          # terminal 2
+cd D:\nodes\a                                          cd D:\nodes\b
+AGENTOS_NODE_ID=node-a \                              AGENTOS_NODE_ID=node-b \
+AGENTOS_HTTP_ADDR=127.0.0.1:8788 \                    AGENTOS_HTTP_ADDR=127.0.0.1:8790 \
+AGENTOS_GRPC_ADDR=127.0.0.1:8789 \                    AGENTOS_GRPC_ADDR=127.0.0.1:8791 \
+agentos-server                                         agentos-server
+```
+
+What has to differ per instance, and why:
+
+| setting | why |
+|---|---|
+| `AGENTOS_HTTP_ADDR` / `AGENTOS_GRPC_ADDR` | two listeners cannot share a port. The runtime now rejects identical addresses at startup instead of silently losing its gateway |
+| `AGENTOS_NODE_ID` | the identity stamped on every event, directory entry and worker record. It defaults to the node name, so two instances with the default name would be indistinguishable in the log |
+| working directory | `./data` and `./workspace` resolve against it. Set `AGENTOS_DATA_DIR` / `AGENTOS_WORKSPACE_ROOT` explicitly if you would rather keep them elsewhere |
+
+Two operational notes learned the hard way:
+
+* **Windows locks a running executable.** With N instances sharing one binary, `cargo build` fails
+  with `os error 5` until they all stop. That is why each instance directory carries its own copy -
+  and why instances can be pinned to different versions for a staged upgrade.
+* **`AGENTOS_AUTH_TOKEN` is read per process.** Set it in an instance's environment only if that
+  node should require a bearer token; anything set in the parent shell is inherited by every
+  instance you start from it.
+
+Independence is the default; a cluster is a later step. Today the shared pieces are the gRPC
+clients (a CLI on one machine can drive another node: `agentos --remote <grpc> ...`) and the P2P
+plane for discovery. Cross-node placement and `ActorTransfer` are interfaces with a local
+implementation, so a multi-node deployment does not require rewriting the runtime.
 
 ---
 
@@ -82,7 +145,8 @@ agora-agent-os/
 │   ├── web/                       React + TypeScript + React Flow client
 │   ├── desktop/                   Tauri 2 shell around the same client
 │   └── server/                    Node control server: proxy, WS fan-out, TS orchestration
-├── scripts/                       dev.mjs, demo.ps1, test.ps1
+├── scripts/                       dev.mjs, demo.ps1, test.ps1, instances.ps1
+├── instances/                     per-instance run directories (gitignored, created by the script)
 ├── tests/                         cross-crate acceptance and gateway test suites
 └── docs/                          architecture, migration, decisions, api
 ```
