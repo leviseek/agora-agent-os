@@ -170,6 +170,21 @@ wss.on("connection", (socket) => {
 
 connectUpstream();
 
+// Listening failures must be explained, not thrown: without these handlers an occupied port
+// crashes the process with an unhandled 'error' event and a stack trace.
+function failListen(scope: string, error: NodeJS.ErrnoException): never {
+  if (error.code === "EADDRINUSE") {
+    console.error("[control] " + scope + " port " + PORT + " is already in use - another stack is probably running.");
+    console.error("[control] Stop it, or start this one elsewhere:  PORT=" + (PORT + 1) + " pnpm dev");
+  } else {
+    console.error("[control] cannot listen on port " + PORT + ": " + error.message);
+  }
+  process.exit(1);
+}
+
+server.on("error", (error: NodeJS.ErrnoException) => failListen("http", error));
+wss.on("error", (error: NodeJS.ErrnoException) => failListen("websocket", error));
+
 server.listen(PORT, () => {
   console.log("agora-agent-os control server listening on http://127.0.0.1:" + PORT);
   console.log("  runtime : " + RUNTIME_URL);

@@ -100,6 +100,25 @@ What has to differ per instance, and why:
 | `AGENTOS_NODE_ID` | the identity stamped on every event, directory entry and worker record. It defaults to the node name, so two instances with the default name would be indistinguishable in the log |
 | working directory | `./data` and `./workspace` resolve against it. Set `AGENTOS_DATA_DIR` / `AGENTOS_WORKSPACE_ROOT` explicitly if you would rather keep them elsewhere |
 
+### The development stack in a second checkout
+
+`pnpm dev` resolves its ports instead of assuming them, so a second checkout can be brought up
+while the first is still running:
+
+```bash
+# first checkout                              # second checkout
+pnpm dev                                      pnpm dev
+                                              # [dev] runtime http port 8788 is busy, using 8791 instead
+                                              # [dev] runtime grpc port 8789 is busy, using 8792 instead
+                                              # [dev] control port 8790 is busy, using 8793 instead
+                                              # [dev] web port 5173 is busy, using 5174 instead
+```
+
+Pin a port when you need a fixed one - a pinned port that is busy is a hard error, not a silent
+shift: `RUNTIME_HTTP_PORT=8888 WEB_PORT=5180 pnpm dev`. The resolved ports are propagated to
+whatever needs them (the Vite proxy target and the control server's `RUNTIME_URL`), so the shifted
+stack is internally consistent rather than pointing at the other one's runtime.
+
 Two operational notes learned the hard way:
 
 * **Windows locks a running executable.** With N instances sharing one binary, `cargo build` fails
@@ -108,6 +127,11 @@ Two operational notes learned the hard way:
 * **`AGENTOS_AUTH_TOKEN` is read per process.** Set it in an instance's environment only if that
   node should require a bearer token; anything set in the parent shell is inherited by every
   instance you start from it.
+* **Never point two running instances at one data directory.** The file store has no cross-process
+  lock: two writers keep independent event sequence counters and the last write wins. Different
+  working directories give you different `./data` for free - if you would rather run two stacks
+  from one directory, set `AGENTOS_DATA_DIR` per stack (the `pnpm dev` banner prints the data
+  directory it resolved).
 
 Independence is the default; a cluster is a later step. Today the shared pieces are the gRPC
 clients (a CLI on one machine can drive another node: `agentos --remote <grpc> ...`) and the P2P

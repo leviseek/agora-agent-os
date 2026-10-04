@@ -2,77 +2,217 @@
 /**
  * One command to bring up a development stack:
  *
- *   node scripts/dev.mjs [--runtime-only|--no-web|--no-server]
+ *   node scripts/dev.mjs [--runtime-only|--no-runtime|--no-server|--no-web]
  *
- *   1. agentos-server   (Rust runtime: HTTP/WS gateway + gRPC)
- *   2. @agentos/server (Node control server: proxy, WS fan-out, orchestration)
- *   3. @agentos/web    (Vite dev server)
+ *   1. agentos-server    (Rust runtime: HTTP/WS gateway + gRPC)
+ *   2. @agentos/server   (Node control server: proxy, WS fan-out, orchestration)
+ *   3. @agentos/web      (Vite dev server)
  *
- * Every child inherits stdio, so logs interleave in one terminal. Ctrl-C stops the whole tree.
+ * Running several stacks at once (one per checkout / working directory) is a supported mode, so
+ * ports are resolved rather than assumed:
+ *
+ *   - RUNTIME_HTTP_PORT  RUNTIME_GRPC_PORT  CONTROL_PORT  WEB_PORT  pin a port explicitly;
+ *   - a pinned port that is busy is a hard error (you asked for that port);
+ *   - a default port that is busy is shifted to the next free one and the shift is announced,
+ *     then propagated to whichever child needs to know (vite proxy target, control server URL).
+ *
+ * Children are spawned as node/cargo directly - no shell wrapper - so Ctrl-C reaches the real
+ * process and arguments are never re-parsed by cmd.exe.
  */
 
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import path from "node:path";
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = new Set(process.argv.slice(2));
-const wantRuntime = !args.has("--no-runtime");
-const wantServer = !args.has("--no-server");
-const wantWeb = !args.has("--no-web");
-const runtimeOnly = args.has("--runtime-only");
+const wantRuntime = !args.has('--no-runtime');
+const wantServer = !args.has('--no-server');
+const wantWeb = !args.has('--no-web');
+const runtimeOnly = args.has('--runtime-only');
+const isWindows = process.platform === 'win32';
 
-const isWindows = process.platform === "win32";
-const runtimeBin = path.resolve(
-  "target",
-  "debug",
-  isWindows ? "agentos-server.exe" : "agentos-server",
-);
+// --- ports ------------------------------------------------------------------------------------
+
+function readPort(envName, fallback) {
+  const raw = process.env[envName];
+  if (raw === undefined || raw.trim() === '') return { value: fallback, pinned: false, envName };
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    console.error('[dev] ' + envName + ' must be a port number, got: ' + raw);
+    process.exit(1);
+  }
+  return { value: parsed, pinned: true, envName };
+}
+
+/** Can we bind this port on a given host? */
+function bindable(port, host) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.unref();
+    probe.once('error', () => resolve(false));
+    probe.once('listening', () => probe.close(() => resolve(true)));
+    if (host === undefined) probe.listen(port);
+    else probe.listen(port, host);
+  });
+}
+
+/**
+ * A port counts as free only if every address one of our children might bind accepts us.
+ *
+ * Windows treats these as independent: a process on 127.0.0.1:port does not block an
+ * all-interfaces (::) bind, and one on [::1]:port does not block :: either. The runtime binds
+ * 127.0.0.1, the control server binds everything and Vite binds localhost (which can resolve to
+ * ::1 only). Probing a single family reported busy ports as free - the reason a second stack kept
+ * colliding on 8788 and, later, on 5173.
+ */
+const PROBE_HOSTS = ['127.0.0.1', '::1', undefined]; // undefined = all interfaces
+
+async function portFree(port) {
+  for (const host of PROBE_HOSTS) {
+    if (!(await bindable(port, host))) return false;
+  }
+  return true;
+}
+
+/**
+ * Reserve ports one at a time. Probing is not enough on its own: nothing is bound yet, so two
+ * roles could otherwise pick the same free port (that is exactly how the runtime once ended up
+ * with its gateway and its gRPC endpoint on one address).
+ */
+const reserved = new Set();
+
+async function resolvePort(label, requested) {
+  if (!reserved.has(requested.value) && (await portFree(requested.value))) {
+    reserved.add(requested.value);
+    return requested;
+  }
+  if (requested.pinned) {
+    console.error(
+      '[dev] ' + label + ' port ' + requested.value + ' is already in use (' + requested.envName + ' is set).',
+    );
+    console.error('[dev] Either stop the other stack or pick another port, for example:');
+    console.error('[dev]   ' + requested.envName + '=' + (requested.value + 2) + ' node scripts/dev.mjs');
+    process.exit(1);
+  }
+  for (let candidate = requested.value + 1; candidate < requested.value + 200; candidate += 1) {
+    if (!reserved.has(candidate) && (await portFree(candidate))) {
+      reserved.add(candidate);
+      console.log(
+        '[dev] ' + label + ' port ' + requested.value + ' is busy, using ' + candidate + ' instead',
+      );
+      return { value: candidate, pinned: false, envName: requested.envName, shiftedFrom: requested.value };
+    }
+  }
+  console.error('[dev] no free port found for ' + label + ' near ' + requested.value);
+  process.exit(1);
+}
+
+const runtimeHttp = await resolvePort('runtime http', readPort('RUNTIME_HTTP_PORT', 8788));
+const runtimeGrpc = await resolvePort('runtime grpc', readPort('RUNTIME_GRPC_PORT', 8789));
+const controlPort = await resolvePort('control', readPort('CONTROL_PORT', 8790));
+const webPort = await resolvePort('web', readPort('WEB_PORT', 5173));
+
+const runtimeUrl = 'http://127.0.0.1:' + runtimeHttp.value;
+
+// --- children ---------------------------------------------------------------------------------
 
 const children = [];
 
 function run(name, command, commandArgs, options = {}) {
-  console.log("[" + name + "] " + command + " " + commandArgs.join(" "));
+  console.log('[' + name + '] ' + path.basename(command) + ' ' + commandArgs.join(' '));
   const child = spawn(command, commandArgs, {
-    stdio: "inherit",
-    shell: isWindows,
+    cwd: options.cwd ?? repoRoot,
+    stdio: 'inherit',
+    shell: false,
     env: { ...process.env, ...options.env },
   });
-  child.on("exit", (code) => {
-    if (code !== 0 && code !== null) console.error("[" + name + "] exited with code " + code);
+  child.on('error', (error) => console.error('[' + name + '] failed to start: ' + error.message));
+  child.on('exit', (code) => {
+    if (code === 0 || code === null) return;
+    console.error('[' + name + '] exited with code ' + code);
+    // Without the runtime the rest of the stack has nothing to talk to: stop it rather than
+    // leaving a control server and a dev server pointing at a dead gateway.
+    if (name === 'runtime') {
+      console.error('[dev] the runtime is gone, stopping the rest of the stack');
+      shutdown();
+    }
   });
   children.push({ name, child });
   return child;
 }
 
+/** pnpm keeps each dependency in its own directory, so resolve the bin from the package itself. */
+function resolveViteBin() {
+  const candidates = [
+    path.join(repoRoot, 'apps', 'web', 'node_modules', 'vite', 'bin', 'vite.js'),
+    path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
+
 function shutdown() {
   for (const { name, child } of children) {
-    console.log("[dev] stopping " + name);
+    console.log('[dev] stopping ' + name);
     if (!child.killed) child.kill();
   }
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 if (wantRuntime) {
-  const usePrebuilt = existsSync(runtimeBin);
-  if (usePrebuilt) {
-    run("runtime", runtimeBin, []);
+  const binary = path.join(repoRoot, 'target', 'debug', isWindows ? 'agentos-server.exe' : 'agentos-server');
+  const env = {
+    AGENTOS_HTTP_ADDR: '127.0.0.1:' + runtimeHttp.value,
+    AGENTOS_GRPC_ADDR: '127.0.0.1:' + runtimeGrpc.value,
+  };
+  if (existsSync(binary)) {
+    run('runtime', binary, [], { env });
   } else {
-    console.log("[dev] " + runtimeBin + " not found, building and running through cargo");
-    run("runtime", "cargo", ["run", "-p", "agentos-server"]);
+    console.log('[dev] ' + binary + ' not found, building and running through cargo');
+    run('runtime', isWindows ? 'cargo.exe' : 'cargo', ['run', '-p', 'agentos-server'], { env });
   }
 }
 
 if (!runtimeOnly && wantServer) {
-  run("control", "pnpm", ["--filter", "@agentos/server", "start"], {
-    env: { RUNTIME_URL: process.env.RUNTIME_URL ?? "http://127.0.0.1:8788" },
+  run('control', process.execPath, [path.join('apps', 'server', 'src', 'index.ts')], {
+    env: {
+      PORT: String(controlPort.value),
+      RUNTIME_URL: process.env.RUNTIME_URL ?? runtimeUrl,
+    },
   });
 }
 
 if (!runtimeOnly && wantWeb) {
-  run("web", "pnpm", ["--filter", "@agentos/web", "dev"]);
+  const viteBin = resolveViteBin();
+  const env = { AGENTOS_HTTP_TARGET: process.env.AGENTOS_HTTP_TARGET ?? runtimeUrl };
+  if (viteBin !== null) {
+    run('web', process.execPath, [viteBin, '--port', String(webPort.value), '--strictPort'], {
+      cwd: path.join(repoRoot, 'apps', 'web'),
+      env,
+    });
+  } else {
+    console.error('[dev] vite is not installed yet: run "pnpm install" first (or "pnpm --filter @agentos/web dev")');
+  }
 }
 
-console.log("[dev] stack starting: runtime :8788, control :8790, web :5173");
+// --- banner -----------------------------------------------------------------------------------
+
+const dataDir = process.env.AGENTOS_DATA_DIR ?? './data';
+console.log('');
+console.log('[dev] stack ready');
+console.log('[dev]   runtime http : ' + runtimeUrl + '   (ws ' + runtimeUrl + '/v1/ws)');
+console.log('[dev]   runtime grpc : 127.0.0.1:' + runtimeGrpc.value);
+if (!runtimeOnly && wantServer) {
+  console.log('[dev]   control      : http://127.0.0.1:' + controlPort.value + '   (ws /ws)');
+}
+if (!runtimeOnly && wantWeb) {
+  console.log('[dev]   web          : http://localhost:' + webPort.value);
+}
+console.log('[dev]   data dir     : ' + path.resolve(repoRoot, dataDir) + '  (one per running stack)');
+console.log('[dev]   node name    : ' + (process.env.AGENTOS_NODE_NAME ?? 'agentos-local (default)'));
+console.log('');
