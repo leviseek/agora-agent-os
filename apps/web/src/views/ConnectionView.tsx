@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { ApiErrorBanner, Badge, JsonBlock, KeyValue, Panel } from '../components';
+import type { NodeListResponse, NodeSummary } from '../api';
 import { formatUptime, maskToken } from '../format';
 import { useI18n } from '../i18n';
 import { useApp } from '../store';
@@ -26,6 +27,49 @@ export function ConnectionView() {
   const [draftBaseUrl, setDraftBaseUrl] = useState(baseUrl);
   const [draftToken, setDraftToken] = useState(token);
   const [revealToken, setRevealToken] = useState(false);
+
+  // Discovery: other runtimes the connected node can see. Polled rather than pushed because the
+  // advertisement TTL is seconds - a poll every few seconds is simpler than a second socket, and
+  // the panel is only mounted while the user is on this view.
+  const [nodes, setNodes] = useState<NodeListResponse | null>(null);
+  const [nodesError, setNodesError] = useState<string | null>(null);
+  const [nodesNonce, setNodesNonce] = useState(0);
+
+  useEffect(() => {
+    if (connection !== 'online') {
+      setNodes(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const load = async (): Promise<void> => {
+      try {
+        const response = await client.listNodes();
+        if (!cancelled) {
+          setNodes(response);
+          setNodesError(null);
+        }
+      } catch (error) {
+        if (!cancelled) setNodesError(error instanceof Error ? error.message : String(error));
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [connection, client, nodesNonce]);
+
+  /** Jump to another node: same console, different runtime. */
+  const switchTo = (node: NodeSummary): void => {
+    setDraftBaseUrl(node.address);
+    setBaseUrl(node.address);
+    // A node that wants a token cannot be entered silently: leave the URL in place and let the
+    // user paste the token, which is exactly what pressing Connect would have required anyway.
+    if (node.auth_required !== true) {
+      void connect({ baseUrl: node.address, token: draftToken });
+    }
+  };
 
   useEffect(() => {
     setDraftBaseUrl(baseUrl);
@@ -117,6 +161,70 @@ export function ConnectionView() {
             </div>
           </div>
         ) : null}
+      </Panel>
+
+      <Panel
+        title={t('nodes.title')}
+        subtitle={t('nodes.subtitle')}
+        actions={
+          <>
+            {nodes !== null ? <Badge tone="info">{t('nodes.count', { n: nodes.nodes.length })}</Badge> : null}
+            <button
+              type="button"
+              className="btn btn-ghost btn-small"
+              onClick={() => setNodesNonce(nodesNonce + 1)}
+              disabled={connection !== 'online'}
+            >
+              {t('common.refresh')}
+            </button>
+          </>
+        }
+      >
+        {connection !== 'online' ? (
+          <p className="muted">{t('nodes.notConnected')}</p>
+        ) : nodesError !== null ? (
+          <p className="muted">{nodesError}</p>
+        ) : nodes === null ? (
+          <p className="muted">{t('nodes.scanning')}</p>
+        ) : nodes.discovery.enabled === false ? (
+          <p className="muted">{t('nodes.disabled')}</p>
+        ) : (
+          <>
+            <div className="node-row node-row-self">
+              <span className="node-name">{nodes.self.name}</span>
+              <span className="mono">{nodes.self.address}</span>
+              <Badge tone="muted">{t('nodes.self')}</Badge>
+              <span className="muted small">{t('nodes.capabilities', { n: nodes.self.capabilities?.length ?? 0 })}</span>
+            </div>
+
+            {nodes.nodes.length === 0 ? (
+              <p className="muted">{t('nodes.empty')}</p>
+            ) : (
+              nodes.nodes.map((node) => (
+                <div className="node-row" key={node.node_id}>
+                  <span className="node-name">{node.name}</span>
+                  <span className="mono">{node.address}</span>
+                  {node.auth_required === true ? <Badge tone="warn">{t('nodes.needsToken')}</Badge> : null}
+                  <span className="muted small">{t('nodes.capabilities', { n: node.capabilities?.length ?? 0 })}</span>
+                  <span className="muted small">
+                    {t('nodes.age', { s: Math.max(0, Math.round((node.age_ms ?? 0) / 1000)) })}
+                  </span>
+                  <button type="button" className="btn btn-small" onClick={() => switchTo(node)}>
+                    {t('nodes.use')}
+                  </button>
+                </div>
+              ))
+            )}
+
+            <p className="muted small">
+              {t('nodes.backendNote', {
+                backend: nodes.discovery.backend,
+                dir: nodes.discovery.dir,
+                ttl: Math.round(nodes.discovery.ttl_ms / 1000),
+              })}
+            </p>
+          </>
+        )}
       </Panel>
 
       <Panel title="/healthz" subtitle={t('connection.healthHint')}>

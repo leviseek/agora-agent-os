@@ -51,6 +51,7 @@ acceptance suite and the demo run with no network. Add `DEEPSEEK_API_KEY` / `OPE
 | `agentos --remote <grpc> session create/message` | a CLI on one machine driving a runtime on another |
 | `pwsh -File scripts/test.ps1` | everything above in one shot |
 | `pwsh -File scripts/instances.ps1 new/start/status -Name a` | several isolated nodes on one machine |
+| start two nodes, open one console | the other appears by itself in Discovered nodes (see 1c) |
 
 ---
 
@@ -133,10 +134,40 @@ Two operational notes learned the hard way:
   from one directory, set `AGENTOS_DATA_DIR` per stack (the `pnpm dev` banner prints the data
   directory it resolved).
 
-Independence is the default; a cluster is a later step. Today the shared pieces are the gRPC
-clients (a CLI on one machine can drive another node: `agentos --remote <grpc> ...`) and the P2P
-plane for discovery. Cross-node placement and `ActorTransfer` are interfaces with a local
-implementation, so a multi-node deployment does not require rewriting the runtime.
+### 1c. Finding the other nodes
+
+Starting a node is enough to be found. There is nothing to configure, no port to type and no
+registry to run: each node writes a small JSON advertisement - identity, HTTP and gRPC endpoints,
+capability names, whether it demands a token - into a per-user directory
+(`%LOCALAPPDATA%\agora-agent-os\nodes` on Windows, `$XDG_RUNTIME_DIR/agora-agent-os/nodes`
+elsewhere), refreshed every few seconds and expired by TTL. A node appearing or disappearing
+becomes a `node_discovered` / `node_lost` event on the bus, and `GET /v1/nodes` returns the live
+list.
+
+The console shows it in the Connection view: every node it can see, with its address, capability
+count and heartbeat age, and a Connect button that switches the console to it - one console,
+several runtimes.
+
+| setting | meaning |
+|---|---|
+| `AGENTOS_DISCOVERY=off` | neither advertise nor look for others |
+| `AGENTOS_DISCOVERY_DIR` | use a different shared directory |
+| `AGENTOS_DISCOVERY_TTL_MS` | how long an advertisement stays valid (default 10 s) |
+| `AGENTOS_DISCOVERY_ADVERTISE=off` | look without being seen |
+
+Why a directory rather than multicast: two checkouts are two processes owned by the same user, so a
+per-user directory is a rendezvous that needs no network, no firewall exception and no
+configuration - and it is inspectable, which matters when a node does not show up. Discovery is a
+hint and never sits on the request path: a stale advertisement expires, a corrupt one is skipped,
+and a node that is gone is simply no longer listed.
+
+Cross-machine discovery is the libp2p/mDNS backend behind the same `NodeDiscovery` trait; the
+composition root selects the backend, so switching or combining them is wiring, not redesign.
+
+Independence is the default; a cluster is a later step. Today the shared pieces are discovery, the
+gRPC clients (a CLI on one machine can drive another node: `agentos --remote <grpc> ...`) and the
+P2P plane. Cross-node placement and `ActorTransfer` are interfaces with a local implementation, so
+a multi-node deployment does not require rewriting the runtime.
 
 ---
 

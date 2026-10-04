@@ -174,6 +174,61 @@ pub struct RuntimeLimits {
     pub worker_lease_ms: u64,
 }
 
+/// How this node makes itself visible to other nodes, and finds them.
+///
+/// The default backend is a user-scoped directory on the local filesystem: every node writes a
+/// small JSON advertisement there and reads everyone else's. It needs no network, no multicast and
+/// no configuration, which is what makes "start a second workspace and see it immediately" work.
+/// A libp2p/mDNS backend exists for cross-machine discovery and is selected by the composition
+/// root, not by this configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryConfig {
+    pub enabled: bool,
+    /// Shared directory. Defaults to a per-user location; override with AGENTOS_DISCOVERY_DIR.
+    pub dir: PathBuf,
+    /// An advertisement older than this is considered gone.
+    pub ttl_ms: u64,
+    /// Write our own advertisement (false = discover others without being discoverable).
+    pub advertise: bool,
+}
+
+/// Per-user default location for the node advertisements.
+///
+/// Deliberately outside the repository: two checkouts of the same project must still see each
+/// other, and a repository is a per-instance working directory, not a machine-wide namespace.
+pub fn default_discovery_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(base).join("agora-agent-os").join("nodes");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("agora-agent-os")
+                .join("nodes");
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+            return PathBuf::from(runtime).join("agora-agent-os").join("nodes");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("agora-agent-os")
+                .join("nodes");
+        }
+    }
+    std::env::temp_dir().join("agora-agent-os").join("nodes")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     pub node: NodeConfig,
@@ -183,6 +238,7 @@ pub struct RuntimeConfig {
     pub policy: PolicyConfig,
     pub p2p: P2pConfig,
     pub observability: ObservabilityConfig,
+    pub discovery: DiscoveryConfig,
     pub limits: RuntimeLimits,
 }
 
@@ -290,6 +346,15 @@ impl Default for RuntimeConfig {
                 metrics_enabled: true,
                 otlp_endpoint: None,
             },
+            // On by default: "start a node, see it from the console" is the point of the feature.
+            // It only writes a small file into a per-user directory, and AGENTOS_DISCOVERY=off
+            // turns it off completely.
+            discovery: DiscoveryConfig {
+                enabled: true,
+                dir: default_discovery_dir(),
+                ttl_ms: 10_000,
+                advertise: true,
+            },
             limits: RuntimeLimits {
                 session_queue_capacity: 1024,
                 default_task_timeout_ms: 60_000,
@@ -371,6 +436,20 @@ impl RuntimeConfig {
         if let Some(v) = Self::env_str("AGENTOS_LOG") { self.observability.log_level = v; }
         if let Some(v) = Self::env_str("AGENTOS_LOG_FORMAT") {
             self.observability.log_format = if v.eq_ignore_ascii_case("json") { LogFormat::Json } else { LogFormat::Text };
+        }
+        if let Some(v) = Self::env_str("AGENTOS_DISCOVERY") {
+            self.discovery.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = Self::env_str("AGENTOS_DISCOVERY_DIR") {
+            self.discovery.dir = PathBuf::from(v);
+        }
+        if let Some(v) = Self::env_str("AGENTOS_DISCOVERY_TTL_MS") {
+            if let Ok(n) = v.parse() {
+                self.discovery.ttl_ms = n;
+            }
+        }
+        if let Some(v) = Self::env_str("AGENTOS_DISCOVERY_ADVERTISE") {
+            self.discovery.advertise = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
         }
         if let Some(v) = Self::env_str("AGENTOS_P2P_ENABLED") {
             self.p2p.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");

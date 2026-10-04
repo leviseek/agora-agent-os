@@ -1180,6 +1180,30 @@ textarea:focus {
   background: transparent;
   color: var(--text-muted);
 }
+/* ------------------------------------------------------------------ node discovery */
+
+.node-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.node-row:last-of-type {
+  border-bottom: 0;
+}
+
+.node-row-self {
+  color: var(--text-muted);
+}
+
+.node-name {
+  font-weight: 600;
+  min-width: 110px;
+}
+
 /* ---------------------------------------------------- language and theme switch */
 
 .shell-switches {

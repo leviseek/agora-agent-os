@@ -48,6 +48,7 @@ Everything else under `/v1` requires `Authorization: Bearer <token>` when the no
 | GET | `/v1/workers` | - | `{workers:[WorkerRecord]}` |
 | GET | `/v1/actors` | - | live actors, directory entries, cache counters |
 | GET | `/v1/events` | `?limit=&session_id=&kinds=a,b` | `{events:[EventRecord]}` |
+| GET | `/v1/nodes` | - | `{self, nodes:[NodeSummary], discovery:{backend,dir,ttl_ms,...}}` - this node plus every node discovery can see |
 | GET | `/v1/models` | - | provider health and usage, plus configured provider summary |
 | GET | `/v1/metrics` | - | Prometheus text |
 

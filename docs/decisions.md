@@ -156,3 +156,31 @@ preprocessor variables, which cannot be switched at runtime without a rebuild.
 **Consequence.** A component changes appearance without knowing that themes exist, the two palettes
 cannot drift (every token has a counterpart in both), and a third theme is one more block. React
 Flow's `--xy-*` variables are mapped onto the same tokens so graph views follow the switch too.
+
+---
+
+## D17. Discovery defaults to a shared directory, not to the network
+
+**Decision.** Nodes find each other through a per-user directory of small JSON advertisements
+(`%LOCALAPPDATA%\agora-agent-os\nodes`, `$XDG_RUNTIME_DIR/agora-agent-os/nodes`, ...), written
+atomically, refreshed on a heartbeat, expired by TTL, and read by `LocalFileDiscovery`. It is on by
+default. The libp2p/mDNS backend implements the same `NodeDiscovery` trait and is chosen by the
+composition root.
+
+**Why.** The case that matters first is two checkouts of this repository running on one machine as
+two processes owned by the same user. A directory is a rendezvous for exactly that case: no
+multicast, no firewall exception, no bootstrap list, no configuration at all - and it is
+inspectable with `dir`, which is what an operator needs when a node does not show up. mDNS is the
+right answer for "a node on another machine", and it costs a libp2p dependency and a network
+surface that a single-machine setup should not have to pay for.
+
+**Rejected.** mDNS-only: it is the higher-friction default (multicast is often blocked, and it
+answers a question the user did not ask). A central registry service: it reintroduces exactly the
+control-plane-on-the-hot-path coupling the architecture avoids. UDP broadcast: same reach as the
+directory, none of the inspectability.
+
+**Consequence.** Discovery is a hint, never a fact: a stale advertisement expires, a corrupt file is
+skipped, and a hostile node id cannot escape the directory (it is hashed). Nothing on the request
+path depends on it - `/v1/nodes` reads a cached view that a background heartbeat maintains, and
+join/leave are ordinary events on the bus. Two running instances must still not share a data
+directory; discovery shares knowledge, not state.

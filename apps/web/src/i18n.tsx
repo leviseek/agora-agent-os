@@ -220,6 +220,22 @@ const en = {
   'connection.noResponse': 'No response yet - press Connect.',
   'connection.metaHint': 'Node identity, backends, limits and the negotiated socket path.',
 
+  // ------------------------------------------------------------------ node discovery
+  'nodes.title': 'Discovered nodes',
+  'nodes.subtitle': 'Other runtimes this node can see. Switch to one without typing a port.',
+  'nodes.self': 'this node',
+  'nodes.scanning': 'scanning...',
+  'nodes.empty':
+    'No other node yet. Start one in another checkout (pnpm dev) and it appears here within a few seconds.',
+  'nodes.use': 'Connect',
+  'nodes.needsToken': 'needs token',
+  'nodes.capabilities': '{n} capabilities',
+  'nodes.age': '{s}s ago',
+  'nodes.count': '{n} node(s)',
+  'nodes.backendNote': 'discovery: {backend} - shared directory {dir}, advertisement TTL {ttl}s',
+  'nodes.disabled': 'Discovery is switched off on this node (AGENTOS_DISCOVERY=off).',
+  'nodes.notConnected': 'Connect to a node first: this list comes from the runtime you are talking to.',
+
   // ------------------------------------------------------------------ sessions
   'sessions.title': 'Sessions',
   'sessions.subtitle': 'One session is one actor; messages inside a session are strictly ordered.',
@@ -659,6 +675,21 @@ const zh: Partial<Record<MessageKey, string>> = {
   'connection.healthHint': '运行时进程的存活探针。',
   'connection.noResponse': '暂无响应——请点击「连接」。',
   'connection.metaHint': '节点标识、后端、限额以及协商后的事件通道路径。',
+
+  // ------------------------------------------------------------------ node discovery
+  'nodes.title': '已发现的节点',
+  'nodes.subtitle': '本运行时能看到的其他节点；一键切换，不必手填端口。',
+  'nodes.self': '本节点',
+  'nodes.scanning': '扫描中…',
+  'nodes.empty': '暂时没有其他节点。在另一个工作区执行 pnpm dev，几秒内就会出现在这里。',
+  'nodes.use': '连接',
+  'nodes.needsToken': '需要令牌',
+  'nodes.capabilities': '{n} 项能力',
+  'nodes.age': '{s} 秒前',
+  'nodes.count': '{n} 个节点',
+  'nodes.backendNote': '发现方式：{backend} —— 共享目录 {dir}，播报有效期 {ttl} 秒',
+  'nodes.disabled': '本节点已关闭发现功能（AGENTOS_DISCOVERY=off）。',
+  'nodes.notConnected': '请先连接一个节点：这份列表来自你正在对话的那个运行时。',
 
   // ------------------------------------------------------------------ sessions
   'sessions.title': '会话',

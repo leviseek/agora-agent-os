@@ -64,6 +64,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/workers", get(handlers::list_workers))
         .route("/v1/actors", get(handlers::list_actors))
         .route("/v1/events", get(handlers::list_events))
+        .route("/v1/nodes", get(handlers::list_nodes))
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/metrics", get(handlers::metrics))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), middleware::guard));

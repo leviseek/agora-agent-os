@@ -30,6 +30,9 @@ use agentos_control_plane::placement::{PlacementPolicy, PlacementService, Worker
 use agentos_control_plane::policy::PolicyEngine;
 use agentos_event_bus::{EventBus, LocalEventBus};
 use agentos_model_router::router::{ModelRouter, ProviderInfo};
+use agentos_network::discovery::{
+    DiscoveryEvent, LocalFileDiscovery, NodeDiscovery, NodeInfo, StubDiscovery,
+};
 use agentos_storage::artifact::{ArtifactStore, StoreArtifactStore};
 use agentos_storage::blob::BlobStore;
 use agentos_storage::store::Store;
@@ -58,6 +61,10 @@ pub struct KernelHealth {
     pub models: Vec<ProviderInfo>,
     pub wasm_instances: usize,
     pub directory_cache: (u64, u64),
+    /// Discovery backend in use ("local-file", "stub", ...).
+    pub discovery: String,
+    /// Nodes currently visible besides this one.
+    pub peers: usize,
 }
 
 /// The wired runtime. Cheap to clone behind an Arc; every field is an interface.
@@ -81,6 +88,8 @@ pub struct Kernel {
     pub sessions: Arc<SessionManager>,
     pub wasm: Arc<WasmEngine>,
     pub transfer: Arc<dyn ActorTransfer>,
+    /// Makes this node visible to others and lists the ones it can see.
+    pub discovery: Arc<dyn NodeDiscovery>,
     pub started_at: Timestamp,
     shutdown: tokio_util::sync::CancellationToken,
 }
@@ -239,6 +248,16 @@ impl Kernel {
             tracing::info!(sessions = warmed, "directory cache warmed from durable state");
         }
 
+        // --- discovery: make this node visible, and see the others --------------------
+        let discovery: Arc<dyn NodeDiscovery> = if config.discovery.enabled {
+            Arc::new(LocalFileDiscovery::open(
+                config.discovery.dir.clone(),
+                config.discovery.ttl_ms,
+            )?)
+        } else {
+            Arc::new(StubDiscovery::new())
+        };
+
         let kernel = Arc::new(Self {
             config,
             store,
@@ -259,12 +278,18 @@ impl Kernel {
             sessions,
             wasm,
             transfer,
+            discovery,
             started_at: now_ms(),
             shutdown: tokio_util::sync::CancellationToken::new(),
         });
 
         kernel.spawn_heartbeat(local_worker.id.clone());
         kernel.spawn_lease_reaper();
+        if let Err(error) = kernel.announce_self().await {
+            // Discovery is a hint, never a startup requirement: warn and keep serving.
+            tracing::warn!(error = %error, "cannot advertise this node for discovery");
+        }
+        kernel.spawn_discovery();
 
         kernel
             .bus
@@ -296,6 +321,114 @@ impl Kernel {
 
     pub fn correlation(&self) -> Correlation {
         Correlation::new()
+    }
+
+    /// What this node tells the others about itself.
+    pub fn self_node_info(&self) -> NodeInfo {
+        NodeInfo {
+            node_id: agentos_core::NodeId::from_raw(self.config.effective_node_id()),
+            name: self.config.node.name.clone(),
+            address: advertised_http_url(&self.config),
+            grpc_endpoint: Some(self.config.api.grpc_addr.clone()),
+            version: agentos_core::DOMAIN_VERSION.to_string(),
+            capabilities: self.registry.list().into_iter().map(|c| c.name).collect(),
+            auth_required: self.config.api.auth_required(),
+            transport: self.discovery.name().to_string(),
+            discovered_at: now_ms(),
+            last_seen: now_ms(),
+        }
+    }
+
+    /// Publish (or keep fresh) this node's advertisement.
+    pub async fn announce_self(&self) -> Result<()> {
+        if !self.config.discovery.enabled || !self.config.discovery.advertise {
+            return Ok(());
+        }
+        self.discovery.advertise(self.self_node_info())?;
+        tracing::info!(
+            node_id = %self.config.effective_node_id(),
+            backend = self.discovery.name(),
+            "node is discoverable"
+        );
+        Ok(())
+    }
+
+    /// Nodes visible besides this one.
+    pub fn peers(&self) -> Vec<Arc<NodeInfo>> {
+        self.discovery.nodes()
+    }
+
+    /// Discovery backend in use, for /v1/nodes and the console.
+    pub fn discovery_backend(&self) -> &'static str {
+        self.discovery.name()
+    }
+
+    /// Keep our advertisement fresh and turn peer changes into events, so every consumer (console,
+    /// log, future placement) learns about a new workspace the moment it appears.
+    fn spawn_discovery(self: &Arc<Self>) {
+        if !self.config.discovery.enabled {
+            return;
+        }
+        let kernel = self.clone();
+        // Refresh comfortably inside the TTL: a third of it, bounded so we neither spin nor lag.
+        let interval_ms = (kernel.config.discovery.ttl_ms / 3).clamp(500, 5_000);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+            loop {
+                tokio::select! {
+                    _ = kernel.shutdown.cancelled() => break,
+                    _ = ticker.tick() => {
+                        if kernel.config.discovery.advertise {
+                            if let Err(error) = kernel.discovery.advertise(kernel.self_node_info()) {
+                                tracing::warn!(error = %error, "cannot refresh the node advertisement");
+                            }
+                        }
+                        let events = match kernel.discovery.refresh() {
+                            Ok(events) => events,
+                            Err(error) => {
+                                tracing::warn!(error = %error, "discovery refresh failed");
+                                continue;
+                            }
+                        };
+                        for event in events {
+                            let published = match event {
+                                DiscoveryEvent::Joined(info) => {
+                                    tracing::info!(node = %info.name, address = %info.address, "node discovered");
+                                    kernel.bus.publish(
+                                        NewEvent::new(
+                                            EventKind::NodeDiscovered,
+                                            format!("node {} is available", info.name),
+                                        )
+                                        .node(kernel.config.effective_node_id())
+                                        .payload(serde_json::json!({
+                                            "node_id": info.node_id.as_str(),
+                                            "name": info.name,
+                                            "address": info.address,
+                                            "grpc": info.grpc_endpoint,
+                                            "capabilities": info.capabilities.len(),
+                                            "auth_required": info.auth_required,
+                                            "transport": info.transport,
+                                        })),
+                                    ).await
+                                }
+                                DiscoveryEvent::Left(id) => {
+                                    tracing::info!(node = %id, "node left");
+                                    kernel.bus.publish(
+                                        NewEvent::new(EventKind::NodeLost, format!("node {id} is gone"))
+                                            .warn()
+                                            .node(kernel.config.effective_node_id())
+                                            .payload(serde_json::json!({ "node_id": id.as_str() })),
+                                    ).await
+                                }
+                            };
+                            if let Err(error) = published {
+                                tracing::warn!(error = %error, "cannot publish a discovery event");
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn spawn_heartbeat(self: &Arc<Self>, worker_id: agentos_core::WorkerId) {
@@ -361,6 +494,8 @@ impl Kernel {
     /// Stop accepting work and flush. Actors get a chance to persist their final state.
     pub async fn shutdown(&self) {
         self.shutdown.cancel();
+        // Withdraw our advertisement so peers notice at once instead of waiting for the TTL.
+        let _ = self.discovery.stop().await;
         for handle in self.actors.list() {
             let _ = self.actors.stop(&handle.id).await;
         }
@@ -385,6 +520,8 @@ impl Kernel {
             models: self.models.provider_infos().await,
             wasm_instances: self.wasm.live_instances(),
             directory_cache: self.directory.cache_stats(),
+            discovery: self.discovery.name().to_string(),
+            peers: self.discovery.nodes().len(),
         })
     }
 
@@ -392,6 +529,24 @@ impl Kernel {
     pub async fn demo_goal(&self, goal: &str) -> Result<serde_json::Value> {
         let session = self.sessions.create_session("demo", "demo session").await?;
         self.sessions.post_goal(&session.id, goal).await
+    }
+}
+
+/// The URL other processes should use to reach this node.
+///
+/// A wildcard bind (0.0.0.0 / ::) is not an address anyone can connect to, so it is advertised as
+/// loopback: discovery here is same-machine first, and a cross-machine backend would advertise the
+/// real interface instead.
+fn advertised_http_url(config: &RuntimeConfig) -> String {
+    let addr = config.api.http_addr.trim();
+    let (host, port) = match addr.rsplit_once(':') {
+        Some((host, port)) => (host.trim_start_matches('[').trim_end_matches(']'), port),
+        None => (addr, "8788"),
+    };
+    if host == "0.0.0.0" || host == "::" || host.is_empty() {
+        format!("http://127.0.0.1:{port}")
+    } else {
+        format!("http://{addr}")
     }
 }
 

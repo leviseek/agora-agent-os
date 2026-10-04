@@ -243,6 +243,34 @@ export interface RuntimeMeta {
   workspace_root: string;
 }
 
+/** One node as reported by GET /v1/nodes. */
+export interface NodeSummary {
+  node_id: string;
+  name: string;
+  address: string;
+  grpc?: string | null;
+  version?: string;
+  capabilities?: string[];
+  auth_required?: boolean;
+  transport?: string;
+  last_seen?: number;
+  age_ms?: number;
+  /** True for the node this console is talking to. */
+  self: boolean;
+}
+
+export interface NodeListResponse {
+  self: NodeSummary;
+  nodes: NodeSummary[];
+  discovery: {
+    backend: string;
+    enabled: boolean;
+    advertise: boolean;
+    dir: string;
+    ttl_ms: number;
+  };
+}
+
 export interface LoginResponse {
   ok: boolean;
   auth_required: boolean;
@@ -671,6 +699,11 @@ export class AgentOsClient {
 
   healthz(): Promise<HealthResponse> {
     return this.request<HealthResponse>('/healthz', { method: 'GET' });
+  }
+
+  /** Nodes this runtime can see, including itself. */
+  listNodes(): Promise<NodeListResponse> {
+    return this.request<NodeListResponse>('/v1/nodes', { method: 'GET' });
   }
 
   meta(): Promise<RuntimeMeta> {

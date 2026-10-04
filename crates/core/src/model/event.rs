@@ -65,6 +65,10 @@ pub enum EventKind {
     ArtifactCreated,
     MemoryWritten,
     PolicyDenied,
+    /// Another node on this machine or network became visible.
+    NodeDiscovered,
+    /// A previously visible node stopped advertising.
+    NodeLost,
     Error,
 }
 
@@ -107,6 +111,8 @@ impl EventKind {
             EventKind::ArtifactCreated => "artifact_created",
             EventKind::MemoryWritten => "memory_written",
             EventKind::PolicyDenied => "policy_denied",
+            EventKind::NodeDiscovered => "node_discovered",
+            EventKind::NodeLost => "node_lost",
             EventKind::Error => "error",
         }
     }

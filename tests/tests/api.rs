@@ -50,6 +50,33 @@ impl Harness {
         Self::start_with_env("AGENTOS_TEST_API_TOKEN", auth_token, rate_limit).await
     }
 
+    /// A harness whose discovery directory is known, so a test can plant a peer advertisement.
+    async fn start_with_discovery(env_name: &str) -> (Self, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("agentos-api-disc-{}", agentos_core::now_ms()));
+        let discovery_dir = dir.join("nodes");
+        std::fs::create_dir_all(&discovery_dir).unwrap();
+        let mut config = RuntimeConfig::default();
+        config.storage.backend = StoreBackend::Memory;
+        config.storage.data_dir = dir.join("data");
+        config.policy.workspace_root = dir.join("workspace");
+        config.observability.log_level = "error".into();
+        config.api.auth_token_env = env_name.to_string();
+        config.discovery.dir = discovery_dir.clone();
+        config.discovery.ttl_ms = 30_000;
+        std::env::remove_var(env_name);
+        let kernel = Kernel::bootstrap(config).await.unwrap();
+        let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+        (
+            Self {
+                base: format!("http://{addr}"),
+                _kernel: kernel,
+                shutdown,
+                client: reqwest::Client::new(),
+            },
+            discovery_dir,
+        )
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
@@ -326,6 +353,72 @@ async fn next_json_opt(
             _ => return None,
         }
     }
+}
+
+/// Discovery must be visible through the gateway: a peer that starts up in another checkout
+/// shows up in /v1/nodes and in the event stream, without restarting the runtime that sees it.
+#[tokio::test]
+async fn discovered_nodes_appear_in_the_gateway() {
+    let (harness, discovery_dir) = Harness::start_with_discovery("AGENTOS_TEST_API_NODES_TOKEN").await;
+
+    let (status, body) = harness.get("/v1/nodes").await;
+    assert_eq!(status, 200);
+    assert!(body["nodes"].as_array().unwrap().is_empty(), "nobody else is running yet");
+    assert_eq!(body["self"]["self"], json!(true));
+    assert_eq!(body["discovery"]["backend"], json!("local-file"));
+    assert_eq!(body["discovery"]["enabled"], json!(true));
+
+    // Another node starts in another working directory and advertises itself.
+    let peer = json!({
+        "node_id": "peer-node-42",
+        "name": "agora-peer",
+        "address": "http://127.0.0.1:9999",
+        "grpc_endpoint": "127.0.0.1:9998",
+        "version": "0.1.0",
+        "capabilities": ["echo", "clock"],
+        "auth_required": false,
+        "transport": "local-file",
+        "discovered_at": agentos_core::now_ms(),
+        "last_seen": agentos_core::now_ms(),
+    });
+    std::fs::write(
+        discovery_dir.join("peer-node-42.json"),
+        serde_json::to_vec(&peer).unwrap(),
+    )
+    .unwrap();
+
+    // The heartbeat picks it up on its own schedule; no restart, no explicit refresh call.
+    let mut found = None;
+    for _ in 0..48 {
+        let (_, body) = harness.get("/v1/nodes").await;
+        if !body["nodes"].as_array().unwrap().is_empty() {
+            found = Some(body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let body = found.expect("the peer should be discovered without a restart");
+    let nodes = body["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["name"], json!("agora-peer"));
+    assert_eq!(nodes[0]["address"], json!("http://127.0.0.1:9999"));
+    assert_eq!(nodes[0]["capabilities"].as_array().unwrap().len(), 2);
+    assert_eq!(nodes[0]["self"], json!(false));
+
+    // A node appearing is an event, not only a query result: the console reacts to it.
+    let (_, events) = harness.get("/v1/events?limit=100").await;
+    let kinds: Vec<String> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["kind"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        kinds.iter().any(|kind| kind == "node_discovered"),
+        "expected a node_discovered event, got {kinds:?}"
+    );
+
+    harness.shutdown.cancel();
 }
 
 /// The router can be built without binding a port, which keeps these tests fast and deterministic.

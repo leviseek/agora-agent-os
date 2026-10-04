@@ -194,6 +194,8 @@ impl Libp2pNode {
                                         grpc_endpoint: None,
                                         version: "0.1.0".into(),
                                         capabilities: vec![],
+                                        auth_required: false,
+                                        transport: "mdns".into(),
                                         discovered_at: now_ms(),
                                         last_seen: now_ms(),
                                     };

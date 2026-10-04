@@ -352,6 +352,54 @@ pub async fn list_actors(State(state): State<ApiState>) -> ApiResult<Json<Value>
     })))
 }
 
+/// Who else is running: this node plus every node the discovery plane can see.
+///
+/// The console uses it to offer a one-click switch to another workspace without the user having to
+/// know any port. Discovery never touches the request path - this endpoint reads a cached view.
+pub async fn list_nodes(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
+    let mut nodes: Vec<Value> = state
+        .kernel
+        .peers()
+        .iter()
+        .map(|info| {
+            json!({
+                "node_id": info.node_id.as_str(),
+                "name": info.name,
+                "address": info.address,
+                "grpc": info.grpc_endpoint,
+                "version": info.version,
+                "capabilities": info.capabilities,
+                "auth_required": info.auth_required,
+                "transport": info.transport,
+                "last_seen": info.last_seen,
+                "age_ms": now_ms().saturating_sub(info.last_seen),
+                "self": false,
+            })
+        })
+        .collect();
+    nodes.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+
+    Ok(Json(json!({
+        "self": {
+            "node_id": state.kernel.config.effective_node_id(),
+            "name": state.kernel.config.node.name,
+            "address": state.kernel.config.api.http_addr,
+            "grpc": state.kernel.config.api.grpc_addr,
+            "capabilities": state.kernel.registry.list().into_iter().map(|c| c.name).collect::<Vec<_>>(),
+            "auth_required": state.kernel.config.api.auth_required(),
+            "self": true,
+        },
+        "nodes": nodes,
+        "discovery": {
+            "backend": state.kernel.discovery_backend(),
+            "enabled": state.kernel.config.discovery.enabled,
+            "advertise": state.kernel.config.discovery.advertise,
+            "dir": state.kernel.config.discovery.dir.display().to_string(),
+            "ttl_ms": state.kernel.config.discovery.ttl_ms,
+        },
+    })))
+}
+
 pub async fn list_models(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({
         "providers": state.kernel.models.provider_infos().await,
@@ -413,6 +461,8 @@ fn parse_event_kind(kind: &str) -> Option<EventKind> {
         EventKind::ArtifactCreated,
         EventKind::MemoryWritten,
         EventKind::PolicyDenied,
+        EventKind::NodeDiscovered,
+        EventKind::NodeLost,
         EventKind::Error,
     ];
     all.into_iter().find(|k| k.as_str() == kind)
