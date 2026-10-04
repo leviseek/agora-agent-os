@@ -65,6 +65,8 @@ pub enum EventKind {
     ArtifactCreated,
     MemoryWritten,
     PolicyDenied,
+    /// Turns that left the history window were summarised into one memory record.
+    SessionCompacted,
     /// Project instruction files were read from the workspace into a prompt.
     ContextLoaded,
     /// Memories were read back into a prompt. Deliberately not MemoryWritten: a recall is a read,
@@ -117,6 +119,7 @@ impl EventKind {
             EventKind::MemoryWritten => "memory_written",
             EventKind::MemoryRecalled => "memory_recalled",
             EventKind::ContextLoaded => "context_loaded",
+            EventKind::SessionCompacted => "session_compacted",
             EventKind::PolicyDenied => "policy_denied",
             EventKind::NodeDiscovered => "node_discovered",
             EventKind::NodeLost => "node_lost",

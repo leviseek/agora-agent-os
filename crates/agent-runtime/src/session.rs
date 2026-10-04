@@ -8,7 +8,8 @@
 
 use crate::agent_loop::{history_for_model, AgentLoop, PromptContext};
 use crate::context::load_workspace_context;
-use crate::memory::{episode, recall_context, MemoryStore};
+use crate::compaction::compaction_window;
+use crate::memory::{episode, recall_context, summary, MemoryStore};
 use agentos_actor_runtime::actor::{Actor, ActorContext, ErasedActor, TypedActor};
 use agentos_actor_runtime::checkpoint::CheckpointStore;
 use agentos_core::error::{Result, RuntimeError};
@@ -19,6 +20,7 @@ use agentos_core::model::{
 use agentos_core::state::{AgentRunState, SessionState, StateMachine};
 use agentos_core::telemetry::Correlation;
 use agentos_core::{now_ms, SessionId};
+use agentos_model_router::{ChatMessage, ModelRequest, ModelTask};
 use agentos_event_bus::EventBus;
 use agentos_model_router::ModelRouter;
 use agentos_capability_runtime::mesh::CapabilityMesh;
@@ -71,6 +73,9 @@ pub struct SessionDeps {
     /// Project instruction files read from the workspace at the start of every run.
     pub context_files: Vec<String>,
     pub context_files_chars: usize,
+    /// Compaction: whether to summarise dropped turns, and the smallest range worth a model call.
+    pub compaction_enabled: bool,
+    pub compaction_min_messages: usize,
     /// Live cancellation tokens per session. Deliberately OUTSIDE the actor mailbox: cancelling a
     /// run must not queue behind the run that is being cancelled.
     pub run_tokens: Arc<RwLock<std::collections::HashMap<SessionId, CancellationToken>>>,
@@ -87,6 +92,13 @@ pub struct SessionActorState {
     /// Total goals handled by this actor instance.
     pub goals_handled: u64,
     pub restored_generation: u64,
+    /// How many transcript entries are already covered by a stored summary. Part of the durable
+    /// state on purpose: a restart or a migration must not re-summarise turns it already paid for.
+    #[serde(default)]
+    pub compacted_through: usize,
+    /// What the summaries themselves cost, kept apart from the runs that triggered them.
+    #[serde(default)]
+    pub compaction_usage: TokenUsage,
 }
 
 impl SessionActorState {
@@ -99,6 +111,8 @@ impl SessionActorState {
             active_run: None,
             goals_handled: 0,
             restored_generation: 0,
+            compacted_through: 0,
+            compaction_usage: TokenUsage::default(),
         }
     }
 
@@ -145,6 +159,97 @@ impl SessionActor {
             .transition(next)
             .map_err(|e| RuntimeError::conflict(format!("session {}: {e}", self.session_id)))?;
         self.state.session.updated_at = now_ms();
+        Ok(())
+    }
+
+    /// Summarise the turns that left the history window, once, and store the summary as memory.
+    ///
+    /// Failure is contained: a model that cannot summarise leaves the watermark where it is, so the
+    /// next run retries the same range instead of silently forgetting it.
+    async fn maybe_compact(&mut self) -> Result<()> {
+        if !self.deps.compaction_enabled {
+            return Ok(());
+        }
+        let window = compaction_window(
+            self.state.transcript.len(),
+            self.state.compacted_through,
+            self.deps.history_messages,
+            self.deps.compaction_min_messages,
+        );
+        let Some((start, end)) = window else {
+            return Ok(());
+        };
+
+        let mut transcript = String::new();
+        for message in &self.state.transcript[start..end] {
+            let role = message.role.as_str();
+            for part in &message.parts {
+                if let agentos_core::model::ContentPart::Text { text } = part {
+                    transcript.push_str(role);
+                    transcript.push_str(": ");
+                    transcript.push_str(text);
+                    transcript.push('\n');
+                }
+            }
+        }
+        if transcript.trim().is_empty() {
+            // Nothing readable in that range: move the watermark so it is not rescanned forever.
+            self.state.compacted_through = end;
+            return Ok(());
+        }
+
+        let request = ModelRequest::new(
+            ModelTask::Summarize,
+            vec![
+                ChatMessage::system(
+                    "Summarise the conversation below for a later reader. Keep decisions, facts,                      names and open questions; drop pleasantries. Answer with the summary only.",
+                ),
+                ChatMessage::user(transcript),
+            ],
+        );
+        let response = match self.deps.models.complete(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, "summarisation call failed");
+                return Err(error);
+            }
+        };
+
+        self.state.compaction_usage.record(
+            u64::from(response.usage.prompt_tokens),
+            u64::from(response.usage.completion_tokens),
+            u64::from(response.usage.total_tokens),
+        );
+        let summary_text = response.content.trim();
+        if !summary_text.is_empty() {
+            let _ = self
+                .deps
+                .memory
+                .write(summary(
+                    self.session_id.clone(),
+                    format!("summary of turns {start}..{end}: {summary_text}"),
+                ))
+                .await;
+        }
+        self.state.compacted_through = end;
+        self.persist_session().await?;
+
+        self.deps
+            .bus
+            .publish(
+                NewEvent::new(EventKind::SessionCompacted, "older turns summarised")
+                    .session(self.session_id.clone())
+                    .node(self.deps.node_id.clone())
+                    .payload(serde_json::json!({
+                        "from": start,
+                        "to": end,
+                        "turns": end - start,
+                        "summary_chars": summary_text.chars().count(),
+                        "tokens": response.usage.total_tokens,
+                        "provider": response.provider,
+                    })),
+            )
+            .await?;
         Ok(())
     }
 
@@ -229,6 +334,12 @@ impl SessionActor {
             .run_tokens
             .write()
             .insert(self.session_id.clone(), token.clone());
+
+        // Compact before assembling anything else: the summary is then written, recalled and
+        // visible in this very turn's prompt rather than a turn late.
+        if let Err(error) = self.maybe_compact().await {
+            tracing::warn!(error = %error, "compaction failed; the conversation stays as it is");
+        }
 
         // The conversation so far, minus the goal that was just appended: the loop adds the
         // current goal itself, so passing it here would duplicate the newest turn.
@@ -429,11 +540,15 @@ impl SessionActor {
             })).collect::<Vec<_>>(),
             // Session totals are summed from the runs rather than kept beside them: one source of
             // truth cannot drift, and a run restored from a checkpoint is counted exactly once.
+            // Summaries are part of what the session cost, so they are in the total - and shown
+            // apart from it, because they are paid for by the session rather than by a run.
+            "compaction_usage": self.state.compaction_usage,
+            "compacted_through": self.state.compacted_through,
             "usage": self
                 .state
                 .runs
                 .iter()
-                .fold(TokenUsage::default(), |mut total, run| {
+                .fold(self.state.compaction_usage, |mut total, run| {
                     total.add(&run.usage);
                     total
                 }),

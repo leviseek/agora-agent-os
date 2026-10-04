@@ -506,6 +506,82 @@ async fn discovered_nodes_appear_in_the_gateway() {
     harness.shutdown.cancel();
 }
 
+/// When the conversation outgrows the history window, the dropped turns are summarised once and
+/// kept as memory - dropped from the prompt, not from memory.
+#[tokio::test]
+async fn dropped_turns_are_summarised_and_kept_as_memory() {
+    let dir = std::env::temp_dir().join(format!("agentos-compact-{}", agentos_core::now_ms()));
+    let mut config = RuntimeConfig::default();
+    config.storage.backend = StoreBackend::Memory;
+    config.storage.data_dir = dir.join("data");
+    config.policy.workspace_root = dir.join("workspace");
+    config.observability.log_level = "error".into();
+    config.api.auth_token_env = "AGENTOS_TEST_COMPACT_TOKEN".into();
+    // A three-message window: the fourth turn pushes two turns out, and four is enough to compact.
+    config.policy.history_messages = 3;
+    config.policy.compaction_enabled = true;
+    config.policy.compaction_min_messages = 2;
+    std::env::remove_var("AGENTOS_TEST_COMPACT_TOKEN");
+
+    let kernel = Kernel::bootstrap(config).await.unwrap();
+    let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _kernel: kernel.clone(),
+        shutdown,
+        client: reqwest::Client::new(),
+    };
+
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "compact" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    for turn in 0..3 {
+        let (status, _) = h
+            .post(
+                &format!("/v1/sessions/{id}/messages"),
+                json!({ "text": format!("turn {turn}: what is {turn}*7?"), "wait": true }),
+            )
+            .await;
+        assert_eq!(status, 200);
+    }
+
+    let (_, events) = h.get("/v1/events?limit=300&kinds=session_compacted").await;
+    let compacted = events["events"].as_array().unwrap();
+    assert!(!compacted.is_empty(), "the window was exceeded, so a summary must exist: {events}");
+    assert!(
+        compacted[0]["payload"]["turns"].as_u64().unwrap() >= 2,
+        "the summary covers the turns that left the window: {}",
+        compacted[0]
+    );
+
+    // The summary is a memory record, and it is what recall now feeds the prompt.
+    let session_id = agentos_core::SessionId::from_raw(id.clone());
+    let memories = kernel
+        .memory
+        .recall(agentos_core::model::MemoryQuery {
+            session_id: Some(session_id),
+            kinds: vec![agentos_core::model::MemoryKind::Episode],
+            limit: 20,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        memories.iter().any(|m| m.tags.contains(&"summary".to_string())),
+        "a summary record must be stored: {:?}",
+        memories.iter().map(|m| m.tags.clone()).collect::<Vec<_>>()
+    );
+
+    let (_, detail) = h.get(&format!("/v1/sessions/{id}")).await;
+    assert!(
+        detail["runtime"]["compaction_usage"]["calls"].as_u64().unwrap() >= 1,
+        "the summarisation call is accounted for: {}",
+        detail["runtime"]["compaction_usage"]
+    );
+
+    h.shutdown.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Project instructions in the workspace must reach the prompt, and only from inside the jail.
 #[tokio::test]
 async fn workspace_context_files_are_loaded_into_the_prompt() {

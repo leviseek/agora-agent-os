@@ -152,6 +152,17 @@ pub fn episode(session: SessionId, content: impl Into<String>, tags: &[&str]) ->
     record
 }
 
+/// A compaction summary: one record standing in for a range of turns.
+///
+/// Importance is raised above ordinary turns on purpose - the store sorts by it, so a summary of
+/// ten dropped turns reaches the prompt before any single one of them.
+pub fn summary(session: SessionId, content: impl Into<String>) -> MemoryRecord {
+    let mut record = MemoryRecord::new(session, MemoryKind::Episode, content);
+    record.tags = vec!["session".into(), "summary".into()];
+    record.importance = 0.95;
+    record
+}
+
 pub fn semantic(session: SessionId, content: impl Into<String>, tags: &[&str]) -> MemoryRecord {
     let mut record = MemoryRecord::new(session, MemoryKind::Semantic, content);
     record.tags = tags.iter().map(|t| t.to_string()).collect();

@@ -138,6 +138,11 @@ pub struct PolicyConfig {
     /// Character budget for that history. The oldest turns are dropped first, and the newest turn
     /// is truncated rather than dropped, so the immediate context is never lost.
     pub history_chars: usize,
+    /// Summarise the turns that fell out of the history window, so they are dropped from the
+    /// prompt rather than from memory. Costs one model call per compaction.
+    pub compaction_enabled: bool,
+    /// Do not spend a model call on fewer dropped turns than this.
+    pub compaction_min_messages: usize,
     /// Workspace files whose contents are prepended to every prompt as project instructions
     /// (AGENTS.md and friends). Read through the workspace jail; an empty list disables this.
     pub context_files: Vec<String>,
@@ -344,6 +349,8 @@ impl Default for RuntimeConfig {
                 max_steps_per_run: 12,
                 history_messages: 20,
                 history_chars: 8_000,
+                compaction_enabled: true,
+                compaction_min_messages: 4,
                 context_files: vec!["AGENTS.md".into()],
                 context_files_chars: 8_000,
                 memory_recall_limit: 5,
@@ -470,6 +477,12 @@ impl RuntimeConfig {
         if let Some(v) = Self::env_str("AGENTOS_CONTEXT_FILES_CHARS") {
             if let Ok(n) = v.parse() { self.policy.context_files_chars = n; }
         }
+        if let Some(v) = Self::env_str("AGENTOS_COMPACTION") {
+            self.policy.compaction_enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Some(v) = Self::env_str("AGENTOS_COMPACTION_MIN_MESSAGES") {
+            if let Ok(n) = v.parse() { self.policy.compaction_min_messages = n; }
+        }
         if let Some(v) = Self::env_str("AGENTOS_MAX_CONCURRENT_TASKS") {
             if let Ok(n) = v.parse() { self.policy.max_concurrent_tasks = n; }
         }
@@ -545,6 +558,11 @@ impl RuntimeConfig {
         }
         if self.limits.session_queue_capacity == 0 {
             return Err(RuntimeError::invalid_input("limits.session_queue_capacity must be > 0"));
+        }
+        if self.policy.compaction_enabled && self.policy.history_messages == 0 {
+            return Err(RuntimeError::invalid_input(
+                "policy.compaction_enabled needs history_messages > 0: without a window there is nothing to compact",
+            ));
         }
         if !self.policy.context_files.is_empty() && self.policy.context_files_chars == 0 {
             return Err(RuntimeError::invalid_input(

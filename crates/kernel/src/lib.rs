@@ -237,6 +237,8 @@ impl Kernel {
             memory_recall_chars: config.policy.memory_recall_chars,
             context_files: config.policy.context_files.clone(),
             context_files_chars: config.policy.context_files_chars,
+            compaction_enabled: config.policy.compaction_enabled,
+            compaction_min_messages: config.policy.compaction_min_messages,
             run_tokens: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         });
 
