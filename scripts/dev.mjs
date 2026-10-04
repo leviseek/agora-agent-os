@@ -210,13 +210,34 @@ function resolveViteBin() {
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
+/**
+ * Stop everything and wait for it, rather than exiting on the spot.
+ *
+ * Ctrl+C reaches every process in the console group at once, so the runtime is already draining
+ * while we get here. Calling process.exit() immediately used to swallow our own "stopping ..."
+ * lines - node does not block on stdout writes to a pipe - which made the tail of the log look as
+ * if the stack had simply vanished.
+ */
 function shutdown() {
+  if (stopping) return;
   stopping = true;
-  for (const [name, child] of children) {
-    console.log('[dev] stopping ' + name);
-    if (!child.killed) child.kill();
+  const names = [...children.keys()];
+  console.log('[dev] stopping ' + (names.length === 0 ? 'nothing' : names.join(', ')));
+  for (const child of children.values()) {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
   }
-  process.exit(0);
+
+  const deadline = Date.now() + 2_000;
+  const timer = setInterval(() => {
+    const alive = [...children.values()].filter(
+      (child) => child.exitCode === null && child.signalCode === null,
+    );
+    if (alive.length === 0 || Date.now() > deadline) {
+      clearInterval(timer);
+      console.log('[dev] stopped');
+      process.exit(0);
+    }
+  }, 100);
 }
 
 process.on('SIGINT', shutdown);
