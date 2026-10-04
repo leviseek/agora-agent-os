@@ -82,6 +82,14 @@ instances/<name>/
   run/             pid, stdout, stderr
 ```
 
+**If a development process dies.** The supervisor decodes the exit code instead of printing a
+number, because a number tells nobody anything: `0xC0000409` (3221226505) is a native
+`__fastfail` - a V8 fatal error, a native stack overflow or an out of memory abort - `0xC000013A`
+is Ctrl+C, `0xC0000005` an access violation. A crashed `web` or `control` child is restarted
+once per second, at most three times a minute; the runtime is deliberately not restarted, because a
+runtime that dies is a bug to look at rather than a condition to paper over. The console reconnects
+on its own (exponential backoff), so a restarted dev server needs no page reload.
+
 Doing it by hand is the same three variables, if you prefer your own process manager:
 
 ```bash

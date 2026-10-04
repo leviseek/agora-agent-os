@@ -124,9 +124,37 @@ const nodeName = process.env.AGENTOS_NODE_NAME ?? path.basename(repoRoot) + '-' 
 
 // --- children ---------------------------------------------------------------------------------
 
-const children = [];
+/** Current child per role, so a restart replaces rather than accumulates. */
+const children = new Map();
+/** Restart timestamps per role, to stop a crash loop instead of feeding it. */
+const restarts = new Map();
+let stopping = false;
 
-function run(name, command, commandArgs, options = {}) {
+/**
+ * Exit codes a Node process dies with on Windows when it does not die of its own accord. A bare
+ * number tells nobody anything: 3221226505 in a terminal looks like noise, while "__fastfail" is
+ * actionable.
+ */
+const EXIT_MEANINGS = new Map([
+  [0xc0000005, 'access violation'],
+  [0xc000013a, 'terminated by Ctrl+C'],
+  [0xc0000142, 'DLL initialisation failed'],
+  [0xc0000374, 'heap corruption'],
+  [0xc0000409, '__fastfail: V8 fatal error, native stack overflow or out of memory'],
+  [0xffffffff, 'killed by a job object or the task manager'],
+]);
+
+function describeExit(code, signal) {
+  if (signal !== null && signal !== undefined) return 'killed by ' + signal;
+  if (code === null) return 'killed';
+  if (code === 0) return 'clean exit';
+  const unsigned = code >>> 0;
+  const meaning = EXIT_MEANINGS.get(unsigned);
+  const hex = '0x' + unsigned.toString(16);
+  return meaning === undefined ? 'code ' + code : 'code ' + code + ' (' + hex + ': ' + meaning + ')';
+}
+
+function spawnChild(name, command, commandArgs, options) {
   console.log('[' + name + '] ' + path.basename(command) + ' ' + commandArgs.join(' '));
   const child = spawn(command, commandArgs, {
     cwd: options.cwd ?? repoRoot,
@@ -135,18 +163,42 @@ function run(name, command, commandArgs, options = {}) {
     env: { ...process.env, ...options.env },
   });
   child.on('error', (error) => console.error('[' + name + '] failed to start: ' + error.message));
-  child.on('exit', (code) => {
-    if (code === 0 || code === null) return;
-    console.error('[' + name + '] exited with code ' + code);
-    // Without the runtime the rest of the stack has nothing to talk to: stop it rather than
-    // leaving a control server and a dev server pointing at a dead gateway.
-    if (name === 'runtime') {
-      console.error('[dev] the runtime is gone, stopping the rest of the stack');
-      shutdown();
-    }
-  });
-  children.push({ name, child });
   return child;
+}
+
+function run(name, command, commandArgs, options = {}) {
+  const start = () => {
+    const child = spawnChild(name, command, commandArgs, options);
+    child.on('exit', (code, signal) => {
+      if (stopping) return;
+      console.error('[' + name + '] exited: ' + describeExit(code, signal));
+      if (name === 'runtime') {
+        // Without the runtime the stack has nothing to talk to: stop rather than leave a control
+        // server and a dev server pointing at a dead gateway.
+        console.error('[dev] the runtime is gone, stopping the rest of the stack');
+        shutdown();
+        return;
+      }
+      if (options.restart === false) return;
+      // A crashed dev server used to leave a console that could not load anything. Restart it,
+      // but never in a loop: three crashes a minute means something is actually wrong.
+      const recent = (restarts.get(name) ?? []).filter((at) => Date.now() - at < 60_000);
+      if (recent.length >= 3) {
+        console.error(
+          '[' + name + '] crashed ' + recent.length + ' times in the last minute; not restarting it.',
+        );
+        console.error('[dev] the rest of the stack is still running; fix the cause, then re-run pnpm dev');
+        return;
+      }
+      recent.push(Date.now());
+      restarts.set(name, recent);
+      console.log('[' + name + '] restarting in 1s (crash ' + recent.length + ' of 3 allowed per minute)');
+      setTimeout(start, 1_000);
+    });
+    children.set(name, child);
+    return child;
+  };
+  return start();
 }
 
 /** pnpm keeps each dependency in its own directory, so resolve the bin from the package itself. */
@@ -159,7 +211,8 @@ function resolveViteBin() {
 }
 
 function shutdown() {
-  for (const { name, child } of children) {
+  stopping = true;
+  for (const [name, child] of children) {
     console.log('[dev] stopping ' + name);
     if (!child.killed) child.kill();
   }

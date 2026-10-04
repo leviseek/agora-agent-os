@@ -13,6 +13,11 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       strictPort: true,
+      watch: {
+        // "pnpm build" writes here. Without this the dev server wakes up for every chunk and
+        // sourcemap a build drops into its own tree, which is pure noise while developing.
+        ignored: ['**/dist/**', '**/.vite/**'],
+      },
       proxy: {
         // Same-origin API access: the browser talks to :5173, Vite forwards to the runtime.
         '/healthz': { target, changeOrigin: true },
