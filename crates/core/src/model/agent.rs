@@ -11,9 +11,61 @@ pub struct AgentSpec {
     pub system_prompt: String,
     pub allowed_capabilities: Vec<String>,
     pub max_steps: u32,
+    /// The provider this run should prefer. None means "let the router decide".
     pub model_hint: Option<String>,
+    /// How much thinking to ask for. None means "whatever the provider does by default".
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub temperature: f32,
     pub timeout_ms: u64,
+}
+
+/// How hard the model should think before answering.
+///
+/// Deliberately provider-neutral: the runtime states an intent, and each adapter translates it into
+/// whatever its API calls it (or ignores it, saying so in a comment rather than in a made-up
+/// parameter). Inventing a parameter name for a provider that does not document one is how a
+/// request starts failing with a 400 nobody can explain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Answer directly: no extended thinking, smallest budget.
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Parse the wire spelling. Returns None for anything unknown, so a client typo cannot
+    /// silently become "high".
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "disabled" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" | "mid" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    /// A token budget for providers that take one instead of an enum.
+    pub fn thinking_budget_tokens(self) -> u32 {
+        match self {
+            Self::Off => 0,
+            Self::Low => 1_024,
+            Self::Medium => 4_096,
+            Self::High => 16_384,
+        }
+    }
 }
 
 impl Default for AgentSpec {
@@ -24,6 +76,7 @@ impl Default for AgentSpec {
             allowed_capabilities: vec![],
             max_steps: 12,
             model_hint: None,
+            reasoning_effort: None,
             temperature: 0.2,
             timeout_ms: 60_000,
         }
@@ -180,6 +233,13 @@ pub struct AgentRun {
     /// task-graph calls.
     #[serde(default)]
     pub usage: TokenUsage,
+    /// The provider this run was asked to prefer, if any. Recorded so a surprising answer can be
+    /// traced back to the choice that produced it.
+    #[serde(default)]
+    pub model_hint: Option<String>,
+    /// The thinking effort this run was asked for, if any.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl AgentRun {
@@ -202,6 +262,8 @@ impl AgentRun {
             finished_at: None,
             task_graph_id: None,
             usage: TokenUsage::default(),
+            model_hint: spec.model_hint.clone(),
+            reasoning_effort: spec.reasoning_effort,
         }
     }
 

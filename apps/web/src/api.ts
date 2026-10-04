@@ -278,6 +278,10 @@ export interface LoginResponse {
 }
 
 export interface SessionRecord {
+  /** Provider this session prefers; null lets the router decide. */
+  model_hint?: string | null;
+  /** Thinking effort this session asks for; null means the provider default. */
+  reasoning_effort?: string | null;
   id: string;
   user_id: string;
   title: string;
@@ -320,6 +324,9 @@ export interface RunSummary {
   usage?: TokenUsage;
   /** Who actually answered the planning call; null on records written before it was recorded. */
   provider?: string | null;
+  /** The provider this run was asked to prefer, and the thinking effort it was given. */
+  model_hint?: string | null;
+  reasoning_effort?: string | null;
   model: string | null;
   final_answer: string | null;
   error: string | null;
@@ -781,6 +788,22 @@ export class AgentOsClient {
     });
   }
 
+  /**
+   * Change a session's title, preferred provider or thinking effort.
+   *
+   * An absent field is left alone; an empty string clears it, which is how the console goes back
+   * to letting the router choose.
+   */
+  configureSession(
+    id: string,
+    patch: { title?: string; model?: string; effort?: string },
+  ): Promise<{ session: SessionRecord }> {
+    return this.request<{ session: SessionRecord }>('/v1/sessions/' + id, {
+      method: 'PATCH',
+      json: patch,
+    });
+  }
+
   listSessionsUnfiltered(): Promise<SessionsResponse> {
     return this.request<SessionsResponse>('/v1/sessions', { method: 'GET' });
   }
@@ -811,10 +834,17 @@ export class AgentOsClient {
     text: string,
     wait: boolean,
     images: string[] = [],
+    model?: string,
+    effort?: string,
   ): Promise<PostMessageResponse> {
+    const json: Record<string, unknown> = { text, wait };
+    if (images.length > 0) json.images = images;
+    // A one-off choice for this goal only; the session keeps whatever it had.
+    if (model !== undefined && model.length > 0) json.model = model;
+    if (effort !== undefined && effort.length > 0) json.effort = effort;
     return this.request<PostMessageResponse>('/v1/sessions/' + encodeURIComponent(id) + '/messages', {
       method: 'POST',
-      json: images.length > 0 ? { text, wait, images } : { text, wait },
+      json,
     });
   }
 

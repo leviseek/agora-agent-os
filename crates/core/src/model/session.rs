@@ -19,6 +19,12 @@ pub struct SessionRecord {
     pub updated_at: Timestamp,
     pub closed_at: Option<Timestamp>,
     pub metadata: BTreeMap<String, String>,
+    /// Provider this session prefers. None lets the router decide (its default and failover order).
+    #[serde(default)]
+    pub model_hint: Option<String>,
+    /// How much thinking this session asks for. None means "whatever the provider defaults to".
+    #[serde(default)]
+    pub reasoning_effort: Option<crate::model::ReasoningEffort>,
 }
 
 impl SessionRecord {
@@ -36,6 +42,8 @@ impl SessionRecord {
             updated_at: now,
             closed_at: None,
             metadata: BTreeMap::new(),
+            model_hint: None,
+            reasoning_effort: None,
         }
     }
 

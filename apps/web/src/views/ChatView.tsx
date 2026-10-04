@@ -66,6 +66,8 @@ export function ChatView() {
     streamed,
     attachments,
     artifactUrl,
+    modelOptions,
+    configureSession,
   } = useApp();
   const { setView } = useNav();
   const session = useSessionEvents(selectedSessionId, 200);
@@ -74,6 +76,10 @@ export function ChatView() {
   // Workspace-relative image paths, comma separated. Attachments are read by the runtime through
   // the workspace jail, so this box can only name files the runtime is allowed to read.
   const [imagePaths, setImagePaths] = useState('');
+  // The session's stored choice, edited in place. Changing it PATCHes the session, so the next
+  // goal (and every goal after) uses it; a one-off override is available through the API.
+  const sessionModel = detail === null ? '' : detail.session.model_hint ?? '';
+  const sessionEffort = detail === null ? '' : detail.session.reasoning_effort ?? '';
   const [wait, setWait] = useState(false);
   const [lastResult, setLastResult] = useState<string | null>(null);
 
@@ -222,6 +228,7 @@ export function ChatView() {
             // provider is the recorded answerer; model is the legacy field that held the requested
             // one, so fall back to it only when the run predates the recorded answerer.
             const answeredBy = run.provider ?? run.model;
+            const effort = run.reasoning_effort ?? null;
             return (
               <article className="run" key={run.agent_id}>
                 <header className="run-head">
@@ -239,6 +246,11 @@ export function ChatView() {
                         {t('chat.providerLabel', { provider: answeredBy })}
                       </Badge>
                     )
+                  ) : null}
+                  {effort !== null ? (
+                    // What this run was asked for, next to who answered: without it, a run that
+                    // cost more than expected has no visible cause.
+                    <Badge tone="muted">{t('chat.effortLabel', { effort })}</Badge>
                   ) : null}
                   <span className="muted small">{t('chat.stepsCount', { n: run.steps })}</span>
                   {run.usage !== undefined && run.usage.calls > 0 ? (
@@ -309,6 +321,41 @@ export function ChatView() {
 
       <Panel title={t('chat.send')} subtitle="POST /v1/sessions/{id}/messages">
         <form className="chat-form" onSubmit={(event) => void onSubmit(event)}>
+          <div className="model-row">
+            <label>
+              <span>{t('chat.model')}</span>
+              <select
+                value={sessionModel}
+                disabled={detail === null || connection !== 'online'}
+                onChange={(event) =>
+                  void configureSession(selectedSessionId ?? '', { model: event.target.value })
+                }
+              >
+                <option value="">{t('chat.modelAuto')}</option>
+                {modelOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>{t('chat.effort')}</span>
+              <select
+                value={sessionEffort}
+                disabled={detail === null || connection !== 'online'}
+                onChange={(event) =>
+                  void configureSession(selectedSessionId ?? '', { effort: event.target.value })
+                }
+              >
+                <option value="">{t('chat.effortDefault')}</option>
+                <option value="off">{t('chat.effortOff')}</option>
+                <option value="low">{t('chat.effortLow')}</option>
+                <option value="medium">{t('chat.effortMedium')}</option>
+                <option value="high">{t('chat.effortHigh')}</option>
+              </select>
+            </label>
+          </div>
           <textarea
             value={goal}
             rows={3}

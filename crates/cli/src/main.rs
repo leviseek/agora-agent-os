@@ -443,10 +443,10 @@ async fn session_cmd(kernel: Arc<Kernel>, cmd: SessionCmd, json_out: bool) -> Re
         SessionCmd::Message { session_id, text, no_wait } => {
             let session = parse_session(&session_id)?;
             if no_wait {
-                kernel.sessions.post_goal_async(&session, &text, &[]).await?;
+                kernel.sessions.post_goal_async(&session, &text, &[], None, None).await?;
                 println!("accepted");
             } else {
-                let result = kernel.sessions.post_goal(&session, &text, &[]).await?;
+                let result = kernel.sessions.post_goal(&session, &text, &[], None, None).await?;
                 print_value(&result, json_out);
             }
         }
@@ -845,8 +845,8 @@ async fn demo(config: RuntimeConfig, args: DemoArgs) -> Result<()> {
     let b = kernel.sessions.create_session("demo", "session B").await?;
     println!("sessions     : {} and {}", a.id, b.id);
     let (ra, rb) = tokio::join!(
-        kernel.sessions.post_goal(&a.id, &args.goal, &[]),
-        kernel.sessions.post_goal(&b.id, "what is 7*6?", &[])
+        kernel.sessions.post_goal(&a.id, &args.goal, &[], None, None),
+        kernel.sessions.post_goal(&b.id, "what is 7*6?", &[], None, None)
     );
     println!("session A    : {}", summarize(&ra));
     println!("session B    : {}", summarize(&rb));

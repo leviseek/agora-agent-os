@@ -100,6 +100,9 @@ pub struct ModelRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolSpec>,
     pub model_hint: Option<String>,
+    /// How hard the caller wants the model to think. Adapters translate this into whatever their
+    /// API calls it, and providers with no such knob ignore it.
+    pub reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
     pub task: ModelTask,
     pub temperature: f32,
     pub max_tokens: Option<u32>,
@@ -115,6 +118,7 @@ impl ModelRequest {
             messages,
             tools: vec![],
             model_hint: None,
+            reasoning_effort: None,
             task,
             temperature: 0.2,
             max_tokens: None,

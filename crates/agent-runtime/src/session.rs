@@ -40,8 +40,15 @@ use tokio_util::sync::CancellationToken;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionMessage {
     /// The user's goal. Runs the agent loop to completion.
-    /// A goal, optionally with workspace-relative image paths attached.
-    UserGoal { text: String, correlation: Option<Correlation>, images: Vec<String> },
+    /// A goal, optionally with workspace-relative image paths attached and a one-off choice of
+    /// provider and thinking effort for this run only.
+    UserGoal {
+        text: String,
+        correlation: Option<Correlation>,
+        images: Vec<String>,
+        model: Option<String>,
+        reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+    },
     /// Cooperative cancellation of the run currently in flight.
     Cancel { reason: String },
     /// Inspect the session without mutating it.
@@ -50,9 +57,13 @@ pub enum SessionMessage {
     LastRun,
     /// Read the conversation: user goals and assistant replies, oldest first.
     Transcript { limit: Option<usize> },
-    /// Rename the session. Goes through the actor so its in-memory record cannot drift from the
-    /// stored one.
-    Rename { title: String },
+    /// Session-level settings. Goes through the actor so its in-memory record cannot drift from
+    /// the stored one. A field left as None is unchanged; an empty string clears it.
+    Configure {
+        title: Option<String>,
+        model: Option<String>,
+        reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+    },
 }
 
 /// Everything the session actor is allowed to use. All of it is an interface.
@@ -289,7 +300,26 @@ impl SessionActor {
         text: String,
         correlation: Option<Correlation>,
         images: Vec<String>,
+        model: Option<String>,
+        reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
     ) -> Result<serde_json::Value> {
+        // What this run will actually use: the kernel's spec, narrowed by the session's stored
+        // choice, narrowed again by anything asked for on this one goal. Computed per run so two
+        // runs of one session never fight over shared state.
+        let mut spec = self.deps.spec.clone();
+        if let Some(hint) = self.state.session.model_hint.clone() {
+            spec.model_hint = Some(hint);
+        }
+        if let Some(effort) = self.state.session.reasoning_effort {
+            spec.reasoning_effort = Some(effort);
+        }
+        if let Some(override_model) = model.as_ref().map(|value| value.trim()).filter(|v| !v.is_empty()) {
+            spec.model_hint = Some(override_model.to_string());
+        }
+        if let Some(override_effort) = reasoning_effort {
+            spec.reasoning_effort =
+                (override_effort != agentos_core::model::ReasoningEffort::Off).then_some(override_effort);
+        }
         // Untrusted input is trimmed and size-bounded before it becomes part of the transcript.
         let goal = text.trim().to_string();
         if goal.is_empty() {
@@ -345,7 +375,7 @@ impl SessionActor {
             )
             .await?;
 
-        let mut run = AgentRun::new(self.session_id.clone(), &self.deps.spec, goal.clone());
+        let mut run = AgentRun::new(self.session_id.clone(), &spec, goal.clone());
         self.state.active_run = Some(run.id.as_str().to_string());
         self.persist_run(&run).await?;
         self.deps
@@ -449,7 +479,8 @@ impl SessionActor {
             120,
         );
         let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone())
-            .with_deltas(deltas.sink());
+            .with_deltas(deltas.sink())
+            .with_spec(spec);
         let outcome = match tokio::time::timeout(
             std::time::Duration::from_millis(self.deps.run_timeout_ms.max(1)),
             loop_.run(&mut run, &goal, prompt_context),
@@ -577,6 +608,10 @@ impl SessionActor {
                 "steps": r.steps.len(),
                 "provider": r.provider,
                 "model": r.model,
+                // What this run was asked for, next to who actually answered: a surprising answer
+                // should be traceable to the choice that produced it.
+                "model_hint": r.model_hint,
+                "reasoning_effort": r.reasoning_effort,
                 "final_answer": r.final_answer,
                 "error": r.error,
                 "usage": r.usage,
@@ -674,8 +709,8 @@ impl Actor for SessionActor {
 
     async fn handle(&mut self, message: SessionMessage, _ctx: &ActorContext) -> Result<serde_json::Value> {
         match message {
-            SessionMessage::UserGoal { text, correlation, images } => {
-                self.handle_goal(text, correlation, images).await
+            SessionMessage::UserGoal { text, correlation, images, model, reasoning_effort } => {
+                self.handle_goal(text, correlation, images, model, reasoning_effort).await
             }
             SessionMessage::Cancel { reason } => {
                 let cancelled = match self.deps.run_tokens.read().get(&self.session_id) {
@@ -693,29 +728,47 @@ impl Actor for SessionActor {
                 .last_run()
                 .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null)),
-            SessionMessage::Rename { title } => {
-                let title = title.trim();
-                if title.is_empty() {
-                    return Err(RuntimeError::invalid_input("title must not be empty"));
+            SessionMessage::Configure { title, model, reasoning_effort } => {
+                if let Some(title) = &title {
+                    let title = title.trim();
+                    if title.is_empty() {
+                        return Err(RuntimeError::invalid_input("title must not be empty"));
+                    }
+                    if title.chars().count() > 200 {
+                        return Err(RuntimeError::invalid_input("title is limited to 200 characters"));
+                    }
+                    self.state.session.title = title.to_string();
                 }
-                if title.chars().count() > 200 {
-                    return Err(RuntimeError::invalid_input("title is limited to 200 characters"));
+                if let Some(model) = &model {
+                    // An empty string clears the choice, which is how a client says "let the router
+                    // decide again" without a second endpoint.
+                    let model = model.trim();
+                    self.state.session.model_hint = (!model.is_empty()).then(|| model.to_string());
                 }
-                self.state.session.title = title.to_string();
+                if let Some(effort) = reasoning_effort {
+                    self.state.session.reasoning_effort =
+                        (effort != agentos_core::model::ReasoningEffort::Off).then_some(effort);
+                }
                 self.state.session.updated_at = now_ms();
                 self.persist_session().await?;
                 self.deps
                     .bus
                     .publish(
-                        NewEvent::new(EventKind::SessionRenamed, "session renamed")
+                        NewEvent::new(EventKind::SessionRenamed, "session settings changed")
                             .session(self.session_id.clone())
                             .node(self.deps.node_id.clone())
-                            .payload(serde_json::json!({ "title": title })),
+                            .payload(serde_json::json!({
+                                "title": self.state.session.title,
+                                "model": self.state.session.model_hint,
+                                "reasoning_effort": self.state.session.reasoning_effort,
+                            })),
                     )
                     .await?;
                 Ok(serde_json::json!({
                     "session_id": self.session_id.as_str(),
-                    "title": title,
+                    "title": self.state.session.title,
+                    "model": self.state.session.model_hint,
+                    "reasoning_effort": self.state.session.reasoning_effort,
                 }))
             }
             SessionMessage::Transcript { limit } => {

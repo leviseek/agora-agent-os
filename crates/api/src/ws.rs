@@ -88,6 +88,26 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
             let session = value.get("session_id").and_then(|v| v.as_str())?;
             let text = value.get("goal").or_else(|| value.get("text")).and_then(|v| v.as_str())?;
             let wait = value.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Model and effort travel the same way over the socket as over HTTP: optional, and
+            // for this one goal only.
+            let model = value
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let effort = match value.get("effort").and_then(|v| v.as_str()) {
+                None => None,
+                Some(raw) if raw.trim().is_empty() => None,
+                Some(raw) => match agentos_core::model::ReasoningEffort::parse(raw) {
+                    Some(parsed) => Some(parsed),
+                    None => {
+                        return Some(json!({
+                            "type": "error",
+                            "code": "invalid_input",
+                            "message": format!("unknown effort {raw:?}: use off, low, medium or high"),
+                        }))
+                    }
+                },
+            };
             // Images travel the same way over the socket as over HTTP.
             let images: Vec<String> = value
                 .get("images")
@@ -103,7 +123,12 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
                 Err(e) => return Some(json!({ "type": "error", "code": "invalid_input", "message": e.to_string() })),
             };
             if wait {
-                match state.kernel.sessions.post_goal(&session_id, text, &images).await {
+                match state
+                    .kernel
+                    .sessions
+                    .post_goal(&session_id, text, &images, model, effort)
+                    .await
+                {
                     Ok(result) => Some(json!({ "type": "goal_result", "result": result })),
                     Err(e) => Some(json!({ "type": "error", "code": e.code(), "message": e.message })),
                 }
@@ -111,7 +136,7 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
                 match state
                     .kernel
                     .sessions
-                    .post_goal_async(&session_id, text, &images)
+                    .post_goal_async(&session_id, text, &images, model, effort)
                     .await
                 {
                     Ok(()) => Some(json!({ "type": "accepted", "session_id": session })),

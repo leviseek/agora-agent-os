@@ -65,9 +65,9 @@ impl UsageMeter {
 }
 
 use agentos_core::model::{
-    ActionCall, AgentRun, AgentStep, ContentPart, EventKind, MessageRole, NewEvent, Observation,
-    Plan, PlanStep, PlanStepKind, SessionMessage as TranscriptMessage, StepKind, TaskGraphRecord,
-    TaskKind, TaskPayload, TaskRecord, TokenUsage,
+    ActionCall, AgentRun, AgentSpec, AgentStep, ContentPart, EventKind, MessageRole, NewEvent,
+    Observation, Plan, PlanStep, PlanStepKind, SessionMessage as TranscriptMessage, StepKind,
+    TaskGraphRecord, TaskKind, TaskPayload, TaskRecord, TokenUsage,
 };
 use agentos_core::state::{AgentRunState, StateMachine};
 use agentos_core::telemetry::Correlation;
@@ -188,6 +188,10 @@ pub struct AgentLoop {
     session_id: agentos_core::SessionId,
     correlation: Correlation,
     cancellation: CancellationToken,
+    /// The spec this run actually uses: the kernel default, with the session's model and thinking
+    /// effort applied, and any per-goal override on top. Held here rather than read from the deps
+    /// so that two runs of one session can differ without mutating shared state.
+    spec: AgentSpec,
     /// Where streamed deltas go, if anyone is listening. Deltas never change what the loop does:
     /// they are a preview of an answer that is stored, returned and accounted for exactly as it
     /// would be without them.
@@ -201,7 +205,14 @@ impl AgentLoop {
         correlation: Correlation,
         cancellation: CancellationToken,
     ) -> Self {
-        Self { deps, session_id, correlation, cancellation, deltas: None }
+        let spec = deps.spec.clone();
+        Self { deps, session_id, correlation, cancellation, deltas: None, spec }
+    }
+
+    /// Use this spec for the run (session settings and per-goal overrides).
+    pub fn with_spec(mut self, spec: AgentSpec) -> Self {
+        self.spec = spec;
+        self
     }
 
     /// Stream model deltas to this sink while the run is in progress.
@@ -231,8 +242,8 @@ impl AgentLoop {
             .mesh
             .list()
             .into_iter()
-            .filter(|d| !self.deps.spec.allowed_capabilities.is_empty()
-                && self.deps.spec.allowed_capabilities.contains(&d.name))
+            .filter(|d| !self.spec.allowed_capabilities.is_empty()
+                && self.spec.allowed_capabilities.contains(&d.name))
             .map(|d| ToolSpec {
                 name: d.name.clone(),
                 description: d.description.clone(),
@@ -336,6 +347,9 @@ impl AgentLoop {
                 cancellation: self.cancellation.clone(),
                 correlation: self.correlation.clone(),
                 usage: meter.clone(),
+                model_hint: self.spec.model_hint.clone(),
+                reasoning_effort: self.spec.reasoning_effort,
+                system_prompt: self.spec.system_prompt.clone(),
             });
             let scheduler = agentos_task_scheduler::scheduler::Scheduler::new(
                 self.deps.store.clone(),
@@ -353,10 +367,10 @@ impl AgentLoop {
         if let Some(result) = &outcome {
             for node in &result.nodes {
                 steps += 1;
-                if steps > self.deps.spec.max_steps {
+                if steps > self.spec.max_steps {
                     return Err(RuntimeError::policy_denied(format!(
                         "agent exceeded its step budget of {}",
-                        self.deps.spec.max_steps
+                        self.spec.max_steps
                     )));
                 }
                 let output = node.result.clone().unwrap_or(serde_json::Value::Null);
@@ -438,7 +452,7 @@ impl AgentLoop {
     ) -> Result<(Plan, Answerer)> {
         let system = format!(
             "{}\nRespond with JSON only: {{\"goal\": string, \"reasoning\": string, \"steps\": [{{\"id\": string, \"description\": string, \"kind\": \"think\"|\"capability\"|\"respond\", \"capability\": string|null, \"input\": object, \"depends_on\": [string]}}]}}",
-            self.deps.spec.system_prompt
+            self.spec.system_prompt
         );
         let request = ModelRequest::new(
             ModelTask::Plan,
@@ -453,6 +467,9 @@ impl AgentLoop {
         )
         .with_tools(tools)
         .with_json();
+        let mut request = request;
+        request.reasoning_effort = self.spec.reasoning_effort;
+        request.model_hint = self.spec.model_hint.clone();
 
         if let Err(e) = self
             .deps
@@ -518,7 +535,7 @@ impl AgentLoop {
                 },
                 PlanStepKind::Think => TaskPayload::Model {
                     prompt: format!("{}\nGoal: {}", step.description, plan.goal),
-                    model_hint: self.deps.spec.model_hint.clone(),
+                    model_hint: self.spec.model_hint.clone(),
                 },
                 PlanStepKind::Respond => TaskPayload::Join { template: step.description.clone() },
             };
@@ -530,7 +547,7 @@ impl AgentLoop {
             let mut node = TaskRecord::new(graph.id.clone(), run.session_id.clone(), step.description.clone(), kind, payload);
             node.agent_id = Some(run.id.clone());
             node.max_attempts = if kind == TaskKind::Join { 1 } else { 3 };
-            node.timeout_ms = self.deps.spec.timeout_ms.min(60_000);
+            node.timeout_ms = self.spec.timeout_ms.min(60_000);
             if let Some(cap) = &step.capability {
                 node.labels.insert("capability".into(), cap.clone());
             }
@@ -584,7 +601,7 @@ impl AgentLoop {
         }
 
         // Same rule as planning: conversation first, then the goal, then this run's exchange.
-        let mut messages = vec![ChatMessage::system(self.deps.spec.system_prompt.clone())];
+        let mut messages = vec![ChatMessage::system(self.spec.system_prompt.clone())];
         push_context(&mut messages, &context);
         messages.push(ChatMessage::user(goal.to_string()).with_images(context.images.to_vec()));
         if !observations.is_empty() {
@@ -601,9 +618,11 @@ impl AgentLoop {
             }
         }
         // The final answer is the one a user watches arrive, so it is the call that streams.
-        let request = ModelRequest::new(ModelTask::Summarize, messages)
+        let mut request = ModelRequest::new(ModelTask::Summarize, messages)
             .with_tools(tools)
             .with_json();
+        request.reasoning_effort = self.spec.reasoning_effort;
+        request.model_hint = self.spec.model_hint.clone();
         let response = match &self.deltas {
             Some(sink) => self.deps.models.complete_streaming(request, sink.as_ref()).await,
             None => self.deps.models.complete(request).await,
@@ -700,6 +719,11 @@ pub struct PlanTaskRunner {
     /// Parallel task-graph model calls report their cost here, because the loop never sees their
     /// responses.
     usage: UsageMeter,
+    /// The provider and thinking effort this run was asked for, so a parallel step does not
+    /// quietly answer with different settings than the rest of the run.
+    model_hint: Option<String>,
+    reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+    system_prompt: String,
 }
 
 #[async_trait]
@@ -731,9 +755,11 @@ impl TaskRunner for PlanTaskRunner {
             TaskPayload::Model { prompt, model_hint } => {
                 let mut request = ModelRequest::new(
                     ModelTask::Think,
-                    vec![ChatMessage::system(self.deps.spec.system_prompt.clone()), ChatMessage::user(prompt.clone())],
+                    vec![ChatMessage::system(self.system_prompt.clone()), ChatMessage::user(prompt.clone())],
                 );
-                request.model_hint = model_hint.clone();
+                // A step that names a provider wins; otherwise the run's choice applies.
+                request.model_hint = model_hint.clone().or_else(|| self.model_hint.clone());
+                request.reasoning_effort = self.reasoning_effort;
                 let response = self.deps.models.complete(request).await?;
                 self.usage.record(&response.usage);
                 Ok(serde_json::json!({

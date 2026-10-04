@@ -84,6 +84,27 @@ impl OpenAiCompatibleProvider {
         if let Some(max) = request.max_tokens {
             body["max_tokens"] = json!(max);
         }
+        // Thinking effort, in whatever spelling the provider actually documents. A provider with
+        // no such knob gets nothing: sending an invented parameter is how a request starts failing
+        // with a 400 that no log will explain.
+        if let Some(effort) = request.reasoning_effort {
+            match self.kind {
+                ProviderKind::Openai => {
+                    body["reasoning_effort"] = json!(effort.as_str());
+                }
+                ProviderKind::Qwen => {
+                    // DashScope's compatible mode: a switch plus a budget, not an enum.
+                    let budget = effort.thinking_budget_tokens();
+                    body["enable_thinking"] = json!(budget > 0);
+                    if budget > 0 {
+                        body["thinking_budget"] = json!(budget);
+                    }
+                }
+                // DeepSeek selects thinking by model, and the local and mock providers do not think
+                // at all: the intent is still recorded on the run, just not sent.
+                ProviderKind::Deepseek | ProviderKind::Local | ProviderKind::Mock => {}
+            }
+        }
         if !request.tools.is_empty() {
             body["tools"] = json!(request
                 .tools
@@ -469,6 +490,75 @@ mod vision_tests {
             json!("data:image/png;base64,aGVsbG8="),
             "the image travels as a data URL"
         );
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    use crate::provider::{ChatMessage, ModelTask};
+    use agentos_core::config::ProviderKind;
+    use agentos_core::model::ReasoningEffort;
+
+    fn provider(kind: ProviderKind) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider::from_config(
+            &ProviderConfig {
+                name: "p".into(),
+                kind,
+                model: "m".into(),
+                base_url: "https://example.invalid".into(),
+                api_key_env: "AGENTOS_TEST_UNSET_KEY".into(),
+                enabled: true,
+                priority: 1,
+                timeout_ms: 1000,
+            },
+            reqwest::Client::new(),
+        )
+    }
+
+    fn body(kind: ProviderKind, effort: ReasoningEffort) -> Value {
+        let mut request = ModelRequest::new(ModelTask::Think, vec![ChatMessage::user("hi")]);
+        request.reasoning_effort = Some(effort);
+        provider(kind).build_body(&request)
+    }
+
+    #[test]
+    fn openai_gets_the_documented_enum() {
+        for (effort, expected) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+        ] {
+            let body = body(ProviderKind::Openai, effort);
+            assert_eq!(body["reasoning_effort"], json!(expected));
+        }
+    }
+
+    #[test]
+    fn qwen_gets_a_switch_and_a_budget() {
+        let high = body(ProviderKind::Qwen, ReasoningEffort::High);
+        assert_eq!(high["enable_thinking"], json!(true));
+        assert_eq!(high["thinking_budget"], json!(16_384));
+
+        let off = body(ProviderKind::Qwen, ReasoningEffort::Off);
+        assert_eq!(off["enable_thinking"], json!(false));
+        assert!(off.get("thinking_budget").is_none(), "no budget when thinking is off");
+    }
+
+    #[test]
+    fn providers_without_such_a_knob_get_nothing_invented() {
+        for kind in [ProviderKind::Deepseek, ProviderKind::Mock, ProviderKind::Local] {
+            let body = body(kind, ReasoningEffort::High);
+            assert!(body.get("reasoning_effort").is_none(), "{kind:?} must not receive it");
+            assert!(body.get("enable_thinking").is_none(), "{kind:?} must not receive it");
+        }
+    }
+
+    #[test]
+    fn no_effort_means_no_field_at_all() {
+        let request = ModelRequest::new(ModelTask::Think, vec![ChatMessage::user("hi")]);
+        let body = provider(ProviderKind::Openai).build_body(&request);
+        assert!(body.get("reasoning_effort").is_none());
     }
 }
 

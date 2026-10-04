@@ -302,6 +302,8 @@ impl SessionManager {
         session: &SessionId,
         text: &str,
         images: &[String],
+        model: Option<String>,
+        reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
     ) -> Result<serde_json::Value> {
         let handle = self.actor_for(session).await?;
         let correlation = Correlation::new().with_session(session).with_actor(&handle.id);
@@ -312,18 +314,29 @@ impl SessionManager {
                 text: text.to_string(),
                 correlation: Some(correlation),
                 images: images.to_vec(),
+                model,
+                reasoning_effort,
             })
             .await
     }
 
     /// Queue a goal without waiting for completion; the caller follows the event stream instead.
-    pub async fn post_goal_async(&self, session: &SessionId, text: &str, images: &[String]) -> Result<()> {
+    pub async fn post_goal_async(
+        &self,
+        session: &SessionId,
+        text: &str,
+        images: &[String],
+        model: Option<String>,
+        reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+    ) -> Result<()> {
         let handle = self.actor_for(session).await?;
         handle
             .cast(SessionMessage::UserGoal {
                 text: text.to_string(),
                 correlation: None,
                 images: images.to_vec(),
+                model,
+                reasoning_effort,
             })
             .await
     }
@@ -465,9 +478,17 @@ impl SessionManager {
     }
 
     /// Rename a session through its actor, then read back what was stored.
-    pub async fn rename(&self, session: &SessionId, title: &str) -> Result<SessionRecord> {
+    pub async fn configure(
+        &self,
+        session: &SessionId,
+        title: Option<String>,
+        model: Option<String>,
+        reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+    ) -> Result<SessionRecord> {
         let handle = self.actor_for(session).await?;
-        handle.send(SessionMessage::Rename { title: title.to_string() }).await?;
+        handle
+            .send(SessionMessage::Configure { title, model, reasoning_effort })
+            .await?;
         self.session_collection()
             .load(self.store.as_ref(), session.as_str())
             .await?

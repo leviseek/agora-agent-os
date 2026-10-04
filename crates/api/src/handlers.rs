@@ -112,18 +112,56 @@ pub struct SessionListQuery {
     pub q: Option<String>,
 }
 
-/// Rename a session.
-pub async fn rename_session(
+/// Parse a thinking effort from a client, rejecting what we do not understand.
+fn parse_effort(raw: Option<&str>) -> ApiResult<Option<agentos_core::model::ReasoningEffort>> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    agentos_core::model::ReasoningEffort::parse(raw)
+        .map(Some)
+        .ok_or_else(|| {
+            ApiError(RuntimeError::invalid_input(format!(
+                "unknown effort {raw:?}: use off, low, medium or high"
+            )))
+        })
+}
+
+/// Change a session's settings: its title, the provider it prefers, and its thinking effort.
+///
+/// Every field is optional and an absent field means "leave it alone". An empty string clears it,
+/// which is how a client goes back to letting the router decide.
+pub async fn configure_session(
     State(state): State<ApiState>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
-    let title = body
-        .get("title")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ApiError(RuntimeError::invalid_input("title is required")))?;
-    let record = state.kernel.sessions.rename(&session, title).await?;
+    let title = body.get("title").and_then(|v| v.as_str()).map(|v| v.to_string());
+    let model = body.get("model").and_then(|v| v.as_str()).map(|v| v.to_string());
+    let effort = match body.get("effort") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => {
+            if raw.trim().is_empty() {
+                // Clearing the effort means "off", which the actor stores as no preference.
+                Some(agentos_core::model::ReasoningEffort::Off)
+            } else {
+                Some(parse_effort(Some(raw))?.ok_or_else(|| {
+                    ApiError(RuntimeError::invalid_input("effort must be a string"))
+                })?)
+            }
+        }
+        Some(_) => {
+            return Err(ApiError(RuntimeError::invalid_input(
+                "effort must be a string: off, low, medium or high",
+            )))
+        }
+    };
+    if title.is_none() && model.is_none() && effort.is_none() {
+        return Err(ApiError(RuntimeError::invalid_input(
+            "nothing to change: send title, model or effort",
+        )));
+    }
+    let record = state.kernel.sessions.configure(&session, title, model, effort).await?;
     Ok(Json(json!({ "session": record })))
 }
 
@@ -177,6 +215,13 @@ pub struct PostMessageRequest {
     /// content and stored as artifacts before the run starts.
     #[serde(default)]
     pub images: Vec<String>,
+    /// Provider to prefer for this one goal. Overrides the session setting, and does not persist.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Thinking effort for this one goal: off, low, medium or high. An unknown value is a client
+    /// error, never a silent fallback to the strongest setting.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -192,19 +237,20 @@ pub async fn post_message(
     if body.text.trim().is_empty() {
         return Err(ApiError(RuntimeError::invalid_input("message text must not be empty")));
     }
+    let effort = parse_effort(body.effort.as_deref())?;
     if body.wait {
         Ok(Json(
             state
                 .kernel
                 .sessions
-                .post_goal(&session, &body.text, &body.images)
+                .post_goal(&session, &body.text, &body.images, body.model.clone(), effort)
                 .await?,
         ))
     } else {
         state
             .kernel
             .sessions
-            .post_goal_async(&session, &body.text, &body.images)
+            .post_goal_async(&session, &body.text, &body.images, body.model.clone(), effort)
             .await?;
         Ok(Json(json!({ "accepted": true, "session_id": id })))
     }

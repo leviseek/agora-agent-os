@@ -52,7 +52,7 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/sessions/{id}",
             get(handlers::get_session)
-                .patch(handlers::rename_session)
+                .patch(handlers::configure_session)
                 .delete(handlers::close_session),
         )
         .route("/v1/sessions/{id}/status", get(handlers::session_status))

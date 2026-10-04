@@ -746,6 +746,86 @@ async fn wait_for_approval(h: &Harness) -> Value {
     panic!("no approval was requested");
 }
 
+/// A session carries its model and thinking effort, and a single goal can override both.
+#[tokio::test]
+async fn a_session_remembers_its_model_and_effort_and_a_goal_can_override_them() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "chooser" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+
+    // A fresh session has no opinion, so the router decides.
+    assert_eq!(session["model_hint"], json!(null));
+    assert_eq!(session["reasoning_effort"], json!(null));
+
+    // Set both on the session.
+    let (status, configured) = h
+        .patch(
+            &format!("/v1/sessions/{id}"),
+            json!({ "model": "mock", "effort": "high" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{configured}");
+    assert_eq!(configured["session"]["model_hint"], json!("mock"));
+    assert_eq!(configured["session"]["reasoning_effort"], json!("high"));
+
+    // A run inherits the session choice, and the run record says so.
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "what is 6*7?", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+    let (_, detail) = h.get(&format!("/v1/sessions/{id}")).await;
+    let runs = detail["runtime"]["runs"].as_array().unwrap();
+    assert_eq!(runs[0]["model_hint"], json!("mock"), "the run records the choice it used");
+    assert_eq!(runs[0]["reasoning_effort"], json!("high"));
+
+    // A single goal can override both without changing the session.
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "and 7*7?", "wait": true, "model": "echo-provider", "effort": "low" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, after) = h.get(&format!("/v1/sessions/{id}")).await;
+    let runs = after["runtime"]["runs"].as_array().unwrap();
+    assert_eq!(
+        runs[1]["model_hint"],
+        json!("echo-provider"),
+        "the second run used the override"
+    );
+    assert_eq!(runs[1]["reasoning_effort"], json!("low"));
+    assert_eq!(
+        after["session"]["model_hint"],
+        json!("mock"),
+        "the session setting is unchanged by a per-goal override"
+    );
+
+    // An unknown effort is a client error, never a silent fallback.
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "hello", "wait": true, "effort": "maximum" }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"]["message"].as_str().unwrap().contains("off, low, medium or high"));
+    let (status, _) = h
+        .patch(&format!("/v1/sessions/{id}"), json!({ "effort": "turbo" }))
+        .await;
+    assert_eq!(status, 400);
+
+    // An empty string clears a choice: back to letting the router decide.
+    let (status, cleared) = h.patch(&format!("/v1/sessions/{id}"), json!({ "model": "" })).await;
+    assert_eq!(status, 200);
+    assert_eq!(cleared["session"]["model_hint"], json!(null));
+
+    // A patch with nothing in it is a client mistake, not a no-op.
+    let (status, _) = h.patch(&format!("/v1/sessions/{id}"), json!({})).await;
+    assert_eq!(status, 400);
+
+    h.shutdown.cancel();
+}
+
 /// A restart must not turn a session into a 503.
 ///
 /// The session record and its runs are durable; the message-by-message transcript and the actor
@@ -776,7 +856,7 @@ async fn a_session_survives_a_restart_without_a_snapshot() {
         let session = kernel.sessions.create_session("u1", "survives").await.unwrap();
         let result = kernel
             .sessions
-            .post_goal(&session.id, "what is 6*7?", &[])
+            .post_goal(&session.id, "what is 6*7?", &[], None, None)
             .await
             .unwrap();
         assert!(result["answer"].is_string(), "the run answered: {result}");

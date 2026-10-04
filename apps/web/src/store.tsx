@@ -97,6 +97,13 @@ export interface AppStoreValue {
   approvals: PendingApproval[];
   /** Ask the runtime what is waiting. The approvals view calls this when it opens. */
   refreshApprovals: () => Promise<void>;
+  /** Provider names the runtime can route to, for the session's model picker. */
+  modelOptions: string[];
+  /** Change a session's title, provider or thinking effort. */
+  configureSession: (
+    id: string,
+    patch: { title?: string; model?: string; effort?: string },
+  ) => Promise<void>;
   /**
    * True when the connected runtime is older than this console: it has no /v1/approvals route.
    * Polling a route that does not exist produces a 404 storm in the browser console, so the poll
@@ -170,6 +177,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [attachments, setAttachments] = useState<AttachedImage[]>([]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [approvalsUnsupported, setApprovalsUnsupported] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
   const approvalsUnsupportedRef = useRef(false);
 
   const artifactUrl = useCallback(
@@ -315,6 +323,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const refreshSessions = useCallback(
     (): Promise<void> => loadSessions(clientRef.current, queryRef.current),
     [loadSessions],
+  );
+
+  const configureSession = useCallback(
+    async (id: string, patch: { title?: string; model?: string; effort?: string }): Promise<void> => {
+      setActionError(null);
+      try {
+        await clientRef.current.configureSession(id, patch);
+        await refreshDetail(id);
+        await refreshSessions();
+      } catch (cause) {
+        setActionError(toApiError(cause));
+      }
+    },
+    [refreshDetail, refreshSessions],
   );
 
   const setSessionQuery = useCallback(
@@ -482,6 +504,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setHealth(healthResponse);
       const metaResponse = await active.meta();
       setMeta(metaResponse);
+      // The provider list feeds the session's model picker. A runtime too old to answer is not an
+      // error: the picker simply has nothing to offer and the router keeps deciding.
+      try {
+        const models = await active.listModels();
+        setModelOptions(models.providers.map((provider) => provider.name));
+      } catch {
+        setModelOptions([]);
+      }
       if (metaResponse.auth_required) {
         setLogin(await active.login(activeToken));
       } else {
@@ -647,6 +677,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       approvalsUnsupported,
       refreshApprovals,
       decideApproval,
+      modelOptions,
+      configureSession,
       artifactUrl,
       sessionQuery,
       setSessionQuery,
@@ -697,6 +729,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       approvalsUnsupported,
       refreshApprovals,
       decideApproval,
+      modelOptions,
+      configureSession,
       artifactUrl,
       sessionQuery,
       setSessionQuery,
