@@ -95,6 +95,8 @@ export interface AppStoreValue {
   attachments: AttachedImage[];
   /** Capability calls waiting for a decision. */
   approvals: PendingApproval[];
+  /** Ask the runtime what is waiting. The approvals view calls this when it opens. */
+  refreshApprovals: () => Promise<void>;
   /**
    * True when the connected runtime is older than this console: it has no /v1/approvals route.
    * Polling a route that does not exist produces a 404 storm in the browser console, so the poll
@@ -257,15 +259,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Nothing asks about approvals until somebody looks. An earlier version polled this route every
+  // few seconds from the moment the page loaded, which against a runtime that predates the route
+  // painted a 404 into the browser console on every single refresh.
   const refreshApprovals = useCallback(async (): Promise<void> => {
     if (approvalsUnsupportedRef.current) return;
     try {
       const response = await clientRef.current.listApprovals();
       setApprovals(response.approvals);
     } catch (cause) {
-      // A 404 means the route is not there at all - an older runtime - and retrying it every few
-      // seconds only fills the browser console with noise. Anything else is transient and worth
-      // another try on the next tick.
+      // A 404 means the route is not there at all - an older runtime. Remember that so the view can
+      // say so once instead of asking again on every open, and do not retry the rest either.
       const status = cause instanceof ApiError ? cause.status : 0;
       if (status === 404) {
         approvalsUnsupportedRef.current = true;
@@ -353,16 +357,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       void refreshSessions();
     }, 700);
   }, [refreshSessions]);
-
-  // Approvals also refresh on a slow timer, because a request parked while the console was closed
-  // would otherwise stay invisible until some other event happened to arrive.
-  useEffect(() => {
-    void refreshApprovals();
-    const timer = window.setInterval(() => {
-      void refreshApprovals();
-    }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [refreshApprovals]);
 
   // One subscription for the whole app: the buffer feeds every live view.
   useEffect(() => {
@@ -651,6 +645,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       attachments,
       approvals,
       approvalsUnsupported,
+      refreshApprovals,
       decideApproval,
       artifactUrl,
       sessionQuery,
@@ -700,6 +695,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       attachments,
       approvals,
       approvalsUnsupported,
+      refreshApprovals,
       decideApproval,
       artifactUrl,
       sessionQuery,

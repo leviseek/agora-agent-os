@@ -1,5 +1,5 @@
 /** View - Approvals: capability calls parked until an operator decides. */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Badge, EmptyState, Panel } from '../components';
 import { useI18n } from '../i18n';
 import { useApp } from '../store';
@@ -7,8 +7,14 @@ import { formatTime } from '../format';
 
 export function ApprovalsView() {
   const { t } = useI18n();
-  const { approvals, approvalsUnsupported, decideApproval, busy, connection } = useApp();
+  const { approvals, approvalsUnsupported, refreshApprovals, decideApproval, busy, connection } =
+    useApp();
   const [reasons, setReasons] = useState<Record<string, string>>({});
+
+  // Ask when this view opens, and only then: a page that never shows approvals never asks for them.
+  useEffect(() => {
+    void refreshApprovals();
+  }, [refreshApprovals]);
 
   return (
     <Panel
