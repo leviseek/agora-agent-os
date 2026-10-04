@@ -127,8 +127,8 @@ async fn acceptance_1_two_sessions_are_parallel_but_each_session_is_ordered() {
     // Two sessions, one goal each, started together.
     let started = Instant::now();
     let (ra, rb) = tokio::join!(
-        kernel.sessions.post_goal(&a.id, "please run slow-task for me", &[]),
-        kernel.sessions.post_goal(&b.id, "please run slow-task for me", &[])
+        kernel.sessions.post_goal(&a.id, "please run slow-task for me", &[], None, None),
+        kernel.sessions.post_goal(&b.id, "please run slow-task for me", &[], None, None)
     );
     let elapsed = started.elapsed();
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
@@ -148,8 +148,8 @@ async fn acceptance_1_two_sessions_are_parallel_but_each_session_is_ordered() {
 
     // Message ordering inside one session: a second goal is handled after the first, and the
     // transcript keeps the order in which the user goals arrived.
-    let first = kernel.sessions.post_goal(&a.id, "run slow-task again", &[]).await.unwrap();
-    let second = kernel.sessions.post_goal(&a.id, "and once more", &[]).await.unwrap();
+    let first = kernel.sessions.post_goal(&a.id, "run slow-task again", &[], None, None).await.unwrap();
+    let second = kernel.sessions.post_goal(&a.id, "and once more", &[], None, None).await.unwrap();
     let a_first = first["agent_id"].as_str().unwrap().to_string();
     let a_second = second["agent_id"].as_str().unwrap().to_string();
     let status = kernel.sessions.status(&a.id).await.unwrap();
@@ -182,7 +182,7 @@ async fn acceptance_2_agent_loop_closes_goal_llm_capability_observation_final() 
     let session = kernel.sessions.create_session("user", "math").await.unwrap();
     let result = kernel
         .sessions
-        .post_goal(&session.id, "what is 12*7+3?", &[])
+        .post_goal(&session.id, "what is 12*7+3?", &[], None, None)
         .await
         .unwrap();
 
@@ -345,8 +345,8 @@ async fn acceptance_5_directory_placement_and_worker_heartbeat() {
 async fn acceptance_6_session_actor_snapshot_export_and_restore() {
     let kernel = kernel().await;
     let session = kernel.sessions.create_session("user", "snapshots").await.unwrap();
-    kernel.sessions.post_goal(&session.id, "what is 2+2?", &[]).await.unwrap();
-    kernel.sessions.post_goal(&session.id, "what is 3+3?", &[]).await.unwrap();
+    kernel.sessions.post_goal(&session.id, "what is 2+2?", &[], None, None).await.unwrap();
+    kernel.sessions.post_goal(&session.id, "what is 3+3?", &[], None, None).await.unwrap();
 
     let checkpoint = kernel.sessions.snapshot(&session.id).await.unwrap();
     assert_eq!(checkpoint.meta.session_id, session.id);
@@ -365,7 +365,7 @@ async fn acceptance_6_session_actor_snapshot_export_and_restore() {
     assert!(status["goals_handled"].as_u64().unwrap() >= 2);
 
     // And the restored session keeps working.
-    let after = kernel.sessions.post_goal(&session.id, "what is 4+4?", &[]).await.unwrap();
+    let after = kernel.sessions.post_goal(&session.id, "what is 4+4?", &[], None, None).await.unwrap();
     assert!(after["error"].is_null(), "restored session still runs: {after}");
 
     let events = kernel
@@ -460,7 +460,7 @@ async fn acceptance_9_cancellation_and_step_budget() {
 
     let sessions = kernel.sessions.clone();
     let session_id = session.id.clone();
-    let handle = tokio::spawn(async move { sessions.post_goal(&session_id, "run slow-task", &[]).await });
+    let handle = tokio::spawn(async move { sessions.post_goal(&session_id, "run slow-task", &[], None, None).await });
     tokio::time::sleep(Duration::from_millis(120)).await;
 
     let cancelled = kernel.sessions.cancel(&session.id).await.unwrap();
