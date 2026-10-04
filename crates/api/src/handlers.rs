@@ -174,6 +174,69 @@ pub struct LimitQuery {
     pub kinds: Option<String>,
 }
 
+/// Fork a session. The fork inherits the conversation and the runs, with fresh identifiers.
+pub async fn session_branch(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let title = body
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let branch = state.kernel.sessions.branch(&session, title).await?;
+    Ok(Json(json!({
+        "session": branch,
+        "forked_from": id,
+    })))
+}
+
+/// Export a session as structured data or as a Markdown document.
+pub async fn session_export(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<ExportQuery>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let session = parse_session(&id)?;
+    let (record, transcript, runs) = state.kernel.sessions.export_data(&session).await?;
+    match q.format.as_deref().unwrap_or("json") {
+        "markdown" | "md" => {
+            let markdown = state.kernel.export_markdown(&session).await?;
+            Ok((
+                [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                markdown,
+            )
+                .into_response())
+        }
+        "json" => {
+            let usage = runs.iter().fold(agentos_core::model::TokenUsage::default(), |mut total, run| {
+                total.add(&run.usage);
+                total
+            });
+            Ok(Json(json!({
+                "exported_at": now_ms(),
+                "node": state.kernel.config.effective_node_id(),
+                "session": record,
+                "messages": transcript,
+                "runs": runs,
+                "usage": usage,
+            }))
+            .into_response())
+        }
+        other => Err(ApiError(RuntimeError::invalid_input(format!(
+            "unknown export format {other}: use json or markdown"
+        )))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportQuery {
+    pub format: Option<String>,
+}
+
 /// The conversation: user goals and assistant replies, oldest first.
 ///
 /// Posting a goal with "wait": false returns as soon as the goal is queued, so this is how a

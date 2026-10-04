@@ -506,6 +506,95 @@ async fn discovered_nodes_appear_in_the_gateway() {
     harness.shutdown.cancel();
 }
 
+/// A branch inherits the conversation and then lives its own life.
+#[tokio::test]
+async fn branching_a_session_copies_the_conversation_and_detaches_it() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "original" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "what is 6*7?", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (_, original) = h.get(&format!("/v1/sessions/{id}/transcript")).await;
+    let original_turns = original["messages"].as_array().unwrap().len();
+    assert_eq!(original_turns, 2, "a goal and its answer");
+
+    let (status, body) = h.post(&format!("/v1/sessions/{id}/branch"), json!({ "title": "explore" })).await;
+    assert_eq!(status, 200);
+    let branch_id = body["session"]["id"].as_str().unwrap().to_string();
+    assert_ne!(branch_id, id, "a branch is its own session");
+    assert_eq!(body["session"]["title"], json!("explore"));
+    assert_eq!(body["forked_from"], json!(id));
+
+    // It starts with the same conversation...
+    let (_, branch) = h.get(&format!("/v1/sessions/{branch_id}/transcript")).await;
+    assert_eq!(branch["messages"].as_array().unwrap().len(), original_turns);
+    let branch_first: String = branch["messages"][0]["parts"][0]["text"].as_str().unwrap().to_string();
+    assert_eq!(branch_first, "what is 6*7?");
+    // ...but every message belongs to the branch, not to the session it came from.
+    assert_eq!(branch["messages"][0]["session_id"], json!(branch_id));
+
+    // And it continues on its own: a new goal in the branch must not appear in the original.
+    let before = h.get(&format!("/v1/sessions/{id}/transcript")).await.1;
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{branch_id}/messages"), json!({ "text": "branch only", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+    let after = h.get(&format!("/v1/sessions/{id}/transcript")).await.1;
+    assert_eq!(
+        before["messages"].as_array().unwrap().len(),
+        after["messages"].as_array().unwrap().len(),
+        "the original must not grow when the branch runs"
+    );
+    let branched = h.get(&format!("/v1/sessions/{branch_id}/transcript")).await.1;
+    assert!(branched["messages"].as_array().unwrap().len() > original_turns);
+
+    h.shutdown.cancel();
+}
+
+/// Export is a read-only projection: both formats carry the conversation and what it cost.
+#[tokio::test]
+async fn a_session_exports_as_json_and_markdown() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "export me" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "what is 8*8?", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = h.get(&format!("/v1/sessions/{id}/export")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["session"]["title"], json!("export me"));
+    assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(body["runs"].as_array().unwrap().len(), 1);
+    assert!(
+        body["usage"]["total_tokens"].as_u64().unwrap() > 0,
+        "an export states what the session cost: {}",
+        body["usage"]
+    );
+
+    let response = h
+        .client
+        .get(h.url(&format!("/v1/sessions/{id}/export?format=markdown")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let markdown = response.text().await.unwrap();
+    assert!(markdown.starts_with("# export me"), "got: {markdown}");
+    assert!(markdown.contains("what is 8*8?"));
+    assert!(markdown.contains("## Runs"));
+
+    // An unknown format is a client error, not a silent fallback.
+    let (status, _) = h.get(&format!("/v1/sessions/{id}/export?format=pdf")).await;
+    assert_eq!(status, 400);
+
+    h.shutdown.cancel();
+}
+
 /// When the conversation outgrows the history window, the dropped turns are summarised once and
 /// kept as memory - dropped from the prompt, not from memory.
 #[tokio::test]

@@ -301,6 +301,87 @@ impl SessionManager {
         Ok(())
     }
 
+/// Fork a session: a new session that starts from this one and continues on its own.
+    ///
+    /// The fork inherits the transcript, the runs and the task graphs, with every session-scoped
+    /// identifier rewritten so the two sessions never point at each other by accident. Memory is
+    /// deliberately NOT copied: memory is per session, which is what makes a fork a clean place to
+    /// try something without polluting what the original remembers.
+    pub async fn branch(&self, session: &SessionId, title: Option<String>) -> Result<SessionRecord> {
+        let source = self.session_collection().load(self.store.as_ref(), session.as_str()).await?;
+        let source = source.ok_or_else(|| RuntimeError::not_found(format!("session {session} not found")))?;
+        let handle = self.actor_for(session).await?;
+        let checkpoint = self.actors.checkpoint(&handle.id).await?;
+
+        // A run that was in flight in the source is not in flight in the fork.
+        let mut state: SessionActorState = serde_json::from_value(checkpoint.state.clone())?;
+        let mut record = SessionRecord::new(
+            source.user_id.clone(),
+            title.unwrap_or_else(|| format!("{} (branch)", source.title)),
+        );
+        record.state = record.state.transition(SessionState::Active).unwrap_or(record.state);
+        state.session = record.clone();
+        state.active_run = None;
+        for message in &mut state.transcript {
+            message.session_id = record.id.clone();
+        }
+        for run in &mut state.runs {
+            run.session_id = record.id.clone();
+        }
+        for graph in &mut state.graphs {
+            graph.session_id = record.id.clone();
+        }
+
+        let mut forked = checkpoint.clone();
+        forked.meta.id = agentos_core::CheckpointId::new();
+        forked.meta.actor_id = ActorId::new();
+        forked.meta.session_id = record.id.clone();
+        forked.meta.generation = 0;
+        forked.meta.applied_seq = 0;
+        forked.state = serde_json::to_value(&state)?;
+
+        let (new_handle, _replayed) = self.actors.restore(forked, self.factory.clone()).await?;
+        record.actor_id = new_handle.id.clone();
+        record.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+
+        let mut actor_record = ActorRecord::new(record.actor_id.clone(), record.id.clone(), "session");
+        actor_record.state = ActorState::Active;
+        self.directory
+            .register(DirectoryEntry::from_record(&actor_record, Some(self.node_id.clone())))
+            .await?;
+
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionCreated, "session forked")
+                    .session(record.id.clone())
+                    .actor(record.actor_id.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "forked_from": source.id.as_str(),
+                        "turns": state.transcript.len(),
+                        "runs": state.runs.len(),
+                    })),
+            )
+            .await?;
+
+        tracing::info!(source = %source.id, branch = %record.id, "session forked");
+        Ok(record)
+    }
+
+    /// The typed material of an export: the live record, the conversation and the runs.
+    pub async fn export_data(
+        &self,
+        session: &SessionId,
+    ) -> Result<(SessionRecord, Vec<agentos_core::model::SessionMessage>, Vec<agentos_core::model::AgentRun>)> {
+        let handle = self.actor_for(session).await?;
+        let checkpoint = self.actors.checkpoint(&handle.id).await?;
+        let state: SessionActorState = serde_json::from_value(checkpoint.state)?;
+        Ok((state.session, state.transcript, state.runs))
+    }
+
     /// Export a session actor snapshot.
     pub async fn snapshot(&self, session: &SessionId) -> Result<Checkpoint> {
         let handle = self.actor_for(session).await?;

@@ -13,6 +13,7 @@
 pub mod agent_loop;
 pub mod compaction;
 pub mod context;
+pub mod export;
 pub mod memory;
 pub mod session;
 pub mod session_manager;
@@ -20,6 +21,7 @@ pub mod session_manager;
 pub use agent_loop::{AgentLoop, AgentLoopOutcome, PlanTaskRunner};
 pub use compaction::compaction_window;
 pub use context::{load_workspace_context, LoadedContext};
+pub use export::to_markdown;
 pub use memory::{MemoryStore, StoreMemoryStore};
 pub use session::{SessionActor, SessionActorState, SessionDeps, SessionMessage};
 pub use session_manager::{SessionManager, SessionSummary};

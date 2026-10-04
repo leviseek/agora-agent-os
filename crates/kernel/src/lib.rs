@@ -517,6 +517,13 @@ impl Kernel {
             .await;
     }
 
+    /// Render a session as Markdown. The gateway stays free of rendering concerns: it asks the
+    /// composition root, which owns the dependency on the agent runtime.
+    pub async fn export_markdown(&self, session: &agentos_core::SessionId) -> Result<String> {
+        let (record, transcript, runs) = self.sessions.export_data(session).await?;
+        Ok(agentos_agent_runtime::to_markdown(&record, &transcript, &runs))
+    }
+
     pub async fn health(&self) -> Result<KernelHealth> {
         Ok(KernelHealth {
             node: self.config.node.name.clone(),
