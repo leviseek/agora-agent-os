@@ -7,6 +7,7 @@
 //! Every invocation goes through the policy gate and the schema check before it reaches the
 //! implementation, because user input is untrusted by default.
 
+pub mod approvals;
 pub mod builtins;
 pub mod capability;
 pub mod file_tools;
@@ -18,6 +19,7 @@ pub mod schema;
 pub mod transport;
 pub mod workspace;
 
+pub use approvals::{ApprovalBroker, ApprovalDecision, ApprovalRequest, ApprovalTicket};
 pub use capability::{CallerContext, Capability, CapabilityContext, InvocationResult};
 pub use file_tools::{glob_match, FilesystemEditCapability, FilesystemSearchCapability};
 pub use mcp::{connect_stdio, McpCapability, McpConnection, McpServerConfig, McpTool, StdioMcpClient};

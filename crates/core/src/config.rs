@@ -138,6 +138,10 @@ pub struct PolicyConfig {
     /// Character budget for that history. The oldest turns are dropped first, and the newest turn
     /// is truncated rather than dropped, so the immediate context is never lost.
     pub history_chars: usize,
+    /// How long a capability call that needs an operator decision waits before giving up.
+    pub approval_timeout_ms: u64,
+    /// How many undecided approvals may pile up. A bound here is what stops a wall of prompts.
+    pub max_pending_approvals: usize,
     /// Summarise the turns that fell out of the history window, so they are dropped from the
     /// prompt rather than from memory. Costs one model call per compaction.
     pub compaction_enabled: bool,
@@ -383,6 +387,8 @@ impl Default for RuntimeConfig {
                 max_steps_per_run: 12,
                 history_messages: 20,
                 history_chars: 8_000,
+                approval_timeout_ms: 120_000,
+                max_pending_approvals: 64,
                 compaction_enabled: true,
                 compaction_min_messages: 4,
                 context_files: vec!["AGENTS.md".into()],
@@ -643,6 +649,16 @@ impl RuntimeConfig {
                 )));
             }
             seen_names.push(server.name.as_str());
+        }
+        if !self.policy.approval_required.is_empty() && self.policy.approval_timeout_ms == 0 {
+            return Err(RuntimeError::invalid_input(
+                "policy.approval_timeout_ms must be > 0: an approval with no deadline is a hang",
+            ));
+        }
+        if self.policy.max_pending_approvals == 0 {
+            return Err(RuntimeError::invalid_input(
+                "policy.max_pending_approvals must be > 0",
+            ));
         }
         if self.policy.compaction_enabled && self.policy.history_messages == 0 {
             return Err(RuntimeError::invalid_input(

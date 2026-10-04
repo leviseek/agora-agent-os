@@ -69,6 +69,12 @@ pub enum EventKind {
     SessionCompacted,
     /// Project instruction files were read from the workspace into a prompt.
     ContextLoaded,
+    /// A capability call is parked until a human decides.
+    ApprovalRequested,
+    ApprovalGranted,
+    ApprovalDenied,
+    /// Nobody decided within the configured window, so the call gave up.
+    ApprovalExpired,
     /// A streamed fragment of an answer that is still being written. Best effort: a missing delta
     /// costs a redraw, never an answer.
     AgentDelta,
@@ -127,6 +133,10 @@ impl EventKind {
             EventKind::SessionCompacted => "session_compacted",
             EventKind::SessionRenamed => "session_renamed",
             EventKind::AgentDelta => "agent_delta",
+            EventKind::ApprovalRequested => "approval_requested",
+            EventKind::ApprovalGranted => "approval_granted",
+            EventKind::ApprovalDenied => "approval_denied",
+            EventKind::ApprovalExpired => "approval_expired",
             EventKind::PolicyDenied => "policy_denied",
             EventKind::NodeDiscovered => "node_discovered",
             EventKind::NodeLost => "node_lost",

@@ -226,6 +226,46 @@ pub struct LimitQuery {
     pub kinds: Option<String>,
 }
 
+/// Approvals waiting for a decision.
+pub async fn list_approvals(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
+    let pending = state.kernel.approvals.pending();
+    Ok(Json(json!({ "approvals": pending, "total": pending.len() })))
+}
+
+/// Decide one. The id is single use: deciding twice is a conflict, not a toggle.
+pub async fn decide_approval(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let approved = body
+        .get("approved")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| ApiError(RuntimeError::invalid_input("approved is required and must be a boolean")))?;
+    let reason = body
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let decided_by = body
+        .get("by")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let decision = if approved {
+        agentos_capability_runtime::ApprovalDecision::approve(decided_by)
+    } else {
+        agentos_capability_runtime::ApprovalDecision::deny(
+            reason.clone().unwrap_or_else(|| "denied by an operator".into()),
+            decided_by,
+        )
+    };
+    let request = state.kernel.approvals.decide(&id, decision)?;
+    Ok(Json(json!({
+        "approval": request,
+        "approved": approved,
+        "reason": reason,
+    })))
+}
+
 /// The diagnostics bundle, redacted. Same content the CLI writes, for a remote console.
 pub async fn diagnostics(
     State(state): State<ApiState>,
@@ -646,6 +686,10 @@ fn parse_event_kind(kind: &str) -> Option<EventKind> {
         EventKind::SessionCompacted,
         EventKind::SessionRenamed,
         EventKind::AgentDelta,
+        EventKind::ApprovalRequested,
+        EventKind::ApprovalGranted,
+        EventKind::ApprovalDenied,
+        EventKind::ApprovalExpired,
         EventKind::NodeDiscovered,
         EventKind::NodeLost,
         EventKind::Error,

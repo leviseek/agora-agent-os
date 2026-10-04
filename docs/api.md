@@ -50,6 +50,10 @@ Everything else under `/v1` requires `Authorization: Bearer <token>` when the no
 | POST | `/v1/sessions/{id}/migrate` | `{target_worker?}` | `MigrationReport` |
 | GET | `/v1/capabilities` | `?q=&tags=&healthy_only=` | `{capabilities:[Descriptor]}` |
 | POST | `/v1/capabilities/{name}/invoke` | `{input, version?, session_id?}` | output + timing + attempts |
+| GET | `/v1/approvals` | - | capability calls waiting for an operator decision, with a bounded arguments preview |
+| POST | `/v1/approvals/{id}` | `{approved, reason?, by?}` | decide one; single use (404 on a second decision), released call continues or fails with the reason |
+| GET | `/v1/artifacts/{id}` | - | an artifact's bytes, with its content type (how a client renders an attached image) |
+| GET | `/v1/diagnostics` | `?events=&transcripts=` | the redacted support bundle; conversation text is opt-in |
 | GET | `/v1/tasks` | `?session_id=&limit=` | `{tasks:[TaskRecord]}` |
 | GET | `/v1/workers` | - | `{workers:[WorkerRecord]}` |
 | GET | `/v1/actors` | - | live actors, directory entries, cache counters |

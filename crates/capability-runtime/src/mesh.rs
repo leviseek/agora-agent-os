@@ -7,6 +7,7 @@
 //!   4. execute with timeout, retry and cancellation,
 //!   5. record load, emit events, return a typed result.
 
+use crate::approvals::{ApprovalBroker, ApprovalRequest};
 use crate::capability::{CallerContext, CapabilityContext, InvocationResult};
 use crate::policy::{CapabilityPolicy, PolicyRequest};
 use crate::registry::CapabilityRegistry;
@@ -40,6 +41,11 @@ pub struct CapabilityMesh {
     workspace: Arc<Workspace>,
     cfg: MeshConfig,
     node_id: String,
+    /// Where a call that needs a human decision parks. Absent in deployments that never ask for
+    /// one, and a call that needs approval without a broker is refused rather than waved through.
+    approvals: Option<Arc<ApprovalBroker>>,
+    approval_timeout_ms: u64,
+    max_pending_approvals: usize,
 }
 
 impl CapabilityMesh {
@@ -51,7 +57,32 @@ impl CapabilityMesh {
         cfg: MeshConfig,
         node_id: impl Into<String>,
     ) -> Self {
-        Self { registry, policy, bus, artifacts: None, workspace, cfg, node_id: node_id.into() }
+        Self {
+            registry,
+            policy,
+            bus,
+            artifacts: None,
+            workspace,
+            cfg,
+            node_id: node_id.into(),
+            approvals: None,
+            approval_timeout_ms: crate::approvals::DEFAULT_APPROVAL_TIMEOUT_MS,
+            max_pending_approvals: 64,
+        }
+    }
+
+    /// Route calls that need a decision through this broker. Also sets how long such a call waits
+    /// before giving up, because a wait with no end is a hang with extra steps.
+    pub fn with_approvals(
+        mut self,
+        approvals: Arc<ApprovalBroker>,
+        timeout_ms: u64,
+        max_pending: usize,
+    ) -> Self {
+        self.approvals = Some(approvals);
+        self.approval_timeout_ms = timeout_ms.max(1_000);
+        self.max_pending_approvals = max_pending.max(1);
+        self
     }
 
     pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactStore>) -> Self {
@@ -65,6 +96,100 @@ impl CapabilityMesh {
 
     pub fn list(&self) -> Vec<CapabilityDescriptor> {
         self.registry.list()
+    }
+
+    /// Park a call until an operator decides, then continue or refuse.
+    ///
+    /// The wait ends on a decision, on the configured timeout, or when the caller is cancelled -
+    /// all three, because a capability call must not be able to hang the run that made it.
+    async fn await_approval(
+        &self,
+        descriptor: &CapabilityDescriptor,
+        input: &serde_json::Value,
+        caller: &CallerContext,
+    ) -> Result<()> {
+        let name = descriptor.name.as_str();
+        let Some(approvals) = &self.approvals else {
+            return Err(RuntimeError::policy_denied(format!(
+                "capability {name} requires approval and this runtime has no approval channel configured"
+            )));
+        };
+
+        let preview = serde_json::to_string(input).unwrap_or_default();
+        let request = ApprovalRequest {
+            id: format!("apr_{}", agentos_core::now_ms()),
+            capability: name.to_string(),
+            session_id: caller.session_id.clone(),
+            actor_id: caller.actor_id.as_ref().map(|id| id.as_str().to_string()),
+            task_id: caller.task_id.as_ref().map(|id| id.as_str().to_string()),
+            arguments_preview: preview.chars().take(500).collect(),
+            reason: format!("{name} is on the approval list for this node"),
+            created_at: agentos_core::now_ms(),
+        };
+        let id = request.id.clone();
+        let ticket = approvals.request(request)?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::ApprovalRequested, format!("capability {name} is waiting for approval"))
+                    .warn()
+                    .session(caller.session_id.clone())
+                    .capability(descriptor.id.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "approval_id": id,
+                        "capability": name,
+                        "arguments_preview": ticket.request().arguments_preview,
+                    })),
+            )
+            .await?;
+
+        let decision = tokio::select! {
+            _ = caller.cancellation.cancelled() => {
+                return Err(RuntimeError::cancelled(format!("capability {name} was cancelled while waiting for approval")));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(self.approval_timeout_ms)) => {
+                self.bus.publish(
+                    NewEvent::new(EventKind::ApprovalExpired, format!("approval for {name} expired"))
+                        .warn()
+                        .session(caller.session_id.clone())
+                        .node(self.node_id.clone())
+                        .payload(serde_json::json!({ "approval_id": id, "capability": name, "timeout_ms": self.approval_timeout_ms })),
+                ).await?;
+                return Err(RuntimeError::timeout(format!(
+                    "capability {name} waited {} ms for approval and none came",
+                    self.approval_timeout_ms
+                )));
+            }
+            waited = ticket.wait() => waited?,
+        };
+
+        self.bus
+            .publish(
+                NewEvent::new(
+                    if decision.approved { EventKind::ApprovalGranted } else { EventKind::ApprovalDenied },
+                    format!("capability {name} was {}", if decision.approved { "approved" } else { "denied" }),
+                )
+                .session(caller.session_id.clone())
+                .capability(descriptor.id.clone())
+                .node(self.node_id.clone())
+                .payload(serde_json::json!({
+                    "approval_id": id,
+                    "capability": name,
+                    "approved": decision.approved,
+                    "reason": decision.reason,
+                    "decided_by": decision.decided_by,
+                })),
+            )
+            .await?;
+
+        if decision.approved {
+            Ok(())
+        } else {
+            Err(RuntimeError::policy_denied(format!(
+                "capability {name} was denied by an operator: {}",
+                decision.reason.unwrap_or_else(|| "no reason given".into())
+            )))
+        }
     }
 
     /// The single entry point for calling a capability.
@@ -90,7 +215,13 @@ impl CapabilityMesh {
             input_bytes: serde_json::to_vec(&input).map(|v| v.len()).unwrap_or(0),
             workspace_root: self.workspace.root().to_path_buf(),
         })?;
-        if !decision.allowed {
+        // A call that needs approval arrives here as "denied, but with a flag": the policy engine
+        // says no because it cannot say yes on its own. Denying it outright would make the flag
+        // dead code, so a flagged denial is parked instead, and the permission an approval grants
+        // is what the descriptor declares - a human said yes, which is the strongest answer the
+        // runtime has.
+        let mut granted = decision.granted.clone();
+        if !decision.allowed && !decision.requires_approval {
             metrics().inc(metric_names::POLICY_DENIED, 1);
             self.bus
                 .publish(
@@ -108,13 +239,19 @@ impl CapabilityMesh {
             )));
         }
 
+        // --- approval gate ------------------------------------------------------------
+        if decision.requires_approval {
+            self.await_approval(&descriptor, &input, &caller).await?;
+            granted = descriptor.permission.clone();
+        }
+
         // --- input validation ---------------------------------------------------------
         crate::schema::validate(&descriptor.input_schema, &input, "input")?;
 
         let ctx = CapabilityContext {
             capability_id: descriptor.id.clone(),
             caller: caller.clone(),
-            permission: decision.granted.clone(),
+            permission: granted,
             workspace: self.workspace.clone(),
             artifacts: self.artifacts.clone(),
             timeout_ms: if descriptor.timeout_ms == 0 { self.cfg.default_timeout_ms } else { descriptor.timeout_ms },

@@ -94,6 +94,9 @@ pub struct Kernel {
     /// MCP servers this runtime started. Held so the child processes live exactly as long as the
     /// runtime does: dropping a client kills its server.
     pub mcp_clients: Vec<Arc<agentos_capability_runtime::mcp::StdioMcpClient>>,
+    /// Pending operator decisions. Lives here because both the mesh and the gateway need it, and
+    /// neither owns it.
+    pub approvals: Arc<agentos_capability_runtime::ApprovalBroker>,
     pub started_at: Timestamp,
     shutdown: tokio_util::sync::CancellationToken,
 }
@@ -138,6 +141,12 @@ impl Kernel {
         // starts without it and says so.
         let mcp_clients = connect_mcp_servers(&config, &registry).await;
 
+        // Approvals exist even when nothing asks for one: the broker is cheap, and a capability
+        // that suddenly needs a decision should not require a restart to get one.
+        let approvals = Arc::new(agentos_capability_runtime::ApprovalBroker::new(
+            config.policy.max_pending_approvals,
+        ));
+
         let mesh = Arc::new(
             CapabilityMesh::new(
                 registry.clone(),
@@ -151,7 +160,12 @@ impl Kernel {
                 },
                 node.clone(),
             )
-            .with_artifacts(artifacts.clone()),
+            .with_artifacts(artifacts.clone())
+            .with_approvals(
+                approvals.clone(),
+                config.policy.approval_timeout_ms,
+                config.policy.max_pending_approvals,
+            ),
         );
 
         // --- wasm sandbox ----------------------------------------------------------
@@ -299,6 +313,7 @@ impl Kernel {
             transfer,
             discovery,
             mcp_clients,
+            approvals,
             started_at: now_ms(),
             shutdown: tokio_util::sync::CancellationToken::new(),
         });

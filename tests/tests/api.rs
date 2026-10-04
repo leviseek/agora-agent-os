@@ -614,6 +614,139 @@ async fn images_are_verified_by_content_and_stored_as_artifacts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn an_approval_gates_a_capability_call() {
+    let dir = std::env::temp_dir().join(format!("agentos-approval-{}", agentos_core::now_ms()));
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let mut config = RuntimeConfig::default();
+    config.storage.backend = StoreBackend::Memory;
+    config.storage.data_dir = dir.join("data");
+    config.policy.workspace_root = workspace.clone();
+    config.observability.log_level = "error".into();
+    config.api.auth_token_env = "AGENTOS_TEST_APPROVAL_TOKEN".into();
+    // Allowed, but only with a human in the loop. Short window so the timeout case is quick.
+    config.policy.allowed_capabilities = vec!["filesystem-write".into(), "filesystem-read".into()];
+    config.policy.approval_required = vec!["filesystem-write".into()];
+    config.policy.approval_timeout_ms = 1_500;
+    std::env::remove_var("AGENTOS_TEST_APPROVAL_TOKEN");
+
+    let kernel = Kernel::bootstrap(config).await.unwrap();
+    let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _kernel: kernel.clone(),
+        shutdown,
+        client: reqwest::Client::new(),
+    };
+
+    // --- approved: the write happens, but only after the decision -------------------------
+    let client = h.client.clone();
+    let base = h.base.clone();
+    let call = |text: &str| {
+        let client = client.clone();
+        let base = base.clone();
+        let text = text.to_string();
+        async move {
+            client
+                .post(format!("{base}/v1/capabilities/filesystem-write/invoke"))
+                .json(&json!({ "input": { "path": "approved.txt", "content": text } }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let pending_call = tokio::spawn(call("written after a decision"));
+    let approval = wait_for_approval(&h).await;
+    let approval_id = approval["id"].as_str().unwrap().to_string();
+    assert_eq!(approval["capability"], json!("filesystem-write"));
+    assert!(
+        approval["arguments_preview"].as_str().unwrap().contains("approved.txt"),
+        "the operator can see what they are approving: {approval}"
+    );
+    assert!(
+        !workspace.join("approved.txt").exists(),
+        "nothing happens while the call is parked"
+    );
+
+    let (status, body) = h
+        .post(&format!("/v1/approvals/{approval_id}"), json!({ "approved": true, "by": "test" }))
+        .await;
+    assert_eq!(status, 200, "deciding works: {body}");
+    let response = pending_call.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200, "the parked call completes after approval");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("approved.txt")).unwrap(),
+        "written after a decision"
+    );
+
+    // A decision is single use.
+    let (status, _) = h
+        .post(&format!("/v1/approvals/{approval_id}"), json!({ "approved": true }))
+        .await;
+    assert_eq!(status, 404, "deciding twice is not a toggle");
+
+    // --- denied: the write never happens ------------------------------------------------
+    let pending_call = tokio::spawn(call("must never be written"));
+    let approval = wait_for_approval(&h).await;
+    let approval_id = approval["id"].as_str().unwrap().to_string();
+    let (status, _) = h
+        .post(
+            &format!("/v1/approvals/{approval_id}"),
+            json!({ "approved": false, "reason": "not that file" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let response = pending_call.await.unwrap();
+    assert_eq!(response.status().as_u16(), 403);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("not that file"), "the reason reaches the caller: {body}");
+    assert!(!workspace.join("must never be written").exists());
+    assert!(!workspace.join("denied.txt").exists());
+
+    // --- nobody decides: the call gives up instead of hanging forever --------------------
+    let pending_call = tokio::spawn(call("no decision"));
+    let approval = wait_for_approval(&h).await;
+    let response = pending_call.await.unwrap();
+    assert_eq!(response.status().as_u16(), 504, "an approval with no deadline is a hang");
+    let body = response.text().await.unwrap();
+    assert!(body.contains("waited"), "and it says why: {body}");
+
+    // The expired request leaves the pending list: no ghost prompts.
+    let (_, listed) = h.get("/v1/approvals").await;
+    assert_eq!(listed["total"], json!(0), "got {listed}");
+    let _ = approval;
+
+    // --- the decisions are on the record ------------------------------------------------
+    let (_, events) = h.get("/v1/events?limit=200&kinds=approval_requested").await;
+    assert!(events["events"].as_array().unwrap().len() >= 3, "every park is recorded");
+    let (_, granted) = h.get("/v1/events?limit=200&kinds=approval_granted").await;
+    assert_eq!(granted["events"].as_array().unwrap().len(), 1);
+    let (_, denied) = h.get("/v1/events?limit=200&kinds=approval_denied").await;
+    assert_eq!(denied["events"].as_array().unwrap().len(), 1);
+    let (_, expired) = h.get("/v1/events?limit=200&kinds=approval_expired").await;
+    assert_eq!(expired["events"].as_array().unwrap().len(), 1);
+
+    h.shutdown.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Poll until a call parks. A parked call is asynchronous by nature, so the test waits for it
+/// rather than sleeping for a guessed duration.
+async fn wait_for_approval(h: &Harness) -> Value {
+    for _ in 0..200 {
+        let (_, listed) = h.get("/v1/approvals").await;
+        if let Some(first) = listed["approvals"].as_array().and_then(|list| list.first()) {
+            return first.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("no approval was requested");
+}
+
+/// An approval is a real gate: the call parks, a decision releases it, and no decision times out.
 /// The diagnostics bundle explains the runtime without leaking what it must not.
 #[tokio::test]
 async fn the_diagnostics_bundle_is_useful_and_does_not_leak() {
