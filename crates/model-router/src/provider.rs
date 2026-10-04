@@ -34,20 +34,43 @@ pub struct ChatMessage {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Images attached to this message, already encoded. Empty for almost every message, which is
+    /// why it is skipped on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageInput>,
+}
+
+/// One image on its way to a provider. Base64 because that is what the wire format wants; the
+/// bytes themselves live in the artifact store until the request is built.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageInput {
+    pub mime: String,
+    pub base64: String,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: content.into(), name: None, tool_call_id: None }
+        Self { role: "system".into(), content: content.into(), name: None, tool_call_id: None, images: vec![] }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into(), name: None, tool_call_id: None }
+        Self { role: "user".into(), content: content.into(), name: None, tool_call_id: None, images: vec![] }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: content.into(), name: None, tool_call_id: None }
+        Self { role: "assistant".into(), content: content.into(), name: None, tool_call_id: None, images: vec![] }
     }
     pub fn tool(content: impl Into<String>, call_id: impl Into<String>) -> Self {
-        Self { role: "tool".into(), content: content.into(), name: None, tool_call_id: Some(call_id.into()) }
+        Self {
+            role: "tool".into(),
+            content: content.into(),
+            name: None,
+            tool_call_id: Some(call_id.into()),
+            images: vec![],
+        }
+    }
+    /// Attach images to this message. Only user messages carry them in practice.
+    pub fn with_images(mut self, images: Vec<ImageInput>) -> Self {
+        self.images = images;
+        self
     }
 }
 

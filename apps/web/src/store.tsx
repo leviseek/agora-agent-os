@@ -58,6 +58,13 @@ function writeStorage(key: string, value: string | null): void {
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'online' | 'error';
 
+/** One image the conversation refers to, as the transcript describes it. */
+export interface AttachedImage {
+  artifact_id: string;
+  name: string;
+  mime: string;
+}
+
 export interface AppStoreValue {
   baseUrl: string;
   token: string;
@@ -75,6 +82,10 @@ export interface AppStoreValue {
   sessionsLoading: boolean;
   /** Live answer text per run, replaced by the stored answer once the run finishes. */
   streamed: Map<string, string>;
+  /** Images attached to the conversation, newest last, as the transcript refers to them. */
+  attachments: AttachedImage[];
+  /** URL of an artifact's bytes. */
+  artifactUrl: (id: string) => string;
   selectedSessionId: string | null;
   detail: SessionDetail | null;
   detailError: ApiError | null;
@@ -104,7 +115,7 @@ export interface AppStoreValue {
   selectSession: (id: string | null) => void;
   refreshDetail: (id?: string) => Promise<void>;
   closeSession: (id: string) => Promise<void>;
-  sendGoal: (text: string, wait: boolean) => Promise<PostMessageResponse | null>;
+  sendGoal: (text: string, wait: boolean, images?: string[]) => Promise<PostMessageResponse | null>;
   cancelRun: () => Promise<void>;
   clearEvents: () => void;
   clearActionError: () => void;
@@ -136,6 +147,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [sessionQuery, setSessionQueryState] = useState<string>('');
   // Live answer text per run, replaced by the stored answer when the run completes.
   const [streamed, setStreamed] = useState<Map<string, string>>(() => new Map());
+  const [attachments, setAttachments] = useState<AttachedImage[]>([]);
+
+  const artifactUrl = useCallback(
+    (id: string): string => clientRef.current.artifactUrl(id),
+    [],
+  );
   const [sessionsError, setSessionsError] = useState<ApiError | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -193,6 +210,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const response = await clientRef.current.getSession(target);
       setDetail(response);
       setDetailError(null);
+      // Attachments live in the transcript, so they are collected from there rather than from a
+      // second source of truth. Only the newest few matter: the strip shows what was just sent.
+      const transcript = await clientRef.current.sessionTranscript(target, 60);
+      const found: AttachedImage[] = [];
+      for (const message of transcript.messages) {
+        for (const part of message.parts) {
+          if (part.type === 'image' && part.artifact_id !== undefined && part.name !== undefined) {
+            found.push({
+              artifact_id: part.artifact_id,
+              name: part.name,
+              mime: part.mime ?? 'application/octet-stream',
+            });
+          }
+        }
+      }
+      setAttachments(found.slice(-6));
     } catch (cause) {
       setDetailError(toApiError(cause));
     } finally {
@@ -473,7 +506,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const sendGoal = useCallback(
-    async (text: string, wait: boolean): Promise<PostMessageResponse | null> => {
+    async (text: string, wait: boolean, images: string[] = []): Promise<PostMessageResponse | null> => {
       const id = selectedRef.current;
       setActionError(null);
       if (id === null) {
@@ -482,7 +515,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       setBusy(true);
       try {
-        const response = await clientRef.current.postMessage(id, text, wait);
+        const response = await clientRef.current.postMessage(id, text, wait, images);
         await refreshDetail(id);
         await refreshSessions();
         return response;
@@ -547,6 +580,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsError,
       sessionsLoading,
       streamed,
+      attachments,
+      artifactUrl,
       sessionQuery,
       setSessionQuery,
       renameSession,
@@ -591,6 +626,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsError,
       sessionsLoading,
       streamed,
+      attachments,
+      artifactUrl,
       sessionQuery,
       setSessionQuery,
       renameSession,

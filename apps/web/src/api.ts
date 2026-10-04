@@ -350,7 +350,14 @@ export interface TranscriptEntry {
   id: string;
   session_id: string;
   role: string;
-  parts: { kind?: string; text?: string }[];
+  parts: {
+    type?: string;
+    kind?: string;
+    text?: string;
+    artifact_id?: string;
+    name?: string;
+    mime?: string;
+  }[];
   created_at: number;
   correlation_id?: string | null;
   agent_id?: string | null;
@@ -787,11 +794,21 @@ export class AgentOsClient {
     });
   }
 
-  postMessage(id: string, text: string, wait: boolean): Promise<PostMessageResponse> {
+  postMessage(
+    id: string,
+    text: string,
+    wait: boolean,
+    images: string[] = [],
+  ): Promise<PostMessageResponse> {
     return this.request<PostMessageResponse>('/v1/sessions/' + encodeURIComponent(id) + '/messages', {
       method: 'POST',
-      json: { text, wait },
+      json: images.length > 0 ? { text, wait, images } : { text, wait },
     });
+  }
+
+  /** The URL of an artifact's bytes, for rendering an image the transcript refers to. */
+  artifactUrl(id: string): string {
+    return this.baseUrl.replace(/\/$/, '') + '/v1/artifacts/' + encodeURIComponent(id);
   }
 
   cancelSession(id: string): Promise<CancelResponse> {

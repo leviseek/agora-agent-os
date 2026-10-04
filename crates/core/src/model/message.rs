@@ -30,6 +30,10 @@ pub enum ContentPart {
     Text { text: String },
     Artifact { artifact_id: String, name: String },
     Json { value: serde_json::Value },
+    /// An image the user attached. The bytes live in the artifact store, not here: a transcript
+    /// full of base64 would be unreadable to a human and expensive to store, and the artifact
+    /// store already exists to hold binary payloads by content hash.
+    Image { artifact_id: String, name: String, mime: String },
 }
 
 /// A single turn in a session transcript. User input is untrusted: it is stored as data and
@@ -73,6 +77,9 @@ impl SessionMessage {
                 ContentPart::Text { text } => out.push_str(text),
                 ContentPart::Artifact { name, .. } => out.push_str(&format!("[artifact {name}]")),
                 ContentPart::Json { value } => out.push_str(&value.to_string()),
+                // A placeholder, not the bytes: this is what an older turn looks like once its
+                // image is no longer sent to the model.
+                ContentPart::Image { name, .. } => out.push_str(&format!("[image {name}]")),
             }
         }
         out

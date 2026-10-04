@@ -173,6 +173,10 @@ pub struct PostMessageRequest {
     pub text: String,
     #[serde(default = "default_true")]
     pub wait: bool,
+    /// Workspace-relative paths of images to attach. Read through the workspace jail, verified by
+    /// content and stored as artifacts before the run starts.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -189,9 +193,19 @@ pub async fn post_message(
         return Err(ApiError(RuntimeError::invalid_input("message text must not be empty")));
     }
     if body.wait {
-        Ok(Json(state.kernel.sessions.post_goal(&session, &body.text).await?))
+        Ok(Json(
+            state
+                .kernel
+                .sessions
+                .post_goal(&session, &body.text, &body.images)
+                .await?,
+        ))
     } else {
-        state.kernel.sessions.post_goal_async(&session, &body.text).await?;
+        state
+            .kernel
+            .sessions
+            .post_goal_async(&session, &body.text, &body.images)
+            .await?;
         Ok(Json(json!({ "accepted": true, "session_id": id })))
     }
 }
@@ -210,6 +224,38 @@ pub struct LimitQuery {
     pub session_id: Option<String>,
     #[serde(default)]
     pub kinds: Option<String>,
+}
+
+/// Fetch an artifact's bytes. This is how a client renders an image the transcript refers to.
+pub async fn get_artifact(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let artifact_id = agentos_core::ArtifactId::from_raw(id.clone());
+    let record = state
+        .kernel
+        .artifacts
+        .get(&artifact_id)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("artifact {id} not found"))))?;
+    let bytes = state
+        .kernel
+        .artifacts
+        .read(&artifact_id)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("artifact {id} has no bytes"))))?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, record.content_type.clone()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{}\"", record.name.replace('"', "")),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Fork a session. The fork inherits the conversation and the runs, with fresh identifiers.

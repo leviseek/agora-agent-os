@@ -40,7 +40,8 @@ use tokio_util::sync::CancellationToken;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionMessage {
     /// The user's goal. Runs the agent loop to completion.
-    UserGoal { text: String, correlation: Option<Correlation> },
+    /// A goal, optionally with workspace-relative image paths attached.
+    UserGoal { text: String, correlation: Option<Correlation>, images: Vec<String> },
     /// Cooperative cancellation of the run currently in flight.
     Cancel { reason: String },
     /// Inspect the session without mutating it.
@@ -283,7 +284,12 @@ impl SessionActor {
     }
 
     /// The whole point of the actor: one goal, executed to completion, in order.
-    async fn handle_goal(&mut self, text: String, correlation: Option<Correlation>) -> Result<serde_json::Value> {
+    async fn handle_goal(
+        &mut self,
+        text: String,
+        correlation: Option<Correlation>,
+        images: Vec<String>,
+    ) -> Result<serde_json::Value> {
         // Untrusted input is trimmed and size-bounded before it becomes part of the transcript.
         let goal = text.trim().to_string();
         if goal.is_empty() {
@@ -297,14 +303,34 @@ impl SessionActor {
         self.set_session_state(SessionState::Active)?;
         self.state.session.message_count += 1;
 
+        // Attachments are read through the workspace jail and stored as artifacts before the run
+        // starts, so a bad path fails the goal immediately instead of mid-run.
+        let attached = crate::images::attach_images(
+            &self.deps.workspace,
+            &self.deps.artifacts,
+            &self.session_id,
+            &images,
+        )
+        .await?;
+        if !attached.parts.is_empty() {
+            self.deps
+                .bus
+                .publish(
+                    NewEvent::new(EventKind::ArtifactCreated, "images attached")
+                        .session(self.session_id.clone())
+                        .node(self.deps.node_id.clone())
+                        .payload(serde_json::json!({
+                            "count": attached.parts.len(),
+                            "names": images,
+                        })),
+                )
+                .await?;
+        }
+
+        let user_message = crate::images::user_message(&self.session_id, &goal, &attached.parts);
         let user_message = TranscriptMessage {
-            id: agentos_core::MessageId::new(),
-            session_id: self.session_id.clone(),
-            role: agentos_core::model::MessageRole::User,
-            parts: vec![agentos_core::model::ContentPart::Text { text: goal.clone() }],
-            created_at: now_ms(),
             correlation_id: Some(correlation.request()),
-            agent_id: None,
+            ..user_message
         };
         self.state.transcript.push(user_message.clone());
         self.persist_session().await?;
@@ -408,6 +434,7 @@ impl SessionActor {
         }
         let prompt_context = PromptContext {
             history: &history,
+            images: &attached.images,
             workspace: workspace_context.as_ref().map(|loaded| loaded.text.as_str()),
             memory: memory_context.as_deref(),
         };
@@ -647,7 +674,9 @@ impl Actor for SessionActor {
 
     async fn handle(&mut self, message: SessionMessage, _ctx: &ActorContext) -> Result<serde_json::Value> {
         match message {
-            SessionMessage::UserGoal { text, correlation } => self.handle_goal(text, correlation).await,
+            SessionMessage::UserGoal { text, correlation, images } => {
+                self.handle_goal(text, correlation, images).await
+            }
             SessionMessage::Cancel { reason } => {
                 let cancelled = match self.deps.run_tokens.read().get(&self.session_id) {
                     Some(token) => {

@@ -52,7 +52,20 @@ impl OpenAiCompatibleProvider {
             .messages
             .iter()
             .map(|m| {
-                let mut obj = json!({ "role": m.role, "content": m.content });
+                // One image turns the content into the multimodal array the wire format expects.
+        let content = if m.images.is_empty() {
+            json!(m.content)
+        } else {
+            let mut parts = vec![json!({ "type": "text", "text": m.content })];
+            for image in &m.images {
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{};base64,{}", image.mime, image.base64) }
+                }));
+            }
+            json!(parts)
+        };
+        let mut obj = json!({ "role": m.role, "content": content });
                 if let Some(id) = &m.tool_call_id {
                     obj["tool_call_id"] = json!(id);
                 }
@@ -408,6 +421,54 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max])
+    }
+}
+
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+    use crate::provider::{ChatMessage, ImageInput, ModelTask};
+
+    fn provider() -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider::from_config(
+            &ProviderConfig {
+                name: "deepseek".into(),
+                kind: ProviderKind::Deepseek,
+                model: "deepseek-chat".into(),
+                base_url: "https://api.deepseek.com/".into(),
+                api_key_env: "AGENTOS_TEST_UNSET_KEY".into(),
+                enabled: true,
+                priority: 1,
+                timeout_ms: 1000,
+            },
+            reqwest::Client::new(),
+        )
+    }
+
+    #[test]
+    fn a_message_without_images_keeps_the_plain_string_content() {
+        let request = ModelRequest::new(ModelTask::Think, vec![ChatMessage::user("hello")]);
+        let body = provider().build_body(&request);
+        assert_eq!(body["messages"][0]["content"], json!("hello"), "text stays a string");
+    }
+
+    #[test]
+    fn an_image_turns_the_content_into_parts() {
+        let message = ChatMessage::user("what is in this picture?").with_images(vec![ImageInput {
+            mime: "image/png".into(),
+            base64: "aGVsbG8=".into(),
+        }]);
+        let body = provider().build_body(&ModelRequest::new(ModelTask::Think, vec![message]));
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "multimodal content is an array: {content}");
+        assert_eq!(content[0]["type"], json!("text"));
+        assert_eq!(content[0]["text"], json!("what is in this picture?"));
+        assert_eq!(content[1]["type"], json!("image_url"));
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            json!("data:image/png;base64,aGVsbG8="),
+            "the image travels as a data URL"
+        );
     }
 }
 

@@ -514,6 +514,107 @@ async fn discovered_nodes_appear_in_the_gateway() {
     harness.shutdown.cancel();
 }
 
+#[tokio::test]
+async fn images_are_verified_by_content_and_stored_as_artifacts() {
+    use base64::Engine;
+    let dir = std::env::temp_dir().join(format!("agentos-vision-{}", agentos_core::now_ms()));
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    // A real 1x1 PNG.
+    let png = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        .unwrap();
+    std::fs::write(workspace.join("pixel.png"), &png).unwrap();
+    // The same name, the wrong content.
+    std::fs::write(workspace.join("liar.png"), "this is not an image").unwrap();
+    // Outside the workspace, however it is spelled.
+    std::fs::write(dir.join("outside.png"), &png).unwrap();
+
+    let mut config = RuntimeConfig::default();
+    config.storage.backend = StoreBackend::Memory;
+    config.storage.data_dir = dir.join("data");
+    config.policy.workspace_root = workspace.clone();
+    config.observability.log_level = "error".into();
+    config.api.auth_token_env = "AGENTOS_TEST_VISION_TOKEN".into();
+    std::env::remove_var("AGENTOS_TEST_VISION_TOKEN");
+
+    let kernel = Kernel::bootstrap(config).await.unwrap();
+    let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _kernel: kernel,
+        shutdown,
+        client: reqwest::Client::new(),
+    };
+
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "vision" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "what is in this picture?", "wait": true, "images": ["pixel.png"] }),
+        )
+        .await;
+    assert_eq!(status, 200, "the goal runs: {body}");
+
+    // The transcript refers to the image by artifact, not by carrying its bytes.
+    let (_, transcript) = h.get(&format!("/v1/sessions/{id}/transcript")).await;
+    let parts = transcript["messages"][0]["parts"].as_array().unwrap();
+    let image = parts
+        .iter()
+        .find(|part| part["type"] == json!("image"))
+        .expect("the user message carries an image part");
+    assert_eq!(image["name"], json!("pixel.png"));
+    assert_eq!(image["mime"], json!("image/png"), "the type came from the bytes");
+    let artifact_id = image["artifact_id"].as_str().unwrap().to_string();
+
+    // And the bytes can be fetched back, with the content type the model was told.
+    let response = h.client.get(h.url(&format!("/v1/artifacts/{artifact_id}"))).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.headers().get("content-type").unwrap().to_str().unwrap(),
+        "image/png"
+    );
+    let returned = response.bytes().await.unwrap();
+    assert_eq!(returned.as_ref(), png.as_slice(), "the artifact is the file we attached");
+
+    // A file called .png that is not one is refused: the name proves nothing.
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "look", "wait": true, "images": ["liar.png"] }),
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert!(
+        body["error"]["message"].as_str().unwrap().contains("decided by content"),
+        "got: {body}"
+    );
+
+    // And a path that leaves the workspace is refused, not sanitised.
+    let (status, _) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "look", "wait": true, "images": ["../outside.png"] }),
+        )
+        .await;
+    assert_eq!(status, 403);
+
+    // A missing file fails the goal loudly instead of answering about nothing.
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "look", "wait": true, "images": ["nope.png"] }),
+        )
+        .await;
+    assert_eq!(status, 404, "got: {body}");
+
+    h.shutdown.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An attached image is verified by content, stored as an artifact, and only then trusted.
 /// A run publishes its answer as it is written, and the pieces add up to the answer.
 #[tokio::test]
 async fn streamed_deltas_reach_the_event_stream() {

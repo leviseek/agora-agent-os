@@ -88,17 +88,32 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
             let session = value.get("session_id").and_then(|v| v.as_str())?;
             let text = value.get("goal").or_else(|| value.get("text")).and_then(|v| v.as_str())?;
             let wait = value.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Images travel the same way over the socket as over HTTP.
+            let images: Vec<String> = value
+                .get("images")
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
             let session_id = match SessionId::parse(session) {
                 Ok(id) => id,
                 Err(e) => return Some(json!({ "type": "error", "code": "invalid_input", "message": e.to_string() })),
             };
             if wait {
-                match state.kernel.sessions.post_goal(&session_id, text).await {
+                match state.kernel.sessions.post_goal(&session_id, text, &images).await {
                     Ok(result) => Some(json!({ "type": "goal_result", "result": result })),
                     Err(e) => Some(json!({ "type": "error", "code": e.code(), "message": e.message })),
                 }
             } else {
-                match state.kernel.sessions.post_goal_async(&session_id, text).await {
+                match state
+                    .kernel
+                    .sessions
+                    .post_goal_async(&session_id, text, &images)
+                    .await
+                {
                     Ok(()) => Some(json!({ "type": "accepted", "session_id": session })),
                     Err(e) => Some(json!({ "type": "error", "code": e.code(), "message": e.message })),
                 }

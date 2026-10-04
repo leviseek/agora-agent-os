@@ -59,6 +59,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/sessions/{id}/messages", post(handlers::post_message))
         .route("/v1/sessions/{id}/cancel", post(handlers::cancel_session))
         .route("/v1/sessions/{id}/transcript", get(handlers::session_transcript))
+        .route("/v1/artifacts/{id}", get(handlers::get_artifact))
         .route("/v1/sessions/{id}/export", get(handlers::session_export))
         .route("/v1/sessions/{id}/branch", post(handlers::session_branch))
         .route("/v1/sessions/{id}/events", get(handlers::session_events))

@@ -64,11 +64,16 @@ export function ChatView() {
     connection,
     sessions,
     streamed,
+    attachments,
+    artifactUrl,
   } = useApp();
   const { setView } = useNav();
   const session = useSessionEvents(selectedSessionId, 200);
 
   const [goal, setGoal] = useState('');
+  // Workspace-relative image paths, comma separated. Attachments are read by the runtime through
+  // the workspace jail, so this box can only name files the runtime is allowed to read.
+  const [imagePaths, setImagePaths] = useState('');
   const [wait, setWait] = useState(false);
   const [lastResult, setLastResult] = useState<string | null>(null);
 
@@ -113,7 +118,14 @@ export function ChatView() {
     const text = goal.trim();
     if (text.length === 0) return;
     setLastResult(null);
-    const response = await sendGoal(text, wait);
+    const images = imagePaths
+      .split(',')
+      .map((path) => path.trim())
+      .filter((path) => path.length > 0);
+    const response = await sendGoal(text, wait, images);
+    if (images.length > 0) {
+      setImagePaths('');
+    }
     if (response === null) return;
     setGoal('');
     if ('accepted' in response) {
@@ -180,6 +192,25 @@ export function ChatView() {
       >
         <ApiErrorBanner error={detailError} scope="GET /v1/sessions/{id}" onRetry={() => void refreshDetail()} />
         <ApiErrorBanner error={session.error} scope="GET /v1/sessions/{id}/events" onRetry={session.reload} />
+
+        {attachments.length > 0 ? (
+          <div className="attachments">
+            <span className="muted small">{t('chat.attachments')}</span>
+            {attachments.map((image) => (
+              <a
+                key={image.artifact_id}
+                className="attachment"
+                href={artifactUrl(image.artifact_id)}
+                target="_blank"
+                rel="noreferrer"
+                title={image.mime}
+              >
+                <img src={artifactUrl(image.artifact_id)} alt={image.name} />
+                <span>{image.name}</span>
+              </a>
+            ))}
+          </div>
+        ) : null}
 
         <div className="transcript" ref={transcriptRef}>
           {runs.length === 0 && sessionOnly.length === 0 ? (
@@ -283,6 +314,14 @@ export function ChatView() {
             rows={3}
             placeholder={t('chat.placeholder')}
             onChange={(event) => setGoal(event.target.value)}
+          />
+          <input
+            type="text"
+            className="image-paths"
+            value={imagePaths}
+            placeholder={t('chat.imagePlaceholder')}
+            onChange={(event) => setImagePaths(event.target.value)}
+            spellCheck={false}
           />
           <div className="chat-form-actions">
             <label className="checkbox">

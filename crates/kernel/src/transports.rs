@@ -246,9 +246,9 @@ impl AgentHandler for KernelAgentHandler {
 
     async fn post_goal(&self, session: &SessionId, goal: &str, wait: bool) -> Result<serde_json::Value> {
         if wait {
-            self.kernel.sessions.post_goal(session, goal).await
+            self.kernel.sessions.post_goal(session, goal, &[]).await
         } else {
-            self.kernel.sessions.post_goal_async(session, goal).await?;
+            self.kernel.sessions.post_goal_async(session, goal, &[]).await?;
             Ok(serde_json::json!({ "accepted": true, "session_id": session.as_str() }))
         }
     }

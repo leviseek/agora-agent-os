@@ -1180,6 +1180,41 @@ textarea:focus {
   background: transparent;
   color: var(--text-muted);
 }
+/* ------------------------------------------------------------------ attachments */
+
+.attachments {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px 0;
+}
+
+.attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-decoration: none;
+  color: inherit;
+  font-size: 12px;
+}
+
+.attachment img {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+}
+
+.image-paths {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
 /* ------------------------------------------------------------------ streaming */
 
 .streaming-text {

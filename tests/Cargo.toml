@@ -17,6 +17,7 @@ agentos-task-scheduler.workspace = true
 agentos-control-plane.workspace = true
 agentos-event-bus.workspace = true
 agentos-wasm-runtime.workspace = true
+base64.workspace = true
 agentos-network.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

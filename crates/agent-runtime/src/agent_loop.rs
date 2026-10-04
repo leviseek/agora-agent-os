@@ -24,6 +24,9 @@ struct Answerer {
 pub struct PromptContext<'a> {
     /// Conversation so far, oldest first.
     pub history: &'a [ChatMessage],
+    /// Images attached to the goal being handled. Only the current turn's images are sent: older
+    /// ones appear in the history as markers.
+    pub images: &'a [agentos_model_router::ImageInput],
     /// Project instructions read from the workspace at the start of the run.
     pub workspace: Option<&'a str>,
     /// Memories the history window can no longer show.
@@ -85,8 +88,10 @@ use tokio_util::sync::CancellationToken;
 ///   * the newest turn is truncated, never dropped, so an oversized message cannot silently
 ///     remove the very context the goal refers to.
 ///
-/// Only text parts take part: a future non-text part must be handled explicitly rather than
-/// stringified by accident.
+/// Text parts carry the conversation. An image from an earlier turn is represented by a marker
+/// rather than by its bytes: vision tokens are expensive, the newest turn is the one a follow-up
+/// almost always refers to, and the transcript stays readable. The current turn's images are
+/// attached by the caller (see PromptContext::images).
 pub fn history_for_model(
     transcript: &[TranscriptMessage],
     max_messages: usize,
@@ -112,7 +117,10 @@ pub fn history_for_model(
                 .parts
                 .iter()
                 .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::Text { text } => Some(text.clone()),
+                    ContentPart::Image { name, .. } => {
+                        Some(format!("[the user attached an image: {name}]"))
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -120,7 +128,13 @@ pub fn history_for_model(
             if text.trim().is_empty() {
                 return None;
             }
-            Some(ChatMessage { role: role.to_string(), content: text, name: None, tool_call_id: None })
+            Some(ChatMessage {
+                role: role.to_string(),
+                content: text,
+                name: None,
+                tool_call_id: None,
+                images: vec![],
+            })
         })
         .collect();
 
@@ -433,7 +447,7 @@ impl AgentLoop {
                 // understood, so the conversation goes in front of the goal, not behind it.
                 let mut messages = vec![ChatMessage::system(system)];
                 push_context(&mut messages, &context);
-                messages.push(ChatMessage::user(goal.to_string()));
+                messages.push(ChatMessage::user(goal.to_string()).with_images(context.images.to_vec()));
                 messages
             },
         )
@@ -572,7 +586,7 @@ impl AgentLoop {
         // Same rule as planning: conversation first, then the goal, then this run's exchange.
         let mut messages = vec![ChatMessage::system(self.deps.spec.system_prompt.clone())];
         push_context(&mut messages, &context);
-        messages.push(ChatMessage::user(goal.to_string()));
+        messages.push(ChatMessage::user(goal.to_string()).with_images(context.images.to_vec()));
         if !observations.is_empty() {
             messages.push(ChatMessage::assistant(format!(
                 "I ran {} step(s): {}",

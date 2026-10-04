@@ -214,7 +214,12 @@ impl SessionManager {
     }
 
     /// Send a goal to a session. Sessions are independent, so this awaits only this session.
-    pub async fn post_goal(&self, session: &SessionId, text: &str) -> Result<serde_json::Value> {
+    pub async fn post_goal(
+        &self,
+        session: &SessionId,
+        text: &str,
+        images: &[String],
+    ) -> Result<serde_json::Value> {
         let handle = self.actor_for(session).await?;
         let correlation = Correlation::new().with_session(session).with_actor(&handle.id);
         let span = correlation.span("session.goal");
@@ -223,15 +228,20 @@ impl SessionManager {
             .send(SessionMessage::UserGoal {
                 text: text.to_string(),
                 correlation: Some(correlation),
+                images: images.to_vec(),
             })
             .await
     }
 
     /// Queue a goal without waiting for completion; the caller follows the event stream instead.
-    pub async fn post_goal_async(&self, session: &SessionId, text: &str) -> Result<()> {
+    pub async fn post_goal_async(&self, session: &SessionId, text: &str, images: &[String]) -> Result<()> {
         let handle = self.actor_for(session).await?;
         handle
-            .cast(SessionMessage::UserGoal { text: text.to_string(), correlation: None })
+            .cast(SessionMessage::UserGoal {
+                text: text.to_string(),
+                correlation: None,
+                images: images.to_vec(),
+            })
             .await
     }
 

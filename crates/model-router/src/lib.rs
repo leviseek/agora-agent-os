@@ -16,7 +16,7 @@ pub mod router;
 pub use mock::MockProvider;
 pub use openai_compat::OpenAiCompatibleProvider;
 pub use provider::{
-    ChatMessage, ModelProvider, ModelRequest, ModelResponse, ModelTask, ProviderHealth, ToolCall,
-    ToolSpec, Usage,
+    ChatMessage, ImageInput, ModelProvider, ModelRequest, ModelResponse, ModelTask, ProviderHealth,
+    ToolCall, ToolSpec, Usage,
 };
 pub use router::{ModelRouter, ProviderInfo, RoutingPolicy};

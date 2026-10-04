@@ -64,7 +64,6 @@ pub fn to_markdown(session: &SessionRecord, transcript: &[SessionMessage], runs:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_core::SessionId;
 
     #[test]
     fn markdown_carries_the_conversation_and_the_cost() {
