@@ -65,6 +65,9 @@ pub enum EventKind {
     ArtifactCreated,
     MemoryWritten,
     PolicyDenied,
+    /// Memories were read back into a prompt. Deliberately not MemoryWritten: a recall is a read,
+    /// and an operator watching the stream needs to tell the two apart.
+    MemoryRecalled,
     /// Another node on this machine or network became visible.
     NodeDiscovered,
     /// A previously visible node stopped advertising.
@@ -110,6 +113,7 @@ impl EventKind {
             EventKind::WorkerOffline => "worker_offline",
             EventKind::ArtifactCreated => "artifact_created",
             EventKind::MemoryWritten => "memory_written",
+            EventKind::MemoryRecalled => "memory_recalled",
             EventKind::PolicyDenied => "policy_denied",
             EventKind::NodeDiscovered => "node_discovered",
             EventKind::NodeLost => "node_lost",

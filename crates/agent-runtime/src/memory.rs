@@ -85,6 +85,65 @@ impl MemoryStore for StoreMemoryStore {
     }
 }
 
+/// The goal line of a turn record, if the content has one.
+///
+/// Turn records are written as "goal: .../answer: ..." precisely so this is a parse rather than a
+/// guess: the goal is what identifies a turn, and recall needs to know which turns the recent
+/// history window already shows.
+pub fn goal_of(content: &str) -> Option<&str> {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("goal: "))
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+}
+
+/// Choose the memories worth injecting into a prompt.
+///
+/// The recent-history window is the first line of defence and it is always more faithful than a
+/// summary, so recall only adds what that window can no longer show: a record whose goal is still
+/// visible in the conversation is dropped. What survives is capped by characters, newest first as
+/// the store returned it.
+pub fn recall_context(
+    records: &[MemoryRecord],
+    history_texts: &[String],
+    max_chars: usize,
+) -> Option<String> {
+    if records.is_empty() || max_chars == 0 {
+        return None;
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for record in records {
+        let content = record.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        if let Some(goal) = goal_of(content) {
+            // Already in the conversation: the model can read the real thing, not a note about it.
+            if history_texts.iter().any(|text| text.trim() == goal) {
+                continue;
+            }
+        }
+        let cost = content.chars().count();
+        if used + cost > max_chars {
+            break;
+        }
+        used += cost;
+        kept.push(content);
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    let mut out = String::from("Earlier in this session, outside the recent turns you can see:\n");
+    for content in kept {
+        out.push_str("- ");
+        out.push_str(content);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 /// Convenience constructors used by the agent loop.
 pub fn episode(session: SessionId, content: impl Into<String>, tags: &[&str]) -> MemoryRecord {
     let mut record = MemoryRecord::new(session, MemoryKind::Episode, content);
@@ -98,6 +157,61 @@ pub fn semantic(session: SessionId, content: impl Into<String>, tags: &[&str]) -
     record.tags = tags.iter().map(|t| t.to_string()).collect();
     record.importance = 0.8;
     record
+}
+
+#[cfg(test)]
+mod recall_tests {
+    use super::*;
+
+    fn turn(goal: &str, answer: &str) -> MemoryRecord {
+        let session = SessionId::new();
+        episode(session, format!("goal: {goal}\nanswer: {answer}"), &["session", "turn"])
+    }
+
+    #[test]
+    fn parses_the_goal_line_of_a_turn_record() {
+        assert_eq!(goal_of("goal: what is 6*7?\nanswer: 42"), Some("what is 6*7?"));
+        assert_eq!(goal_of("no goal line here"), None);
+        assert_eq!(goal_of("goal:   "), None, "a blank goal is not a goal");
+    }
+
+    #[test]
+    fn keeps_only_what_the_history_window_no_longer_shows() {
+        let records = vec![turn("old question", "old answer"), turn("recent question", "recent answer")];
+        let history = vec!["recent question".to_string(), "recent answer".to_string()];
+        let context = recall_context(&records, &history, 1_000).unwrap();
+        assert!(context.contains("old question"), "the dropped turn must come back");
+        assert!(
+            !context.contains("recent question"),
+            "a turn the conversation still shows must not be repeated: {context}"
+        );
+    }
+
+    #[test]
+    fn a_fully_redundant_recall_injects_nothing() {
+        let records = vec![turn("only question", "only answer")];
+        let history = vec!["only question".to_string()];
+        assert!(recall_context(&records, &history, 1_000).is_none());
+        assert!(recall_context(&[], &history, 1_000).is_none());
+        assert!(recall_context(&records, &[], 0).is_none());
+    }
+
+    #[test]
+    fn the_character_budget_is_respected() {
+        let records = vec![turn("a", &"x".repeat(200)), turn("b", &"y".repeat(200))];
+        let context = recall_context(&records, &[], 260).unwrap();
+        assert!(context.chars().count() < 300, "budget blew up: {}", context.chars().count());
+        assert!(context.contains("goal: a"));
+        assert!(!context.contains("goal: b"), "the second record must not fit: {context}");
+    }
+
+    #[test]
+    fn content_without_a_goal_line_is_kept_because_it_cannot_be_deduped() {
+        let mut note = MemoryRecord::new(SessionId::new(), MemoryKind::Semantic, "the user prefers tables");
+        note.tags = vec!["preference".into()];
+        let context = recall_context(&[note], &["anything".into()], 1_000).unwrap();
+        assert!(context.contains("prefers tables"));
+    }
 }
 
 #[cfg(test)]

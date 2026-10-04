@@ -7,14 +7,13 @@
 //!     checkpoint, restore and migration work.
 
 use crate::agent_loop::{history_for_model, AgentLoop};
-use crate::memory::{episode, MemoryStore};
+use crate::memory::{episode, recall_context, MemoryStore};
 use agentos_actor_runtime::actor::{Actor, ActorContext, ErasedActor, TypedActor};
 use agentos_actor_runtime::checkpoint::CheckpointStore;
 use agentos_core::error::{Result, RuntimeError};
 use agentos_core::model::{
-    AgentRun, AgentSpec, EventKind, EventRecord, NewEvent, SessionMessage as TranscriptMessage,
-    TokenUsage,
-    SessionRecord, TaskGraphRecord,
+    AgentRun, AgentSpec, EventKind, EventRecord, MemoryKind, MemoryQuery, NewEvent, SessionRecord,
+    SessionMessage as TranscriptMessage, TaskGraphRecord, TokenUsage,
 };
 use agentos_core::state::{AgentRunState, SessionState, StateMachine};
 use agentos_core::telemetry::Correlation;
@@ -65,6 +64,9 @@ pub struct SessionDeps {
     /// Conversation budget for model requests (see PolicyConfig history_messages).
     pub history_messages: usize,
     pub history_chars: usize,
+    /// Long-term recall budget: memories considered, and characters injected.
+    pub memory_recall_limit: usize,
+    pub memory_recall_chars: usize,
     /// Live cancellation tokens per session. Deliberately OUTSIDE the actor mailbox: cancelling a
     /// run must not queue behind the run that is being cancelled.
     pub run_tokens: Arc<RwLock<std::collections::HashMap<SessionId, CancellationToken>>>,
@@ -140,6 +142,31 @@ impl SessionActor {
             .map_err(|e| RuntimeError::conflict(format!("session {}: {e}", self.session_id)))?;
         self.state.session.updated_at = now_ms();
         Ok(())
+    }
+
+    /// Recall the memories that the history window does not already show.
+    ///
+    /// Failure is never fatal: memory is an optimisation on top of the conversation, and a store
+    /// that is slow, empty or broken must not stop a goal from running.
+    async fn recall_context(&self, history: &[agentos_model_router::ChatMessage]) -> Option<String> {
+        if self.deps.memory_recall_limit == 0 || self.deps.memory_recall_chars == 0 {
+            return None;
+        }
+        let query = MemoryQuery {
+            session_id: Some(self.session_id.clone()),
+            kinds: vec![MemoryKind::Episode],
+            limit: self.deps.memory_recall_limit,
+            ..Default::default()
+        };
+        let records = match self.deps.memory.recall(query).await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(error = %error, "memory recall failed; continuing without it");
+                return None;
+            }
+        };
+        let history_texts: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
+        recall_context(&records, &history_texts, self.deps.memory_recall_chars)
     }
 
     /// The whole point of the actor: one goal, executed to completion, in order.
@@ -219,10 +246,30 @@ impl SessionActor {
             )
             .await?;
 
+        // Long-term recall: only what the history window can no longer show survives here, so the
+        // model gets older turns without being told the same thing twice.
+        let memory_context = self.recall_context(&history).await;
+        if let Some(context) = &memory_context {
+            self.deps
+                .bus
+                .publish(
+                    NewEvent::new(EventKind::MemoryRecalled, "recalled memory from earlier turns")
+                        .session(self.session_id.clone())
+                        .agent(run.id.clone())
+                        .node(self.deps.node_id.clone())
+                        .payload(serde_json::json!({
+                            "chars": context.chars().count(),
+                            "budget_limit": self.deps.memory_recall_limit,
+                            "budget_chars": self.deps.memory_recall_chars,
+                        })),
+                )
+                .await?;
+        }
+
         let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone());
         let outcome = match tokio::time::timeout(
             std::time::Duration::from_millis(self.deps.run_timeout_ms.max(1)),
-            loop_.run(&mut run, &goal, &history),
+            loop_.run(&mut run, &goal, &history, memory_context.as_deref()),
         )
         .await
         {
@@ -302,13 +349,19 @@ impl SessionActor {
             )
             .await?;
 
+        // One turn record per run, in a shape a reader can parse back: recall extracts the goal
+        // line to tell whether the recent-history window already shows this turn.
+        let outcome_text = final_answer
+            .clone()
+            .filter(|answer| !answer.trim().is_empty())
+            .unwrap_or_else(|| format!("(no answer: {})", error.clone().unwrap_or_else(|| "unknown".into())));
         let _ = self
             .deps
             .memory
             .write(episode(
                 self.session_id.clone(),
-                format!("goal: {goal}\nresult: {}", final_answer.clone().unwrap_or_default()),
-                &["session", "goal"],
+                format!("goal: {goal}\nanswer: {outcome_text}"),
+                &["session", "turn"],
             ))
             .await;
 

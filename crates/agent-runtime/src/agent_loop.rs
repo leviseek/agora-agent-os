@@ -4,7 +4,6 @@
 //! Expressing them as graph nodes means the scheduler can run them in parallel, retry the ones
 //! that fail and cancel the ones whose dependencies died - all without the loop knowing about it.
 
-use crate::memory::semantic;
 use crate::session::SessionDeps;
 use agentos_capability_runtime::capability::CallerContext;
 use agentos_core::error::{Result, RuntimeError};
@@ -216,6 +215,7 @@ impl AgentLoop {
         run: &mut AgentRun,
         goal: &str,
         history: &[ChatMessage],
+        memory_context: Option<&str>,
     ) -> Result<AgentLoopOutcome> {
         let tools = self.all_tool_specs();
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
@@ -248,7 +248,9 @@ impl AgentLoop {
         Self::transition(run, AgentRunState::Planning)?;
         steps += 1;
         let plan_started = now_ms();
-        let (plan, answerer) = self.plan(goal, tools.clone(), history, &meter).await?;
+        let (plan, answerer) = self
+            .plan(goal, tools.clone(), history, memory_context, &meter)
+            .await?;
         // Recorded after every phase, not only at the end: a run that fails halfway still cost
         // what it cost, and a caller looking at the record deserves the real number.
         run.usage = meter.snapshot();
@@ -352,7 +354,9 @@ impl AgentLoop {
         // ---- Finalize -----------------------------------------------------------
         Self::transition(run, AgentRunState::Finalizing)?;
         let final_started = now_ms();
-        let answer = self.finalise(goal, &plan, &observations, history, &meter, tools).await?;
+        let answer = self
+            .finalise(goal, &plan, &observations, history, memory_context, &meter, tools)
+            .await?;
         run.usage = meter.snapshot();
         steps += 1;
         Self::push_step(run, AgentStep {
@@ -367,16 +371,9 @@ impl AgentLoop {
         });
         run.final_answer = Some(answer.clone());
 
-        let _ = self
-            .deps
-            .memory
-            .write(semantic(
-                run.session_id.clone(),
-                format!("goal: {goal} -> answer: {answer}"),
-                &["agent", "answer"],
-            ))
-            .await;
-
+        // The turn record is written by the session actor once the run settles: it knows the goal,
+        // the outcome and whether the run failed, so one record per turn is enough. Writing a
+        // second, near-identical record here only made recall see everything twice.
         Ok(AgentLoopOutcome { answer, steps, plan: run.plan.clone(), graph_id: Some(graph_id) })
     }
 
@@ -385,6 +382,7 @@ impl AgentLoop {
         goal: &str,
         tools: Vec<ToolSpec>,
         history: &[ChatMessage],
+        memory_context: Option<&str>,
         meter: &UsageMeter,
     ) -> Result<(Plan, Answerer)> {
         let system = format!(
@@ -397,6 +395,11 @@ impl AgentLoop {
                 // The plan is where a follow-up like "now do the same for the other file" is
                 // understood, so the conversation goes in front of the goal, not behind it.
                 let mut messages = vec![ChatMessage::system(system)];
+                if let Some(context) = memory_context {
+                    // After the system prompt and before the conversation: it is background the
+                    // model should know, not something the user just said.
+                    messages.push(ChatMessage::system(context));
+                }
                 messages.extend(history.iter().cloned());
                 messages.push(ChatMessage::user(goal.to_string()));
                 messages
@@ -516,6 +519,7 @@ impl AgentLoop {
         plan: &Plan,
         observations: &[(String, serde_json::Value)],
         history: &[ChatMessage],
+        memory_context: Option<&str>,
         meter: &UsageMeter,
         tools: Vec<ToolSpec>,
     ) -> Result<String> {
@@ -536,6 +540,9 @@ impl AgentLoop {
 
         // Same rule as planning: conversation first, then the goal, then this run's exchange.
         let mut messages = vec![ChatMessage::system(self.deps.spec.system_prompt.clone())];
+        if let Some(context) = memory_context {
+            messages.push(ChatMessage::system(context));
+        }
         messages.extend(history.iter().cloned());
         messages.push(ChatMessage::user(goal.to_string()));
         if !observations.is_empty() {

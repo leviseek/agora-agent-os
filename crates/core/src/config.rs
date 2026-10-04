@@ -138,6 +138,10 @@ pub struct PolicyConfig {
     /// Character budget for that history. The oldest turns are dropped first, and the newest turn
     /// is truncated rather than dropped, so the immediate context is never lost.
     pub history_chars: usize,
+    /// How many stored memories may be recalled per run. Zero switches recall off.
+    pub memory_recall_limit: usize,
+    /// Character budget for the recalled text that is injected into the prompt.
+    pub memory_recall_chars: usize,
     pub max_concurrent_tasks: usize,
     pub capability_timeout_ms: u64,
     pub capability_retries: u32,
@@ -335,6 +339,8 @@ impl Default for RuntimeConfig {
                 max_steps_per_run: 12,
                 history_messages: 20,
                 history_chars: 8_000,
+                memory_recall_limit: 5,
+                memory_recall_chars: 1_200,
                 max_concurrent_tasks: 16,
                 capability_timeout_ms: 10_000,
                 capability_retries: 2,
@@ -430,12 +436,21 @@ impl RuntimeConfig {
         if let Some(v) = Self::env_str("AGENTOS_WORKSPACE_ROOT") { self.policy.workspace_root = PathBuf::from(v); }
         if let Some(v) = Self::env_str("AGENTOS_MAX_STEPS") {
             if let Ok(n) = v.parse() { self.policy.max_steps_per_run = n; }
+        }
+        // These were once nested inside the AGENTOS_MAX_STEPS block above, which meant the history
+        // and recall switches only worked for deployments that also set a step budget. Keep them
+        // at the top level, and see the test below that pins each switch.
         if let Some(v) = Self::env_str("AGENTOS_HISTORY_MESSAGES") {
             if let Ok(n) = v.parse() { self.policy.history_messages = n; }
         }
         if let Some(v) = Self::env_str("AGENTOS_HISTORY_CHARS") {
             if let Ok(n) = v.parse() { self.policy.history_chars = n; }
         }
+        if let Some(v) = Self::env_str("AGENTOS_MEMORY_RECALL_LIMIT") {
+            if let Ok(n) = v.parse() { self.policy.memory_recall_limit = n; }
+        }
+        if let Some(v) = Self::env_str("AGENTOS_MEMORY_RECALL_CHARS") {
+            if let Ok(n) = v.parse() { self.policy.memory_recall_chars = n; }
         }
         if let Some(v) = Self::env_str("AGENTOS_MAX_CONCURRENT_TASKS") {
             if let Ok(n) = v.parse() { self.policy.max_concurrent_tasks = n; }
@@ -512,6 +527,11 @@ impl RuntimeConfig {
         }
         if self.limits.session_queue_capacity == 0 {
             return Err(RuntimeError::invalid_input("limits.session_queue_capacity must be > 0"));
+        }
+        if self.policy.memory_recall_limit > 0 && self.policy.memory_recall_chars == 0 {
+            return Err(RuntimeError::invalid_input(
+                "policy.memory_recall_chars must be > 0 when memory_recall_limit > 0",
+            ));
         }
         if self.policy.history_messages > 0 && self.policy.history_chars == 0 {
             return Err(RuntimeError::invalid_input(
@@ -662,6 +682,42 @@ mod tests {
         assert_ne!(first.effective_node_id(), second.effective_node_id());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Environment switches must work on their own, without another variable being set first.
+    ///
+    /// A previous nesting bug put four of these inside the AGENTOS_MAX_STEPS block, so they were
+    /// silently ignored - exactly the kind of failure a test has to catch, because the feature
+    /// simply looks switched off.
+    #[test]
+    fn context_switches_apply_from_the_environment_alone() {
+        const KEYS: [&str; 4] = [
+            "AGENTOS_HISTORY_MESSAGES",
+            "AGENTOS_HISTORY_CHARS",
+            "AGENTOS_MEMORY_RECALL_LIMIT",
+            "AGENTOS_MEMORY_RECALL_CHARS",
+        ];
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for key in KEYS {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+        let _cleanup = Cleanup;
+        std::env::set_var("AGENTOS_HISTORY_MESSAGES", "7");
+        std::env::set_var("AGENTOS_HISTORY_CHARS", "1234");
+        std::env::set_var("AGENTOS_MEMORY_RECALL_LIMIT", "3");
+        std::env::set_var("AGENTOS_MEMORY_RECALL_CHARS", "777");
+
+        let mut cfg = RuntimeConfig::default();
+        cfg.apply_env();
+        assert_eq!(cfg.policy.history_messages, 7);
+        assert_eq!(cfg.policy.history_chars, 1234);
+        assert_eq!(cfg.policy.memory_recall_limit, 3);
+        assert_eq!(cfg.policy.memory_recall_chars, 777);
+        assert_eq!(cfg.policy.max_steps_per_run, 12, "an unrelated switch stays at its default");
     }
 
     #[test]

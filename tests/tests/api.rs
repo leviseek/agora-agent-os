@@ -506,6 +506,55 @@ async fn discovered_nodes_appear_in_the_gateway() {
     harness.shutdown.cancel();
 }
 
+/// Recall must reach the prompt, and it must not repeat what the conversation still shows.
+#[tokio::test]
+async fn memories_outside_the_history_window_are_recalled_into_the_prompt() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "recall" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let session_id = agentos_core::SessionId::from_raw(id.clone());
+
+    // A turn from long ago, written straight into the store. Its goal appears nowhere in the
+    // transcript, so the history window cannot cover it and recall is the only way back.
+    h._kernel
+        .memory
+        .write(agentos_agent_runtime::memory::episode(
+            session_id,
+            "goal: what did we decide about the schema?\nanswer: keep it flat",
+            &["session", "turn"],
+        ))
+        .await
+        .unwrap();
+
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "carry on", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (_, events) = h.get("/v1/events?limit=200&kinds=memory_recalled").await;
+    let recalled = events["events"].as_array().unwrap();
+    assert_eq!(recalled.len(), 1, "one recall per run: {events}");
+    assert!(
+        recalled[0]["payload"]["chars"].as_u64().unwrap() > 0,
+        "the injected text must be non-empty: {}",
+        recalled[0]
+    );
+
+    // The same run must not recall what the conversation already contains: run again, and the
+    // second recall still exists (a new, distinct turn record) but never duplicates a visible goal.
+    let (_, transcript) = h.get(&format!("/v1/sessions/{id}/transcript")).await;
+    let goals: Vec<&str> = transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == json!("user"))
+        .filter_map(|m| m["parts"][0]["text"].as_str())
+        .collect();
+    assert!(goals.contains(&"carry on"));
+
+    h.shutdown.cancel();
+}
+
 /// The router can be built without binding a port, which keeps these tests fast and deterministic.
 #[tokio::test]
 async fn router_builds_without_io() {

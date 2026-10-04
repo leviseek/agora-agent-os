@@ -179,6 +179,7 @@
 |---|---|---|
 | **A1 历史进模型请求** | ✅ 完成 | `history_for_model`（agent_loop.rs）+ 5 个单测；配置 `policy.history_messages`(20)/`history_chars`(8000)；实测两轮对话：Plan 请求 messages 2 → 4，事件 `conversation history assembled` 显示 history_messages 0 → 2 |
 | **A3 run/session token 记账** | ✅ 完成 | `TokenUsage`（core/model/agent.rs，3 个单测）；`UsageMeter` 汇总 plan/finalise/并行任务三类调用；`/v1/sessions/{id}` 暴露 `runtime.usage` 与 `runs[].usage`；契约测试断言 calls ≥ 2、tokens > 0、会话合计 = 单次运行；控制台显示每轮 tokens 与会话累计 |
-| A4 记忆召回接线 | ⏳ 待做 | 写入已存在（session.rs:284 episode、agent_loop.rs:323 semantic），需补召回与注入 |
+| **A4 记忆召回接线** | ✅ 完成 | 写入统一为每轮一条可解析记录（`goal:`/`answer:`，session.rs），删除 agent_loop 里重复的 semantic 写入；`recall_context` 按 goal 与可见历史去重后注入（6 个单测）；配置 `policy.memory_recall_limit`(5)/`memory_recall_chars`(1200)；实测（历史窗口关闭）`memory_recalled` chars=282、Plan 请求 2 → 3 条 |
+| ⚠️ 环境变量嵌套 bug | ✅ 已修 | `AGENTOS_HISTORY_*` / `AGENTOS_MEMORY_RECALL_*` 四个覆盖曾被嵌进 `AGENTOS_MAX_STEPS` 块内而静默失效；已移到顶层并加 `context_switches_apply_from_the_environment_alone` 测试钉死 |
 | B4 工作区上下文文件装配 | ⏳ 待做 | |
 | A2 上下文预算与压缩 | ⏳ 待做 | 预算兜底已由 A1 的 `history_messages/history_chars` 提供；摘要压缩未做 |
