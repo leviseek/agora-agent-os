@@ -308,6 +308,8 @@ export interface RunSummary {
   state: AgentRunState | string;
   goal: string;
   steps: number;
+  /** Who actually answered the planning call; null on records written before it was recorded. */
+  provider?: string | null;
   model: string | null;
   final_answer: string | null;
   error: string | null;
@@ -564,7 +566,8 @@ export interface ModelProviderInfo {
 
 export interface ConfiguredProvider {
   name?: string;
-  kind?: unknown;
+  /** "mock" is the runtime's own deterministic stand-in, never a real model. */
+  kind?: string;
   model?: string;
   enabled?: boolean;
   key_env?: string;

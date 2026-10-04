@@ -313,6 +313,7 @@ impl SessionActor {
                 "state": r.state.as_str(),
                 "goal": r.goal,
                 "steps": r.steps.len(),
+                "provider": r.provider,
                 "model": r.model,
                 "final_answer": r.final_answer,
                 "error": r.error,

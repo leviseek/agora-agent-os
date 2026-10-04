@@ -67,7 +67,7 @@ console.log('nav-chat: ' + (await clickByText('.nav-item', '对话')));
 console.log('submit  : ' + (await clickByText('button.btn', '发送')));
 for (let i = 1; i <= 8; i += 1) {
   await sleep(1500);
-  const state = await evaluate("(()=>{const box=document.querySelector('.transcript');const bubbles=[...document.querySelectorAll('.bubble')].map(b=>b.className.replace('bubble ','')+': '+b.innerText.split(String.fromCharCode(10)).join(' | ').slice(0,60));const atBottom=box?Math.abs(box.scrollHeight-box.scrollTop-box.clientHeight)<4:null;const ack=[...document.querySelectorAll('.muted.small')].map(e=>e.innerText).find(x=>x.includes('目标已接受'))??'';return JSON.stringify({atBottom,bubbles,ack})})()");
+  const state = await evaluate("(()=>{const box=document.querySelector('.transcript');const bubbles=[...document.querySelectorAll('.bubble')].map(b=>b.className.replace('bubble ','')+': '+b.innerText.split(String.fromCharCode(10)).join(' | ').slice(0,60));const atBottom=box?Math.abs(box.scrollHeight-box.scrollTop-box.clientHeight)<4:null;const ack=[...document.querySelectorAll('.muted.small')].map(e=>e.innerText).find(x=>x.includes('目标已接受'))??'';return JSON.stringify({atBottom,heads:[...document.querySelectorAll('.run-head')].map(h=>h.innerText.split(String.fromCharCode(10)).join(' / ')),bubbles})})()");
   console.log('t+' + (i * 1.5) + 's: ' + state);
 }
 console.log('--- exceptions ---');

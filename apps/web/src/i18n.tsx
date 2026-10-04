@@ -302,6 +302,8 @@ const en = {
   'chat.sendAndWait': 'Send and wait',
   'chat.waitLabel': 'wait for completion (blocking POST; off = stream over the socket)',
   'chat.accepted': 'Goal accepted. It runs in the background - the reply appears in the transcript above.',
+  'chat.providerLabel': 'provider: {provider}',
+  'chat.placeholderProvider': '{provider} - built-in placeholder, no key needed, no language understanding',
   'chat.resultFinished': 'Run finished: state={state}, steps={steps}',
   'chat.resultFinishedError': 'Run finished: state={state}, steps={steps}, error={error}',
 
@@ -473,6 +475,9 @@ const en = {
   'settings.notConnectedHint': 'Not connected. Open the Connection view and press Connect.',
   'settings.modelsHint': 'GET /v1/models - provider health and the routing configuration.',
   'settings.defaultProviderValue': 'default provider: {name}',
+  'settings.placeholder': 'built-in placeholder',
+  'settings.placeholderNote':
+    'mock ships with the runtime: deterministic, offline, no key needed. It plans by rule and calls tools so the whole loop runs without a network. It is not a language model - set a real key and switch with AGENTOS_MODEL_DEFAULT.',
   'settings.noneConfigured': 'none configured',
   'settings.noProviders': 'No provider has been exercised yet.',
   'settings.configuredProviders': 'configured providers',
@@ -762,6 +767,8 @@ const zh: Partial<Record<MessageKey, string>> = {
   'chat.sendAndWait': '发送并等待',
   'chat.waitLabel': '等待执行完成（阻塞式 POST；关闭则通过事件通道流式返回）',
   'chat.accepted': '目标已接受，正在后台运行——回复会出现在上方对话区。',
+  'chat.providerLabel': '提供方：{provider}',
+  'chat.placeholderProvider': '{provider}——内置占位，无需密钥，不做语言理解',
   'chat.resultFinished': '运行结束：状态={state}，步骤={steps}',
   'chat.resultFinishedError': '运行结束：状态={state}，步骤={steps}，错误={error}',
 
@@ -933,6 +940,9 @@ const zh: Partial<Record<MessageKey, string>> = {
   'settings.notConnectedHint': '尚未连接。请打开「连接」视图并点击「连接」。',
   'settings.modelsHint': 'GET /v1/models - 提供方健康状态与路由配置。',
   'settings.defaultProviderValue': '默认提供方：{name}',
+  'settings.placeholder': '内置占位',
+  'settings.placeholderNote':
+    'mock 是运行时自带的提供方：确定性、离线、无需密钥。它按规则规划并调用工具，让整条闭环在无网络时也能跑通；它不是语言模型。配好真实密钥后用 AGENTOS_MODEL_DEFAULT 切换。',
   'settings.noneConfigured': '未配置',
   'settings.noProviders': '尚未调用过任何提供方。',
   'settings.configuredProviders': '已配置的提供方',

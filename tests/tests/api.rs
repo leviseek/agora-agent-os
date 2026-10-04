@@ -418,6 +418,10 @@ async fn a_goal_posted_without_waiting_is_readable_from_the_transcript() {
     let (_, detail) = h.get(&format!("/v1/sessions/{id}")).await;
     let run = &detail["runtime"]["runs"][0];
     assert_eq!(run["final_answer"], json!(answer));
+    // The run records who actually answered, so the console can label it truthfully instead of
+    // showing the provider that was merely requested.
+    assert_eq!(run["provider"], json!("mock"));
+    assert_eq!(run["model"], json!("agentos-mock-1"));
 
     h.shutdown.cancel();
 }

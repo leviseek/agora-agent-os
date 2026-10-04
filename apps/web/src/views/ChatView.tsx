@@ -6,6 +6,12 @@ import { ApiErrorBanner, Badge, EmptyState, JsonBlock, Panel } from '../componen
 import { formatTime } from '../format';
 import { useSessionEvents } from '../hooks';
 import { useI18n } from '../i18n';
+
+/** Provider names that are the runtime's own deterministic stand-in, not a real model. */
+const PLACEHOLDER_PROVIDERS = new Set(['mock']);
+function isPlaceholderProvider(provider: string): boolean {
+  return PLACEHOLDER_PROVIDERS.has(provider) || provider.startsWith('agentos-mock');
+}
 import { useNav } from '../navigation';
 import { useApp } from '../store';
 import type { EventRecord, RunSummary } from '../api';
@@ -174,13 +180,26 @@ export function ChatView() {
 
           {runs.map((run) => {
             const runEvents = byAgent.get(run.agent_id) ?? [];
+            // provider is the recorded answerer; model is the legacy field that held the requested
+            // one, so fall back to it only when the run predates the recorded answerer.
+            const answeredBy = run.provider ?? run.model;
             return (
               <article className="run" key={run.agent_id}>
                 <header className="run-head">
                   <Badge tone={runTone(run.state)}>{tState(run.state)}</Badge>
                   <span className="muted small">{t('chat.runLabel', { id: run.agent_id })}</span>
-                  {run.model !== null ? (
-                    <span className="muted small">{t('chat.modelLabel', { model: run.model })}</span>
+                  {answeredBy !== null ? (
+                    isPlaceholderProvider(answeredBy) ? (
+                      // The built-in provider is not a model anyone has heard of, and it needs no
+                      // key: say so instead of dressing it up as one.
+                      <Badge tone="muted">
+                        {t('chat.placeholderProvider', { provider: answeredBy })}
+                      </Badge>
+                    ) : (
+                      <Badge tone="info">
+                        {t('chat.providerLabel', { provider: answeredBy })}
+                      </Badge>
+                    )
                   ) : null}
                   <span className="muted small">{t('chat.stepsCount', { n: run.steps })}</span>
                 </header>

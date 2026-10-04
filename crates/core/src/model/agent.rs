@@ -123,6 +123,13 @@ pub struct AgentRun {
     pub state: AgentRunState,
     pub steps: Vec<AgentStep>,
     pub plan: Option<Plan>,
+    /// Who actually answered the run's planning call, as reported by the router.
+    ///
+    /// Deliberately not "the provider we asked for": the router fails over, so a client that shows
+    /// the requested provider can name the wrong one. Older records without this field simply have
+    /// no recorded answerer.
+    #[serde(default)]
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub final_answer: Option<String>,
     pub error: Option<String>,
@@ -143,6 +150,7 @@ impl AgentRun {
             state: AgentRunState::Goal,
             steps: Vec::new(),
             plan: None,
+            provider: None,
             model: None,
             final_answer: None,
             error: None,

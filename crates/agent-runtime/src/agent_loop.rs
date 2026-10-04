@@ -8,6 +8,13 @@ use crate::memory::semantic;
 use crate::session::SessionDeps;
 use agentos_capability_runtime::capability::CallerContext;
 use agentos_core::error::{Result, RuntimeError};
+/// Who answered a model call. Carried out of planning so the run can record the truth.
+#[derive(Debug, Clone)]
+struct Answerer {
+    provider: String,
+    model: String,
+}
+
 use agentos_core::model::{
     ActionCall, AgentRun, AgentStep, EventKind, NewEvent, Observation, Plan, PlanStep, PlanStepKind,
     StepKind, TaskGraphRecord, TaskKind, TaskPayload, TaskRecord,
@@ -127,9 +134,11 @@ impl AgentLoop {
         Self::transition(run, AgentRunState::Planning)?;
         steps += 1;
         let plan_started = now_ms();
-        let plan = self.plan(goal, tools.clone()).await?;
+        let (plan, answerer) = self.plan(goal, tools.clone()).await?;
         run.plan = Some(plan.clone());
-        run.model = Some(self.deps.spec.model_hint.clone().unwrap_or_else(|| self.deps.models.policy().default_provider.clone()));
+        // Recorded from the response, not from what we asked for: the router may have failed over.
+        run.provider = Some(answerer.provider);
+        run.model = Some(answerer.model);
         Self::push_step(run, AgentStep {
             index: steps,
             kind: StepKind::Plan,
@@ -251,7 +260,7 @@ impl AgentLoop {
         Ok(AgentLoopOutcome { answer, steps, plan: run.plan.clone(), graph_id: Some(graph_id) })
     }
 
-    async fn plan(&self, goal: &str, tools: Vec<ToolSpec>) -> Result<Plan> {
+    async fn plan(&self, goal: &str, tools: Vec<ToolSpec>) -> Result<(Plan, Answerer)> {
         let system = format!(
             "{}\nRespond with JSON only: {{\"goal\": string, \"reasoning\": string, \"steps\": [{{\"id\": string, \"description\": string, \"kind\": \"think\"|\"capability\"|\"respond\", \"capability\": string|null, \"input\": object, \"depends_on\": [string]}}]}}",
             self.deps.spec.system_prompt
@@ -283,8 +292,8 @@ impl AgentLoop {
                 NewEvent::new(EventKind::ModelResult, "planning finished")
                     .session(self.session_id.clone())
                     .payload(serde_json::json!({
-                        "provider": response.provider,
-                        "model": response.model,
+                        "provider": response.provider.clone(),
+                        "model": response.model.clone(),
                         "tokens": response.usage.total_tokens,
                         "latency_ms": response.latency_ms,
                     })),
@@ -307,7 +316,7 @@ impl AgentLoop {
                     depends_on: vec![],
                 }],
             });
-        Ok(plan)
+        Ok((plan, Answerer { provider: response.provider, model: response.model }))
     }
 
     /// Turn plan steps into task graph nodes. Capability steps become capability tasks, think

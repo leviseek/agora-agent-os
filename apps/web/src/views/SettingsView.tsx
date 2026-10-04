@@ -155,7 +155,15 @@ export function SettingsView() {
                 <tbody>
                   {models.data.providers.map((provider) => (
                     <tr key={provider.name}>
-                      <td>{provider.name}</td>
+                      <td>
+                        {provider.name}
+                        {provider.kind === 'mock' ? (
+                          <>
+                            {' '}
+                            <Badge tone="muted">{t('settings.placeholder')}</Badge>
+                          </>
+                        ) : null}
+                      </td>
                       <td>{String(provider.kind)}</td>
                       <td>{provider.model}</td>
                       <td>
@@ -172,6 +180,10 @@ export function SettingsView() {
                 </tbody>
               </table>
             )}
+
+            {models.data.providers.some((provider) => provider.kind === 'mock') ? (
+              <p className="muted small">{t('settings.placeholderNote')}</p>
+            ) : null}
 
             <h3 className="section-title">{t('settings.configuredProviders')}</h3>
             {models.data.configured.length === 0 ? (
@@ -191,7 +203,15 @@ export function SettingsView() {
                 <tbody>
                   {models.data.configured.map((provider, index) => (
                     <tr key={String(provider.name ?? index)}>
-                      <td>{provider.name ?? '--'}</td>
+                      <td>
+                        {provider.name ?? '--'}
+                        {provider.kind === 'mock' ? (
+                          <>
+                            {' '}
+                            <Badge tone="muted">{t('settings.placeholder')}</Badge>
+                          </>
+                        ) : null}
+                      </td>
                       <td>{String(provider.kind ?? '--')}</td>
                       <td>{provider.model ?? '--'}</td>
                       <td>{provider.enabled === true ? t('common.yes') : t('common.no')}</td>
