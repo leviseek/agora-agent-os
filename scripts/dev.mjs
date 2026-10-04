@@ -20,8 +20,8 @@
  * process and arguments are never re-parsed by cmd.exe.
  */
 
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,6 +243,87 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+/// When was the Rust source last touched? Only files that affect the server binary count.
+function newestSourceMtimeMs(root) {
+  const extensions = new Set(['.rs', '.toml', '.proto']);
+  let newest = 0;
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === 'target' || entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!extensions.has(path.extname(entry.name))) continue;
+      try {
+        const mtime = statSync(full).mtimeMs;
+        if (mtime > newest) newest = mtime;
+      } catch {
+        // A file that vanished mid-walk cannot make the binary stale.
+      }
+    }
+  };
+  for (const dir of ['crates', 'proto']) walk(path.join(root, dir));
+  for (const file of ['Cargo.toml', 'Cargo.lock']) {
+    const full = path.join(root, file);
+    if (existsSync(full)) newest = Math.max(newest, statSync(full).mtimeMs);
+  }
+  return newest;
+}
+
+/// Rebuild the prebuilt runtime when its sources are newer than the binary.
+///
+/// The dev stack reuses target/debug/agentos-server.exe instead of building it, which is fast and
+/// is also a trap: after a Rust change every request to a route that only exists in the new code
+/// answers 404, and the browser console blames the client. That is exactly how a console feature
+/// looked broken for an hour. Rebuilding here costs a second when nothing changed, and removes the
+/// step nobody remembers.
+function ensureRuntimeBinary(binary, { dryRun = false } = {}) {
+  if (!existsSync(binary)) {
+    console.log('[dev] runtime binary is missing');
+    return false;
+  }
+  const built = statSync(binary).mtimeMs;
+  const newest = newestSourceMtimeMs(repoRoot);
+  if (newest <= built) {
+    console.log('[dev] runtime binary is up to date');
+    return true;
+  }
+  if (dryRun) {
+    console.log(
+      '[dev] runtime binary is ' +
+        Math.round((newest - built) / 1000) +
+        's older than its sources (a check-only run stops here)',
+    );
+    return true;
+  }
+  if (process.env.AGENTOS_DEV_NO_BUILD === '1') {
+    console.log('[dev] runtime binary is stale but AGENTOS_DEV_NO_BUILD=1 was set');
+    return true;
+  }
+  const seconds = Math.round((newest - built) / 1000);
+  console.log('[dev] runtime binary is ' + seconds + 's older than its sources, rebuilding');
+  const result = spawnSync(isWindows ? 'cargo.exe' : 'cargo', ['build', '-p', 'agentos-server'], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  });
+  if (result.status !== 0) {
+    console.log(
+      '[dev] rebuild failed. If the stack is already running it holds the binary: stop it (Ctrl+C) ' +
+        'and start again. Continuing with the existing binary, which may not have the routes this ' +
+        'console expects.',
+    );
+  }
+  return true;
+}
+
 if (wantRuntime) {
   const binary = path.join(repoRoot, 'target', 'debug', isWindows ? 'agentos-server.exe' : 'agentos-server');
   const env = {
@@ -250,7 +331,12 @@ if (wantRuntime) {
     AGENTOS_GRPC_ADDR: '127.0.0.1:' + runtimeGrpc.value,
     AGENTOS_NODE_NAME: nodeName,
   };
-  if (existsSync(binary)) {
+  if (process.env.AGENTOS_DEV_CHECK_ONLY === '1') {
+    // A way to ask "is my runtime current?" without starting anything.
+    ensureRuntimeBinary(binary, { dryRun: true });
+    process.exit(0);
+  }
+  if (ensureRuntimeBinary(binary)) {
     run('runtime', binary, [], { env });
   } else {
     console.log('[dev] ' + binary + ' not found, building and running through cargo');
