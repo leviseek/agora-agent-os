@@ -95,6 +95,12 @@ export interface AppStoreValue {
   attachments: AttachedImage[];
   /** Capability calls waiting for a decision. */
   approvals: PendingApproval[];
+  /**
+   * True when the connected runtime is older than this console: it has no /v1/approvals route.
+   * Polling a route that does not exist produces a 404 storm in the browser console, so the poll
+   * stops and the view explains why instead of retrying forever.
+   */
+  approvalsUnsupported: boolean;
   decideApproval: (id: string, approved: boolean, reason?: string) => Promise<void>;
   /** URL of an artifact's bytes. */
   artifactUrl: (id: string) => string;
@@ -161,6 +167,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [streamed, setStreamed] = useState<Map<string, string>>(() => new Map());
   const [attachments, setAttachments] = useState<AttachedImage[]>([]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [approvalsUnsupported, setApprovalsUnsupported] = useState(false);
+  const approvalsUnsupportedRef = useRef(false);
 
   const artifactUrl = useCallback(
     (id: string): string => clientRef.current.artifactUrl(id),
@@ -225,7 +233,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setDetailError(null);
       // Attachments live in the transcript, so they are collected from there rather than from a
       // second source of truth. Only the newest few matter: the strip shows what was just sent.
-      const transcript = await clientRef.current.sessionTranscript(target, 60);
+      // A runtime without the route (an older build) simply has no attachments to show.
+      const transcript = await clientRef.current
+        .sessionTranscript(target, 60)
+        .catch(() => ({ messages: [], total: 0, truncated: false }));
       const found: AttachedImage[] = [];
       for (const message of transcript.messages) {
         for (const part of message.parts) {
@@ -247,11 +258,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshApprovals = useCallback(async (): Promise<void> => {
+    if (approvalsUnsupportedRef.current) return;
     try {
       const response = await clientRef.current.listApprovals();
       setApprovals(response.approvals);
-    } catch {
-      // A console that cannot list approvals is still a working console; the panel says so.
+    } catch (cause) {
+      // A 404 means the route is not there at all - an older runtime - and retrying it every few
+      // seconds only fills the browser console with noise. Anything else is transient and worth
+      // another try on the next tick.
+      const status = cause instanceof ApiError ? cause.status : 0;
+      if (status === 404) {
+        approvalsUnsupportedRef.current = true;
+        setApprovalsUnsupported(true);
+        setApprovals([]);
+      }
     }
   }, []);
 
@@ -630,6 +650,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       streamed,
       attachments,
       approvals,
+      approvalsUnsupported,
       decideApproval,
       artifactUrl,
       sessionQuery,
@@ -678,6 +699,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       streamed,
       attachments,
       approvals,
+      approvalsUnsupported,
       decideApproval,
       artifactUrl,
       sessionQuery,

@@ -7,7 +7,7 @@ import { formatTime } from '../format';
 
 export function ApprovalsView() {
   const { t } = useI18n();
-  const { approvals, decideApproval, busy, connection } = useApp();
+  const { approvals, approvalsUnsupported, decideApproval, busy, connection } = useApp();
   const [reasons, setReasons] = useState<Record<string, string>>({});
 
   return (
@@ -17,6 +17,10 @@ export function ApprovalsView() {
       actions={<Badge tone={approvals.length > 0 ? 'warn' : 'ok'}>{approvals.length}</Badge>}
     >
       <p className="muted small">{t('approvals.hint')}</p>
+
+      {approvalsUnsupported ? (
+        <p className="notice">{t('approvals.unsupported')}</p>
+      ) : null}
 
       {connection !== 'online' ? <p className="muted">{t('approvals.offline')}</p> : null}
 

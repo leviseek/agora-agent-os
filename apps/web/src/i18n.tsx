@@ -290,6 +290,8 @@ const en = {
   'approvals.hint':
     'A capability on the approval list parks every call until somebody decides. The wait ends on a decision, on the configured timeout, or when the caller is cancelled.',
   'approvals.offline': 'Not connected: the list below may be stale.',
+  'approvals.unsupported':
+    'The connected runtime does not have /v1/approvals: it is older than this console. Rebuild the runtime (cargo build -p agentos-server) and restart the dev stack, then reload this page.',
   'approvals.emptyTitle': 'Nothing is waiting',
   'approvals.emptyHint': 'Calls appear here when a capability on the approval list is invoked.',
   'approvals.capability': 'Capability',
@@ -780,6 +782,8 @@ const zh: Partial<Record<MessageKey, string>> = {
   'approvals.hint':
     '列入审批清单的能力，每次调用都会挂起直到有人决策。等待会在决策、配置的超时、或调用方取消时结束。',
   'approvals.offline': '未连接：下方列表可能已过期。',
+  'approvals.unsupported':
+    '当前连接的运行时没有 /v1/approvals 路由：它比这个控制台旧。请重建运行时（cargo build -p agentos-server）并重启开发栈，然后刷新本页。',
   'approvals.emptyTitle': '当前没有待批请求',
   'approvals.emptyHint': '当列入审批清单的能力被调用时，请求会出现在这里。',
   'approvals.capability': '能力',
