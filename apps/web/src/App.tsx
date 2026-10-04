@@ -52,7 +52,7 @@ function Console() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">agentos</span>
+          <span className="brand-mark">agora</span>
           <span className="brand-sub">{t('shell.brandSub')}</span>
         </div>
         <nav className="nav">

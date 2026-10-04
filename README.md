@@ -1,4 +1,4 @@
-# Agent OS - Distributed Agent Runtime
+# Agora Agent OS - Distributed Agent Runtime
 
 A runnable **Agent Operating System** skeleton: session actors, an agent loop, a capability mesh,
 a task scheduler, durable state, an event log, artifacts, a model router, a Wasm sandbox, gRPC
@@ -56,7 +56,7 @@ acceptance suite and the demo run with no network. Add `DEEPSEEK_API_KEY` / `OPE
 ## 2. Repository layout
 
 ```
-agent-os/
+agora-agent-os/
 ├── Cargo.toml                     Rust workspace
 ├── package.json / pnpm-workspace.yaml
 ├── crates/
@@ -170,8 +170,8 @@ Full detail: `docs/migration.md`.
 
 ## 6. Configuration
 
-Precedence: built-in defaults < JSON file < environment. Copy `config/agent-os.example.json` to
-`config/agent-os.json` (or point `AGENTOS_CONFIG` at it) and edit.
+Precedence: built-in defaults < JSON file < environment. Copy `config/agora-agent-os.example.json` to
+`config/agora-agent-os.json` (or point `AGENTOS_CONFIG` at it) and edit.
 
 **Secrets are never stored**: a provider records only the *name* of the environment variable that
 carries its key, and the key is read at call time.

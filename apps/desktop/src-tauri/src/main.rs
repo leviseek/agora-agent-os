@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    agent_os_desktop_lib::run()
+    agora_agent_os_desktop_lib::run()
 }

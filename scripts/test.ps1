@@ -19,7 +19,7 @@ if (-not $SkipWeb) {
     Write-Host "=== pnpm install ===" -ForegroundColor Cyan
     pnpm install
     Write-Host "=== web build ===" -ForegroundColor Cyan
-    pnpm --filter @agent-os/web build
+    pnpm --filter @agentos/web build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

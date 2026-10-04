@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Agent OS Console - the web client for the Agent OS runtime gateway",
+  "description": "Agora Agent OS Console - the web client for the Agora Agent OS runtime gateway",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

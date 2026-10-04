@@ -6,7 +6,7 @@
  * graphics toolchain into the repo for a placeholder is not worth it. Replace the output with
  * real artwork via "tauri icon" whenever you like:
  *
- *   pnpm --filter @agent-os/desktop exec tauri icon path/to/logo.png
+ *   pnpm --filter @agentos/desktop exec tauri icon path/to/logo.png
  */
 
 import { deflateSync } from "node:zlib";

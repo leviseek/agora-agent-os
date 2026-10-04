@@ -1,4 +1,4 @@
-# Agent OS Console (apps/web)
+# Agora Agent OS Console (apps/web)
 
 The web client for the Agent OS runtime: sessions, chat, agent state, task graph, capability
 invocation, fleet topology, the live event log and node settings - all over the HTTP/WebSocket

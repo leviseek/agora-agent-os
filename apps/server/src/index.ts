@@ -171,7 +171,7 @@ wss.on("connection", (socket) => {
 connectUpstream();
 
 server.listen(PORT, () => {
-  console.log("agent-os control server listening on http://127.0.0.1:" + PORT);
+  console.log("agora-agent-os control server listening on http://127.0.0.1:" + PORT);
   console.log("  runtime : " + RUNTIME_URL);
   console.log("  ws      : ws://127.0.0.1:" + PORT + "/ws");
 });

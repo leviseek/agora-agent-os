@@ -22,7 +22,7 @@ use std::sync::Arc;
                   a task scheduler, durable state and an event log."
 )]
 struct Cli {
-    /// Configuration file (JSON). Defaults to AGENTOS_CONFIG or ./config/agent-os.json.
+    /// Configuration file (JSON). Defaults to AGENTOS_CONFIG or ./config/agora-agent-os.json.
     #[arg(long, global = true)]
     config: Option<String>,
     /// Drive a remote runtime over gRPC instead of bootstrapping one in-process.
