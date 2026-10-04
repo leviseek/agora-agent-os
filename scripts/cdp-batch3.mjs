@@ -50,7 +50,11 @@ console.log('chat nav: ' + (await clickByText('.nav-item', '对话')));
 await sleep(2500);
 
 // --- a goal with an image, posted without waiting so the stream can be watched -----------------
-console.log('goal    : ' + (await setInput('textarea', 'what is 6*7? please explain')));
+const goalSet = await setInput('textarea', 'what is 6*7? please explain');
+console.log('goal    : ' + goalSet);
+if (goalSet === 'no element') {
+  console.log('page    : ' + (await evaluate("document.body.innerText.slice(0,300).split(String.fromCharCode(10)).join(' / ')")));
+}
 console.log('image   : ' + (await setInput('.image-paths', 'pixel.png')));
 console.log('send    : ' + (await clickByText('button.btn', '发送')));
 
@@ -83,6 +87,14 @@ await sleep(2500);
 const after = await evaluate("JSON.stringify([...document.querySelectorAll('tbody tr')].map(r=>r.innerText.split(String.fromCharCode(10))[0]))");
 console.log('after   : ' + after);
 console.log('call    : HTTP ' + (await parked));
+// Park one more call so the screenshot has something waiting in it.
+void evaluate(
+  "fetch('" + runtimeUrl + "/v1/capabilities/filesystem-write/invoke',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({input:{path:'still-waiting.txt',content:'nobody decided'}})}).then(r=>r.status)",
+  false,
+);
+await sleep(1500);
+const waiting = await evaluate("JSON.stringify([...document.querySelectorAll('tbody tr')].map(r=>r.innerText.split(String.fromCharCode(10))[0]))");
+console.log('waiting : ' + waiting);
 console.log('--- exceptions ---');
 console.log(errors.length === 0 ? '(none)' : errors.join('\n'));
 process.exit(0);
