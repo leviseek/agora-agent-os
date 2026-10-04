@@ -30,6 +30,8 @@ Everything else under `/v1` requires `Authorization: Bearer <token>` when the no
 | GET | `/readyz` | - | `{status, health}` (503 when storage is unhealthy) |
 | GET | `/v1/meta` | - | node, versions, backends, limits, workspace root |
 | POST | `/v1/auth/login` | `{token}` | `{ok, auth_required}` |
+| GET | `/v1/sessions` | `?q=` | sessions, optionally filtered by a case-insensitive substring of the title or user id |
+| PATCH | `/v1/sessions/{id}` | `{title}` | rename through the session actor, so the live record cannot drift from the stored one |
 | GET | `/v1/sessions` | - | `{sessions:[SessionSummary]}` |
 | POST | `/v1/sessions` | `{user_id?, title?}` | `SessionRecord` |
 | GET | `/v1/sessions/{id}` | - | `{session, runtime}` |

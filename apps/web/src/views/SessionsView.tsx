@@ -40,11 +40,16 @@ export function SessionsView() {
     connection,
     detail,
     busy,
+    sessionQuery,
+    setSessionQuery,
+    renameSession,
   } = useApp();
   const { setView } = useNav();
 
   const [title, setTitle] = useState('');
   const [userId, setUserId] = useState('operator');
+  // Renaming is inline rather than a prompt(): the draft lives here, the rename goes to the runtime.
+  const [draftTitle, setDraftTitle] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -106,6 +111,21 @@ export function SessionsView() {
         }
       >
         <ApiErrorBanner error={sessionsError} scope="GET /v1/sessions" onRetry={() => void refreshSessions()} />
+
+        <div className="search-row">
+          <input
+            type="search"
+            value={sessionQuery}
+            placeholder={t('sessions.searchHint')}
+            onChange={(event) => setSessionQuery(event.target.value)}
+            spellCheck={false}
+          />
+          {sessionQuery.length > 0 ? (
+            <button type="button" className="btn btn-ghost btn-small" onClick={() => setSessionQuery('')}>
+              {t('sessions.clearSearch')}
+            </button>
+          ) : null}
+        </div>
 
         {sessions.length === 0 ? (
           sessionsLoading ? (
@@ -179,8 +199,44 @@ export function SessionsView() {
         ) : (
           <div className="stack-tight">
             <p>
-              <strong>{detail.session.title}</strong>{' '}
-              <Badge tone={stateTone(detail.session.state)}>{tState(detail.session.state)}</Badge>
+              {draftTitle === null ? (
+                <>
+                  <strong>{detail.session.title}</strong>{' '}
+                  <Badge tone={stateTone(detail.session.state)}>{tState(detail.session.state)}</Badge>{' '}
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-small"
+                    onClick={() => setDraftTitle(detail.session.title)}
+                  >
+                    {t('sessions.rename')}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    className="title-input"
+                    value={draftTitle}
+                    maxLength={200}
+                    onChange={(event) => setDraftTitle(event.target.value)}
+                    spellCheck={false}
+                  />{' '}
+                  <button
+                    type="button"
+                    className="btn btn-small"
+                    disabled={busy || draftTitle.trim().length === 0}
+                    onClick={() => {
+                      void renameSession(detail.session.id, draftTitle.trim());
+                      setDraftTitle(null);
+                    }}
+                  >
+                    {t('sessions.saveTitle')}
+                  </button>{' '}
+                  <button type="button" className="btn btn-ghost btn-small" onClick={() => setDraftTitle(null)}>
+                    {t('common.cancel')}
+                  </button>
+                </>
+              )}
             </p>
             <p className="muted small">
               {t('sessions.actorLine', {

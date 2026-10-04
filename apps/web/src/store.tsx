@@ -93,7 +93,11 @@ export interface AppStoreValue {
   setAutoReconnect: (next: boolean) => void;
   connect: (overrides?: { baseUrl?: string; token?: string }) => Promise<void>;
   disconnect: () => void;
+  /** Search term applied to the session list; empty means no filter. */
+  sessionQuery: string;
+  setSessionQuery: (next: string) => void;
   refreshSessions: () => Promise<void>;
+  renameSession: (id: string, title: string) => Promise<void>;
   createSession: (title: string, userId: string) => Promise<string | null>;
   selectSession: (id: string | null) => void;
   refreshDetail: (id?: string) => Promise<void>;
@@ -127,6 +131,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [login, setLogin] = useState<LoginResponse | null>(null);
 
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionQuery, setSessionQueryState] = useState<string>('');
   const [sessionsError, setSessionsError] = useState<ApiError | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -153,6 +158,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   metaRef.current = meta;
   const selectedRef = useRef(selectedSessionId);
   selectedRef.current = selectedSessionId;
+  const queryRef = useRef(sessionQuery);
+  queryRef.current = sessionQuery;
 
   const [stream] = useState(
     () =>
@@ -189,10 +196,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const loadSessions = useCallback(async (active: AgentOsClient): Promise<void> => {
+  const loadSessions = useCallback(async (active: AgentOsClient, query = ''): Promise<void> => {
     setSessionsLoading(true);
     try {
-      const response = await active.listSessions();
+      const response = await active.listSessions(query);
       setSessions(response.sessions);
       setSessionsError(null);
       if (selectedRef.current === null && response.sessions.length > 0) {
@@ -209,7 +216,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshDetail]);
 
-  const refreshSessions = useCallback((): Promise<void> => loadSessions(clientRef.current), [loadSessions]);
+  const refreshSessions = useCallback(
+    (): Promise<void> => loadSessions(clientRef.current, queryRef.current),
+    [loadSessions],
+  );
+
+  const setSessionQuery = useCallback(
+    (next: string): void => {
+      queryRef.current = next;
+      setSessionQueryState(next);
+      void loadSessions(clientRef.current, next);
+    },
+    [loadSessions],
+  );
+
+  const renameSession = useCallback(
+    async (id: string, title: string): Promise<void> => {
+      setActionError(null);
+      try {
+        await clientRef.current.renameSession(id, title);
+        await refreshSessions();
+        if (selectedRef.current === id) {
+          await refreshDetail(id);
+        }
+      } catch (cause) {
+        setActionError(toApiError(cause));
+      }
+    },
+    [refreshDetail, refreshSessions],
+  );
 
   const scheduleDetailRefresh = useCallback((): void => {
     if (detailTimer.current !== null) window.clearTimeout(detailTimer.current);
@@ -481,6 +516,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessions,
       sessionsError,
       sessionsLoading,
+      sessionQuery,
+      setSessionQuery,
+      renameSession,
       selectedSessionId,
       detail,
       detailError,
@@ -521,6 +559,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessions,
       sessionsError,
       sessionsLoading,
+      sessionQuery,
+      setSessionQuery,
+      renameSession,
       selectedSessionId,
       detail,
       detailError,

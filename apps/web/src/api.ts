@@ -748,7 +748,21 @@ export class AgentOsClient {
 
   // --- sessions ----------------------------------------------------------------------------
 
-  listSessions(): Promise<SessionsResponse> {
+  /** List sessions; q is a case-insensitive substring over the title and the user id. */
+  listSessions(query?: string): Promise<SessionsResponse> {
+    const suffix = query !== undefined && query.trim().length > 0 ? '?q=' + encodeURIComponent(query.trim()) : '';
+    return this.request<SessionsResponse>('/v1/sessions' + suffix, { method: 'GET' });
+  }
+
+  /** Rename a session. The runtime renames it through the session actor, not just in the store. */
+  renameSession(id: string, title: string): Promise<{ session: SessionRecord }> {
+    return this.request<{ session: SessionRecord }>('/v1/sessions/' + id, {
+      method: 'PATCH',
+      json: { title },
+    });
+  }
+
+  listSessionsUnfiltered(): Promise<SessionsResponse> {
     return this.request<SessionsResponse>('/v1/sessions', { method: 'GET' });
   }
 

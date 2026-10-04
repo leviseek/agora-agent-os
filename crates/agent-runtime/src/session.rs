@@ -48,6 +48,9 @@ pub enum SessionMessage {
     LastRun,
     /// Read the conversation: user goals and assistant replies, oldest first.
     Transcript { limit: Option<usize> },
+    /// Rename the session. Goes through the actor so its in-memory record cannot drift from the
+    /// stored one.
+    Rename { title: String },
 }
 
 /// Everything the session actor is allowed to use. All of it is an interface.
@@ -648,6 +651,31 @@ impl Actor for SessionActor {
                 .last_run()
                 .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null)),
+            SessionMessage::Rename { title } => {
+                let title = title.trim();
+                if title.is_empty() {
+                    return Err(RuntimeError::invalid_input("title must not be empty"));
+                }
+                if title.chars().count() > 200 {
+                    return Err(RuntimeError::invalid_input("title is limited to 200 characters"));
+                }
+                self.state.session.title = title.to_string();
+                self.state.session.updated_at = now_ms();
+                self.persist_session().await?;
+                self.deps
+                    .bus
+                    .publish(
+                        NewEvent::new(EventKind::SessionRenamed, "session renamed")
+                            .session(self.session_id.clone())
+                            .node(self.deps.node_id.clone())
+                            .payload(serde_json::json!({ "title": title })),
+                    )
+                    .await?;
+                Ok(serde_json::json!({
+                    "session_id": self.session_id.as_str(),
+                    "title": title,
+                }))
+            }
             SessionMessage::Transcript { limit } => {
                 // Newest-last, so a client can append without re-sorting. A limit keeps a long
                 // conversation from being shipped whole on every poll.

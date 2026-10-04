@@ -1180,6 +1180,20 @@ textarea:focus {
   background: transparent;
   color: var(--text-muted);
 }
+/* ------------------------------------------------------------------ session search */
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 0;
+}
+
+.search-row input[type='search'] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* ------------------------------------------------------------------ node discovery */
 
 .node-row {

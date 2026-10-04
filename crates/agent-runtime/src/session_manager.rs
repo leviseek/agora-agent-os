@@ -371,6 +371,16 @@ impl SessionManager {
         Ok(record)
     }
 
+    /// Rename a session through its actor, then read back what was stored.
+    pub async fn rename(&self, session: &SessionId, title: &str) -> Result<SessionRecord> {
+        let handle = self.actor_for(session).await?;
+        handle.send(SessionMessage::Rename { title: title.to_string() }).await?;
+        self.session_collection()
+            .load(self.store.as_ref(), session.as_str())
+            .await?
+            .ok_or_else(|| RuntimeError::not_found(format!("session {session} not found")))
+    }
+
     /// The typed material of an export: the live record, the conversation and the runs.
     pub async fn export_data(
         &self,

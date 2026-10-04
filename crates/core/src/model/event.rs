@@ -69,6 +69,8 @@ pub enum EventKind {
     SessionCompacted,
     /// Project instruction files were read from the workspace into a prompt.
     ContextLoaded,
+    /// A session was renamed.
+    SessionRenamed,
     /// Memories were read back into a prompt. Deliberately not MemoryWritten: a recall is a read,
     /// and an operator watching the stream needs to tell the two apart.
     MemoryRecalled,
@@ -120,6 +122,7 @@ impl EventKind {
             EventKind::MemoryRecalled => "memory_recalled",
             EventKind::ContextLoaded => "context_loaded",
             EventKind::SessionCompacted => "session_compacted",
+            EventKind::SessionRenamed => "session_renamed",
             EventKind::PolicyDenied => "policy_denied",
             EventKind::NodeDiscovered => "node_discovered",
             EventKind::NodeLost => "node_lost",

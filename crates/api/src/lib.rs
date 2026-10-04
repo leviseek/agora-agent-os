@@ -49,7 +49,12 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/auth/login", post(handlers::login))
         .route("/v1/ws", get(ws::upgrade))
         .route("/v1/sessions", get(handlers::list_sessions).post(handlers::create_session))
-        .route("/v1/sessions/{id}", get(handlers::get_session).delete(handlers::close_session))
+        .route(
+            "/v1/sessions/{id}",
+            get(handlers::get_session)
+                .patch(handlers::rename_session)
+                .delete(handlers::close_session),
+        )
         .route("/v1/sessions/{id}/status", get(handlers::session_status))
         .route("/v1/sessions/{id}/messages", post(handlers::post_message))
         .route("/v1/sessions/{id}/cancel", post(handlers::cancel_session))

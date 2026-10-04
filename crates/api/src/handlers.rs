@@ -85,8 +85,46 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginRequest>
 // sessions
 // ---------------------------------------------------------------------------------------------
 
-pub async fn list_sessions(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({ "sessions": state.kernel.sessions.list().await? })))
+/// List sessions, optionally filtered by a search term.
+///
+/// The filter is a case-insensitive substring over the title and the user id. It runs here rather
+/// than in the store because the store's contract is "list what exists", and a listing this small
+/// costs nothing to filter - a query language can come later without moving the seam.
+pub async fn list_sessions(
+    State(state): State<ApiState>,
+    Query(q): Query<SessionListQuery>,
+) -> ApiResult<Json<Value>> {
+    let mut sessions = state.kernel.sessions.list().await?;
+    let query = q.q.as_deref().map(str::trim).filter(|term| !term.is_empty());
+    if let Some(term) = query {
+        let needle = term.to_lowercase();
+        sessions.retain(|session| {
+            session.title.to_lowercase().contains(&needle)
+                || session.user_id.to_lowercase().contains(&needle)
+        });
+    }
+    let total = sessions.len();
+    Ok(Json(json!({ "sessions": sessions, "total": total, "query": query })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionListQuery {
+    pub q: Option<String>,
+}
+
+/// Rename a session.
+pub async fn rename_session(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let title = body
+        .get("title")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError(RuntimeError::invalid_input("title is required")))?;
+    let record = state.kernel.sessions.rename(&session, title).await?;
+    Ok(Json(json!({ "session": record })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -541,6 +579,7 @@ fn parse_event_kind(kind: &str) -> Option<EventKind> {
         EventKind::MemoryRecalled,
         EventKind::ContextLoaded,
         EventKind::SessionCompacted,
+        EventKind::SessionRenamed,
         EventKind::NodeDiscovered,
         EventKind::NodeLost,
         EventKind::Error,

@@ -88,6 +88,14 @@ impl Harness {
         (status, body)
     }
 
+    async fn patch(&self, path: &str, body: Value) -> (u16, Value) {
+        let response = self.client.patch(self.url(path)).json(&body).send().await.unwrap();
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        let parsed = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+        (status, parsed)
+    }
+
     async fn post(&self, path: &str, body: Value) -> (u16, Value) {
         let response = self.client.post(self.url(path)).json(&body).send().await.unwrap();
         let status = response.status().as_u16();
@@ -504,6 +512,50 @@ async fn discovered_nodes_appear_in_the_gateway() {
     );
 
     harness.shutdown.cancel();
+}
+
+/// Renaming must go through the actor, and listing must be searchable.
+#[tokio::test]
+async fn sessions_can_be_renamed_and_searched() {
+    let h = Harness::start(None, 600).await;
+    let (_, first) = h.post("/v1/sessions", json!({ "user_id": "alice", "title": "first task" })).await;
+    let (_, second) = h.post("/v1/sessions", json!({ "user_id": "bob", "title": "second task" })).await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+
+    let (status, renamed) = h
+        .patch(&format!("/v1/sessions/{first_id}"), json!({ "title": "renamed task" }))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(renamed["session"]["title"], json!("renamed task"));
+
+    // The actor's copy is the one status reads, so it must have changed too - not just the store.
+    let (_, detail) = h.get(&format!("/v1/sessions/{first_id}")).await;
+    assert_eq!(
+        detail["runtime"]["title"],
+        json!("renamed task"),
+        "the live actor must agree with what was stored"
+    );
+    let (_, status_body) = h.get(&format!("/v1/sessions/{first_id}/status")).await;
+    assert_eq!(status_body["title"], json!("renamed task"));
+
+    // Search matches the title, and the user id, case-insensitively.
+    let (_, by_title) = h.get("/v1/sessions?q=second").await;
+    assert_eq!(by_title["total"], json!(1));
+    assert_eq!(by_title["sessions"][0]["id"], second["id"]);
+    let (_, by_user) = h.get("/v1/sessions?q=ALICE").await;
+    assert_eq!(by_user["sessions"][0]["id"], json!(first_id));
+    let (_, no_match) = h.get("/v1/sessions?q=nothing-matches-this").await;
+    assert_eq!(no_match["total"], json!(0));
+    let (_, all) = h.get("/v1/sessions").await;
+    assert_eq!(all["total"], json!(2), "no query means no filter");
+
+    // A blank rename is a client error, and the title survives it.
+    let (status, _) = h.patch(&format!("/v1/sessions/{first_id}"), json!({ "title": "   " })).await;
+    assert_eq!(status, 400);
+    let (_, still) = h.get(&format!("/v1/sessions/{first_id}")).await;
+    assert_eq!(still["runtime"]["title"], json!("renamed task"));
+
+    h.shutdown.cancel();
 }
 
 /// A branch inherits the conversation and then lives its own life.
