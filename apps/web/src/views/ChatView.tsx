@@ -93,8 +93,14 @@ export function ChatView() {
   // newest turn instead, and keep following while a run is still going.
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const lastRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
-  // Streamed text belonging to the newest run of this session, if any is arriving.
-  const liveText = lastRun === undefined ? '' : streamed.get(lastRun.agent_id) ?? '';
+  // Streaming text belongs to whichever run is currently writing. It is driven by the deltas
+  // themselves, NOT by the run list: the detail view refreshes on a debounce, and a local model
+  // finishes before the first refresh lands - which used to mean the live text never rendered at
+  // all, even though the deltas had been arriving the whole time.
+  const liveEntry = streamed.size > 0 ? [...streamed.entries()][streamed.size - 1] : null;
+  const liveRunId = liveEntry === null ? null : liveEntry[0];
+  const liveText = liveEntry === null ? '' : liveEntry[1];
+  const liveRunVisible = liveRunId !== null && runs.some((run) => run.agent_id === liveRunId);
   const lastRunState = lastRun === undefined ? '' : String(lastRun.state);
   const lastRunAnswer = lastRun === undefined ? null : lastRun.final_answer;
   useEffect(() => {
@@ -277,9 +283,11 @@ export function ChatView() {
                   <div className="bubble bubble-agent bubble-pending">
                     <span className="bubble-role">
                       {t('chat.agent')}
-                      {liveText.length > 0 ? <span className="streaming-dot" aria-hidden="true" /> : null}
+                      {liveRunId === run.agent_id && liveText.length > 0 ? (
+                        <span className="streaming-dot" aria-hidden="true" />
+                      ) : null}
                     </span>
-                    {liveText.length > 0 ? (
+                    {liveRunId === run.agent_id && liveText.length > 0 ? (
                       // The preview of an answer still being written. It disappears when the run
                       // finishes, because the stored answer takes its place.
                       <p className="streaming-text">{liveText}</p>
@@ -305,6 +313,20 @@ export function ChatView() {
               </article>
             );
           })}
+
+          {liveText.length > 0 && !liveRunVisible ? (
+            // The deltas are already here but the run itself has not reached the detail view yet,
+            // which is the normal case for a fast model. Show the text anyway.
+            <article className="run">
+              <div className="bubble bubble-agent bubble-pending">
+                <span className="bubble-role">
+                  {t('chat.agent')}
+                  <span className="streaming-dot" aria-hidden="true" />
+                </span>
+                <p className="streaming-text">{liveText}</p>
+              </div>
+            </article>
+          ) : null}
 
           {sessionOnly.length > 0 ? (
             <details className="session-events">
