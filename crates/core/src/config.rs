@@ -138,6 +138,11 @@ pub struct PolicyConfig {
     /// Character budget for that history. The oldest turns are dropped first, and the newest turn
     /// is truncated rather than dropped, so the immediate context is never lost.
     pub history_chars: usize,
+    /// Workspace files whose contents are prepended to every prompt as project instructions
+    /// (AGENTS.md and friends). Read through the workspace jail; an empty list disables this.
+    pub context_files: Vec<String>,
+    /// Total character budget for those files, spent in the order configured.
+    pub context_files_chars: usize,
     /// How many stored memories may be recalled per run. Zero switches recall off.
     pub memory_recall_limit: usize,
     /// Character budget for the recalled text that is injected into the prompt.
@@ -339,6 +344,8 @@ impl Default for RuntimeConfig {
                 max_steps_per_run: 12,
                 history_messages: 20,
                 history_chars: 8_000,
+                context_files: vec!["AGENTS.md".into()],
+                context_files_chars: 8_000,
                 memory_recall_limit: 5,
                 memory_recall_chars: 1_200,
                 max_concurrent_tasks: 16,
@@ -452,6 +459,17 @@ impl RuntimeConfig {
         if let Some(v) = Self::env_str("AGENTOS_MEMORY_RECALL_CHARS") {
             if let Ok(n) = v.parse() { self.policy.memory_recall_chars = n; }
         }
+        if let Some(v) = Self::env_str("AGENTOS_CONTEXT_FILES") {
+            // Comma separated, so the common case of one extra file needs no JSON edit.
+            self.policy.context_files = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(v) = Self::env_str("AGENTOS_CONTEXT_FILES_CHARS") {
+            if let Ok(n) = v.parse() { self.policy.context_files_chars = n; }
+        }
         if let Some(v) = Self::env_str("AGENTOS_MAX_CONCURRENT_TASKS") {
             if let Ok(n) = v.parse() { self.policy.max_concurrent_tasks = n; }
         }
@@ -527,6 +545,11 @@ impl RuntimeConfig {
         }
         if self.limits.session_queue_capacity == 0 {
             return Err(RuntimeError::invalid_input("limits.session_queue_capacity must be > 0"));
+        }
+        if !self.policy.context_files.is_empty() && self.policy.context_files_chars == 0 {
+            return Err(RuntimeError::invalid_input(
+                "policy.context_files_chars must be > 0 when context_files is not empty",
+            ));
         }
         if self.policy.memory_recall_limit > 0 && self.policy.memory_recall_chars == 0 {
             return Err(RuntimeError::invalid_input(
@@ -691,11 +714,13 @@ mod tests {
     /// simply looks switched off.
     #[test]
     fn context_switches_apply_from_the_environment_alone() {
-        const KEYS: [&str; 4] = [
+        const KEYS: [&str; 6] = [
             "AGENTOS_HISTORY_MESSAGES",
             "AGENTOS_HISTORY_CHARS",
             "AGENTOS_MEMORY_RECALL_LIMIT",
             "AGENTOS_MEMORY_RECALL_CHARS",
+            "AGENTOS_CONTEXT_FILES",
+            "AGENTOS_CONTEXT_FILES_CHARS",
         ];
         struct Cleanup;
         impl Drop for Cleanup {
@@ -710,6 +735,8 @@ mod tests {
         std::env::set_var("AGENTOS_HISTORY_CHARS", "1234");
         std::env::set_var("AGENTOS_MEMORY_RECALL_LIMIT", "3");
         std::env::set_var("AGENTOS_MEMORY_RECALL_CHARS", "777");
+        std::env::set_var("AGENTOS_CONTEXT_FILES", "AGENTS.md, NOTES.md ,");
+        std::env::set_var("AGENTOS_CONTEXT_FILES_CHARS", "4096");
 
         let mut cfg = RuntimeConfig::default();
         cfg.apply_env();
@@ -717,6 +744,12 @@ mod tests {
         assert_eq!(cfg.policy.history_chars, 1234);
         assert_eq!(cfg.policy.memory_recall_limit, 3);
         assert_eq!(cfg.policy.memory_recall_chars, 777);
+        assert_eq!(
+            cfg.policy.context_files,
+            vec!["AGENTS.md".to_string(), "NOTES.md".to_string()],
+            "trimmed, split on commas, blanks dropped"
+        );
+        assert_eq!(cfg.policy.context_files_chars, 4096);
         assert_eq!(cfg.policy.max_steps_per_run, 12, "an unrelated switch stays at its default");
     }
 

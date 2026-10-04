@@ -506,6 +506,55 @@ async fn discovered_nodes_appear_in_the_gateway() {
     harness.shutdown.cancel();
 }
 
+/// Project instructions in the workspace must reach the prompt, and only from inside the jail.
+#[tokio::test]
+async fn workspace_context_files_are_loaded_into_the_prompt() {
+    let dir = std::env::temp_dir().join(format!("agentos-ctx-{}", agentos_core::now_ms()));
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "Always answer in one sentence.").unwrap();
+    // A file outside the workspace must never be read, however it is configured.
+    std::fs::write(dir.join("secret.md"), "TOP SECRET").unwrap();
+
+    let mut config = RuntimeConfig::default();
+    config.storage.backend = StoreBackend::Memory;
+    config.storage.data_dir = dir.join("data");
+    config.policy.workspace_root = workspace.clone();
+    config.observability.log_level = "error".into();
+    config.api.auth_token_env = "AGENTOS_TEST_CONTEXT_TOKEN".into();
+    config.policy.context_files = vec!["AGENTS.md".into(), "../secret.md".into()];
+    std::env::remove_var("AGENTOS_TEST_CONTEXT_TOKEN");
+
+    let kernel = Kernel::bootstrap(config).await.unwrap();
+    let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _kernel: kernel,
+        shutdown,
+        client: reqwest::Client::new(),
+    };
+
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "ctx" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "hello", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (_, events) = h.get("/v1/events?limit=200&kinds=context_loaded").await;
+    let loaded = events["events"].as_array().unwrap();
+    assert_eq!(loaded.len(), 1, "context is loaded once per run: {events}");
+    assert_eq!(loaded[0]["payload"]["files"], json!(["AGENTS.md"]));
+    assert!(
+        loaded[0]["payload"]["chars"].as_u64().unwrap() > 0,
+        "the file had content: {}",
+        loaded[0]
+    );
+
+    h.shutdown.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Recall must reach the prompt, and it must not repeat what the conversation still shows.
 #[tokio::test]
 async fn memories_outside_the_history_window_are_recalled_into_the_prompt() {

@@ -81,6 +81,14 @@
     "denied_capabilities": [],
     "approval_required": [],
     "max_steps_per_run": 12,
+    "history_messages": 20,
+    "history_chars": 8000,
+    "context_files": [
+      "AGENTS.md"
+    ],
+    "context_files_chars": 8000,
+    "memory_recall_limit": 5,
+    "memory_recall_chars": 1200,
     "max_concurrent_tasks": 16,
     "capability_timeout_ms": 10000,
     "capability_retries": 2,

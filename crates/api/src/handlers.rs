@@ -476,6 +476,7 @@ fn parse_event_kind(kind: &str) -> Option<EventKind> {
         EventKind::MemoryWritten,
         EventKind::PolicyDenied,
         EventKind::MemoryRecalled,
+        EventKind::ContextLoaded,
         EventKind::NodeDiscovered,
         EventKind::NodeLost,
         EventKind::Error,

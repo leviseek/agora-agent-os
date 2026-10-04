@@ -65,6 +65,8 @@ pub enum EventKind {
     ArtifactCreated,
     MemoryWritten,
     PolicyDenied,
+    /// Project instruction files were read from the workspace into a prompt.
+    ContextLoaded,
     /// Memories were read back into a prompt. Deliberately not MemoryWritten: a recall is a read,
     /// and an operator watching the stream needs to tell the two apart.
     MemoryRecalled,
@@ -114,6 +116,7 @@ impl EventKind {
             EventKind::ArtifactCreated => "artifact_created",
             EventKind::MemoryWritten => "memory_written",
             EventKind::MemoryRecalled => "memory_recalled",
+            EventKind::ContextLoaded => "context_loaded",
             EventKind::PolicyDenied => "policy_denied",
             EventKind::NodeDiscovered => "node_discovered",
             EventKind::NodeLost => "node_lost",

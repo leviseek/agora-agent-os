@@ -181,5 +181,5 @@
 | **A3 run/session token 记账** | ✅ 完成 | `TokenUsage`（core/model/agent.rs，3 个单测）；`UsageMeter` 汇总 plan/finalise/并行任务三类调用；`/v1/sessions/{id}` 暴露 `runtime.usage` 与 `runs[].usage`；契约测试断言 calls ≥ 2、tokens > 0、会话合计 = 单次运行；控制台显示每轮 tokens 与会话累计 |
 | **A4 记忆召回接线** | ✅ 完成 | 写入统一为每轮一条可解析记录（`goal:`/`answer:`，session.rs），删除 agent_loop 里重复的 semantic 写入；`recall_context` 按 goal 与可见历史去重后注入（6 个单测）；配置 `policy.memory_recall_limit`(5)/`memory_recall_chars`(1200)；实测（历史窗口关闭）`memory_recalled` chars=282、Plan 请求 2 → 3 条 |
 | ⚠️ 环境变量嵌套 bug | ✅ 已修 | `AGENTOS_HISTORY_*` / `AGENTOS_MEMORY_RECALL_*` 四个覆盖曾被嵌进 `AGENTOS_MAX_STEPS` 块内而静默失效；已移到顶层并加 `context_switches_apply_from_the_environment_alone` 测试钉死 |
-| B4 工作区上下文文件装配 | ⏳ 待做 | |
+| **B4 工作区上下文文件装配** | ✅ 完成 | `load_workspace_context`（新模块 context.rs，5 个单测：缺失文件不报错、按序加载、预算截断、越界文件被拒、空/重复条目忽略）；配置 `policy.context_files`/context_files_chars + 两个 env；每轮发 `context_loaded` 事件；实测：`AGENTS.md` 进入 Plan 请求（messages 3，含 project 指令），配置的 `../secret.md` 被 jail 拒绝且内容从未进日志或提示 |
 | A2 上下文预算与压缩 | ⏳ 待做 | 预算兜底已由 A1 的 `history_messages/history_chars` 提供；摘要压缩未做 |

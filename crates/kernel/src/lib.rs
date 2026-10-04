@@ -235,6 +235,8 @@ impl Kernel {
             history_chars: config.policy.history_chars,
             memory_recall_limit: config.policy.memory_recall_limit,
             memory_recall_chars: config.policy.memory_recall_chars,
+            context_files: config.policy.context_files.clone(),
+            context_files_chars: config.policy.context_files_chars,
             run_tokens: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         });
 

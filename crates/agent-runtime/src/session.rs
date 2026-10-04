@@ -6,7 +6,8 @@
 //!   * the whole state (transcript, runs, task graphs) is serializable, which is what makes
 //!     checkpoint, restore and migration work.
 
-use crate::agent_loop::{history_for_model, AgentLoop};
+use crate::agent_loop::{history_for_model, AgentLoop, PromptContext};
+use crate::context::load_workspace_context;
 use crate::memory::{episode, recall_context, MemoryStore};
 use agentos_actor_runtime::actor::{Actor, ActorContext, ErasedActor, TypedActor};
 use agentos_actor_runtime::checkpoint::CheckpointStore;
@@ -67,6 +68,9 @@ pub struct SessionDeps {
     /// Long-term recall budget: memories considered, and characters injected.
     pub memory_recall_limit: usize,
     pub memory_recall_chars: usize,
+    /// Project instruction files read from the workspace at the start of every run.
+    pub context_files: Vec<String>,
+    pub context_files_chars: usize,
     /// Live cancellation tokens per session. Deliberately OUTSIDE the actor mailbox: cancelling a
     /// run must not queue behind the run that is being cancelled.
     pub run_tokens: Arc<RwLock<std::collections::HashMap<SessionId, CancellationToken>>>,
@@ -266,10 +270,37 @@ impl SessionActor {
                 .await?;
         }
 
+        // Project instructions, read fresh at the start of every run so editing AGENTS.md takes
+        // effect on the next goal rather than the next restart.
+        let workspace_context =
+            load_workspace_context(&self.deps.workspace, &self.deps.context_files, self.deps.context_files_chars);
+        if let Some(loaded) = &workspace_context {
+            self.deps
+                .bus
+                .publish(
+                    NewEvent::new(EventKind::ContextLoaded, "workspace context loaded")
+                        .session(self.session_id.clone())
+                        .agent(run.id.clone())
+                        .node(self.deps.node_id.clone())
+                        .payload(serde_json::json!({
+                            "files": loaded.files,
+                            "chars": loaded.text.chars().count(),
+                            "truncated": loaded.truncated,
+                            "budget_chars": self.deps.context_files_chars,
+                        })),
+                )
+                .await?;
+        }
+        let prompt_context = PromptContext {
+            history: &history,
+            workspace: workspace_context.as_ref().map(|loaded| loaded.text.as_str()),
+            memory: memory_context.as_deref(),
+        };
+
         let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone());
         let outcome = match tokio::time::timeout(
             std::time::Duration::from_millis(self.deps.run_timeout_ms.max(1)),
-            loop_.run(&mut run, &goal, &history, memory_context.as_deref()),
+            loop_.run(&mut run, &goal, prompt_context),
         )
         .await
         {

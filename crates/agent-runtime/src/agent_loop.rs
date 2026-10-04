@@ -14,6 +14,22 @@ struct Answerer {
     model: String,
 }
 
+/// Everything that goes into a prompt besides the goal itself.
+///
+/// Grouped rather than passed as loose arguments because the set keeps growing (history, project
+/// instructions, recalled memory, and later retrieved documents), and because the order they are
+/// assembled in is a decision worth stating once: instructions first, then background, then the
+/// conversation, then the goal.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PromptContext<'a> {
+    /// Conversation so far, oldest first.
+    pub history: &'a [ChatMessage],
+    /// Project instructions read from the workspace at the start of the run.
+    pub workspace: Option<&'a str>,
+    /// Memories the history window can no longer show.
+    pub memory: Option<&'a str>,
+}
+
 /// Token accounting shared by every model call of one run.
 ///
 /// Shared rather than returned because the parallel task-graph calls happen inside a TaskRunner:
@@ -132,6 +148,19 @@ pub fn history_for_model(
     kept
 }
 
+/// Assemble everything that precedes the goal, in the order that makes it readable.
+fn push_context(messages: &mut Vec<ChatMessage>, context: &PromptContext<'_>) {
+    // Instructions from the repository come first: they are the rules of the place.
+    if let Some(workspace) = context.workspace {
+        messages.push(ChatMessage::system(workspace));
+    }
+    // Then what happened earlier in this session but is no longer in the window.
+    if let Some(memory) = context.memory {
+        messages.push(ChatMessage::system(memory));
+    }
+    messages.extend(context.history.iter().cloned());
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentLoopOutcome {
     pub answer: String,
@@ -214,8 +243,7 @@ impl AgentLoop {
         &mut self,
         run: &mut AgentRun,
         goal: &str,
-        history: &[ChatMessage],
-        memory_context: Option<&str>,
+        context: PromptContext<'_>,
     ) -> Result<AgentLoopOutcome> {
         let tools = self.all_tool_specs();
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
@@ -249,7 +277,7 @@ impl AgentLoop {
         steps += 1;
         let plan_started = now_ms();
         let (plan, answerer) = self
-            .plan(goal, tools.clone(), history, memory_context, &meter)
+            .plan(goal, tools.clone(), context, &meter)
             .await?;
         // Recorded after every phase, not only at the end: a run that fails halfway still cost
         // what it cost, and a caller looking at the record deserves the real number.
@@ -355,7 +383,7 @@ impl AgentLoop {
         Self::transition(run, AgentRunState::Finalizing)?;
         let final_started = now_ms();
         let answer = self
-            .finalise(goal, &plan, &observations, history, memory_context, &meter, tools)
+            .finalise(goal, &plan, &observations, context, &meter, tools)
             .await?;
         run.usage = meter.snapshot();
         steps += 1;
@@ -381,8 +409,7 @@ impl AgentLoop {
         &self,
         goal: &str,
         tools: Vec<ToolSpec>,
-        history: &[ChatMessage],
-        memory_context: Option<&str>,
+        context: PromptContext<'_>,
         meter: &UsageMeter,
     ) -> Result<(Plan, Answerer)> {
         let system = format!(
@@ -395,12 +422,7 @@ impl AgentLoop {
                 // The plan is where a follow-up like "now do the same for the other file" is
                 // understood, so the conversation goes in front of the goal, not behind it.
                 let mut messages = vec![ChatMessage::system(system)];
-                if let Some(context) = memory_context {
-                    // After the system prompt and before the conversation: it is background the
-                    // model should know, not something the user just said.
-                    messages.push(ChatMessage::system(context));
-                }
-                messages.extend(history.iter().cloned());
+                push_context(&mut messages, &context);
                 messages.push(ChatMessage::user(goal.to_string()));
                 messages
             },
@@ -518,8 +540,7 @@ impl AgentLoop {
         goal: &str,
         plan: &Plan,
         observations: &[(String, serde_json::Value)],
-        history: &[ChatMessage],
-        memory_context: Option<&str>,
+        context: PromptContext<'_>,
         meter: &UsageMeter,
         tools: Vec<ToolSpec>,
     ) -> Result<String> {
@@ -540,10 +561,7 @@ impl AgentLoop {
 
         // Same rule as planning: conversation first, then the goal, then this run's exchange.
         let mut messages = vec![ChatMessage::system(self.deps.spec.system_prompt.clone())];
-        if let Some(context) = memory_context {
-            messages.push(ChatMessage::system(context));
-        }
-        messages.extend(history.iter().cloned());
+        push_context(&mut messages, &context);
         messages.push(ChatMessage::user(goal.to_string()));
         if !observations.is_empty() {
             messages.push(ChatMessage::assistant(format!(
