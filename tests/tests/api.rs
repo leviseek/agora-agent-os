@@ -614,6 +614,116 @@ async fn images_are_verified_by_content_and_stored_as_artifacts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The diagnostics bundle explains the runtime without leaking what it must not.
+#[tokio::test]
+async fn the_diagnostics_bundle_is_useful_and_does_not_leak() {
+    // A secret in the environment, of the kind a provider credential would be. Its NAME must appear
+    // in the bundle (that is configuration), its VALUE must not (that is a leak).
+    std::env::set_var("AGENTOS_TEST_DIAG_KEY", "sk-live-must-not-appear");
+
+    let dir = std::env::temp_dir().join(format!("agentos-diag-{}", agentos_core::now_ms()));
+    let mut config = RuntimeConfig::default();
+    config.storage.backend = StoreBackend::Memory;
+    config.storage.data_dir = dir.join("data");
+    config.policy.workspace_root = dir.join("workspace");
+    config.observability.log_level = "error".into();
+    config.api.auth_token_env = "AGENTOS_TEST_DIAG_TOKEN".into();
+    config.models.providers.push(agentos_core::config::ProviderConfig {
+            name: "deepseek".into(),
+            kind: agentos_core::config::ProviderKind::Deepseek,
+            model: "deepseek-chat".into(),
+            base_url: "https://api.deepseek.com".into(),
+            api_key_env: "AGENTOS_TEST_DIAG_KEY".into(),
+        enabled: true,
+        priority: 1,
+        timeout_ms: 5_000,
+    });
+    // An MCP server whose env map carries a value that must never travel.
+    config.mcp.servers.push(agentos_core::config::McpServerConfig {
+        name: "fake".into(),
+        command: "node".into(),
+        args: vec![],
+        env: [("SERVICE_TOKEN".to_string(), "mcp-secret-value".to_string())]
+            .into_iter()
+            .collect(),
+        enabled: false,
+    });
+
+    let kernel = Kernel::bootstrap(config).await.unwrap();
+    let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _kernel: kernel,
+        shutdown,
+        client: reqwest::Client::new(),
+    };
+    // A canary in the goal: if any future section embeds what the user typed, this test fails.
+    const CANARY: &str = "canary-please-do-not-leak-9931";
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "diag" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let _ = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": format!("what is 6*7? {CANARY}"), "wait": true }),
+        )
+        .await;
+
+    let (status, body) = h.get("/v1/diagnostics").await;
+    assert_eq!(status, 200);
+    for section in [
+        "runtime",
+        "health",
+        "config",
+        "capabilities",
+        "sessions",
+        "events",
+        "environment_warnings",
+    ] {
+        assert!(!body[section].is_null(), "the bundle must carry {section}: {body}");
+    }
+
+    // The capability list states the policy verdict, which is what most support questions need.
+    let capabilities = body["capabilities"].as_array().unwrap();
+    let write = capabilities
+        .iter()
+        .find(|entry| entry["name"] == json!("filesystem-write"))
+        .expect("built-ins are listed");
+    assert_eq!(write["policy"]["allowed"], json!(false));
+    assert!(
+        write["policy"]["reason"].as_str().unwrap().contains("explicit allow"),
+        "the verdict explains itself: {write}"
+    );
+
+    let text = body.to_string();
+    assert!(!text.contains("sk-live-must-not-appear"), "a credential value leaked");
+    assert!(!text.contains("mcp-secret-value"), "an MCP env value leaked");
+    assert!(
+        text.contains("AGENTOS_TEST_DIAG_KEY"),
+        "the name of the credential variable is configuration and should be visible"
+    );
+    assert!(body["redactions"].as_u64().unwrap() >= 1, "redaction is reported, not silent");
+
+    // Conversation text is opt-in, and the canary proves it really is out: the goal travels
+    // through runs, event payloads and event messages, so one leak anywhere fails here.
+    assert!(body["transcripts"].is_null(), "transcripts need an explicit opt-in");
+    assert_eq!(body["conversation_included"], json!(false));
+    assert!(
+        !text.contains(CANARY),
+        "the goal text leaked into the default bundle"
+    );
+    let (_, with_text) = h.get("/v1/diagnostics?transcripts=true").await;
+    assert!(!with_text["transcripts"].is_null());
+    assert_eq!(with_text["conversation_included"], json!(true));
+    assert!(
+        with_text.to_string().contains(CANARY),
+        "with an explicit opt-in the conversation is actually there"
+    );
+
+    std::env::remove_var("AGENTOS_TEST_DIAG_KEY");
+    h.shutdown.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An attached image is verified by content, stored as an artifact, and only then trusted.
 /// A run publishes its answer as it is written, and the pieces add up to the answer.
 #[tokio::test]

@@ -43,6 +43,7 @@ use agentos_wasm_runtime::engine::WasmEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+pub mod diagnostics;
 pub mod transports;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

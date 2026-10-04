@@ -73,6 +73,21 @@ enum Command {
     Demo(DemoArgs),
     /// Check configuration, storage, capabilities and providers.
     Doctor,
+    /// Write a diagnostics bundle: runtime facts, redacted configuration, policy verdicts.
+    Diagnose(DiagnoseArgs),
+}
+
+#[derive(Args, Debug)]
+struct DiagnoseArgs {
+    /// Where to write the bundle. "-" writes it to stdout.
+    #[arg(long, default_value = "diagnostics.json")]
+    out: String,
+    /// How many recent events to include.
+    #[arg(long, default_value_t = 200)]
+    events: usize,
+    /// Include conversation text. Off by default: a transcript is user data.
+    #[arg(long)]
+    include_transcripts: bool,
 }
 
 #[derive(Args, Debug)]
@@ -226,6 +241,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Start(args) => start(config, args).await,
         Command::Doctor => doctor(config).await,
+        Command::Diagnose(args) => diagnose(config, args).await,
         Command::Demo(args) => demo(config, args).await,
         Command::Session { cmd } if cli.remote.is_some() => {
             remote_session_cmd(cli.remote.as_deref().unwrap(), cmd, cli.json).await
@@ -750,6 +766,37 @@ async fn agent_cmd(kernel: Arc<Kernel>, cmd: AgentCmd, json_out: bool) -> Result
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Write the bundle an operator can hand to somebody else.
+///
+/// Redaction happens inside the kernel, before anything is serialised out, so this command cannot
+/// leak by forgetting a step.
+async fn diagnose(config: RuntimeConfig, args: DiagnoseArgs) -> Result<()> {
+    let kernel: Arc<Kernel> = Kernel::bootstrap(config).await?;
+    let options = agentos_kernel::diagnostics::DiagnosticsOptions {
+        events: args.events,
+        include_transcripts: args.include_transcripts,
+    };
+    let bundle = agentos_kernel::diagnostics::build(&kernel, &options).await?;
+    let text = serde_json::to_string_pretty(&bundle)?;
+    if args.out == "-" {
+        println!("{text}");
+    } else {
+        std::fs::write(&args.out, &text)?;
+        let redacted = bundle.get("redactions").and_then(|v| v.as_u64()).unwrap_or(0);
+        println!(
+            "wrote {} ({} bytes, {} credential(s) redacted{})",
+            args.out,
+            text.len(),
+            redacted,
+            if args.include_transcripts { ", transcripts included" } else { "" }
+        );
+        if !args.include_transcripts {
+            println!("conversation text was NOT included; pass --include-transcripts to add it");
         }
     }
     Ok(())

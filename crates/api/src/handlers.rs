@@ -226,6 +226,25 @@ pub struct LimitQuery {
     pub kinds: Option<String>,
 }
 
+/// The diagnostics bundle, redacted. Same content the CLI writes, for a remote console.
+pub async fn diagnostics(
+    State(state): State<ApiState>,
+    Query(q): Query<DiagnosticsQuery>,
+) -> ApiResult<Json<Value>> {
+    let options = agentos_kernel::diagnostics::DiagnosticsOptions {
+        events: q.events.unwrap_or(200).min(2_000),
+        include_transcripts: q.transcripts.unwrap_or(false),
+    };
+    let bundle = agentos_kernel::diagnostics::build(&state.kernel, &options).await?;
+    Ok(Json(bundle))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiagnosticsQuery {
+    pub events: Option<usize>,
+    pub transcripts: Option<bool>,
+}
+
 /// Fetch an artifact's bytes. This is how a client renders an image the transcript refers to.
 pub async fn get_artifact(
     State(state): State<ApiState>,
