@@ -98,7 +98,8 @@ What has to differ per instance, and why:
 | setting | why |
 |---|---|
 | `AGENTOS_HTTP_ADDR` / `AGENTOS_GRPC_ADDR` | two listeners cannot share a port. The runtime now rejects identical addresses at startup instead of silently losing its gateway |
-| `AGENTOS_NODE_ID` | the identity stamped on every event, directory entry and worker record. It defaults to the node name, so two instances with the default name would be indistinguishable in the log |
+| `AGENTOS_NODE_ID` | the identity stamped on every event, directory entry and worker record. Normally you do not set it: an identity is generated on first start and kept in `<data_dir>/node.id`, so it is unique per instance and stable across restarts. Two nodes with the same *name* are still two nodes |
+| `AGENTOS_NODE_NAME` | the human label shown in the console and the log. Two checkouts of the same repository share a directory name, so `pnpm dev` labels each stack `<directory>-<http port>`; the console appends the port when two nodes do end up with the same name |
 | working directory | `./data` and `./workspace` resolve against it. Set `AGENTOS_DATA_DIR` / `AGENTOS_WORKSPACE_ROOT` explicitly if you would rather keep them elsewhere |
 
 ### The development stack in a second checkout
@@ -154,6 +155,12 @@ several runtimes.
 | `AGENTOS_DISCOVERY_DIR` | use a different shared directory |
 | `AGENTOS_DISCOVERY_TTL_MS` | how long an advertisement stays valid (default 10 s) |
 | `AGENTOS_DISCOVERY_ADVERTISE=off` | look without being seen |
+
+Identity and label are separate on purpose. The identity is generated per data directory and
+persisted, so nothing has to be configured for two nodes to be told apart; the name is only what a
+human reads. Deriving identity from the name - as the first version did - made two default nodes
+advertise under one identity and skip each other as "myself", which is exactly the case a
+zero-configuration feature has to get right.
 
 Why a directory rather than multicast: two checkouts are two processes owned by the same user, so a
 per-user directory is a rendezvous that needs no network, no firewall exception and no

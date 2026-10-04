@@ -179,6 +179,13 @@ answers a question the user did not ask). A central registry service: it reintro
 control-plane-on-the-hot-path coupling the architecture avoids. UDP broadcast: same reach as the
 directory, none of the inspectability.
 
+**Correction.** The first implementation resolved a node's identity to its *name* when
+`AGENTOS_NODE_ID` was unset. Since every node defaults to the same name, two checkouts wrote one
+advertisement, each skipped it as its own, and zero-configuration discovery - the entire point -
+did not work. Identity is now generated on first start and persisted in `<data_dir>/node.id`:
+unique per instance, stable across restarts, and independent of the label. Names are for humans;
+the console appends a port when two nodes share one.
+
 **Consequence.** Discovery is a hint, never a fact: a stale advertisement expires, a corrupt file is
 skipped, and a hostile node id cannot escape the directory (it is hashed). Nothing on the request
 path depends on it - `/v1/nodes` reads a cached view that a background heartbeat maintains, and

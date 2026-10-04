@@ -117,6 +117,11 @@ const webPort = await resolvePort('web', readPort('WEB_PORT', 5173));
 
 const runtimeUrl = 'http://127.0.0.1:' + runtimeHttp.value;
 
+// Two checkouts of this repository share a directory name, so a name made of the directory alone
+// would leave two identical rows in the console's node list. The port is what actually tells the
+// stacks apart on one machine, so it goes into the label.
+const nodeName = process.env.AGENTOS_NODE_NAME ?? path.basename(repoRoot) + '-' + runtimeHttp.value;
+
 // --- children ---------------------------------------------------------------------------------
 
 const children = [];
@@ -169,6 +174,7 @@ if (wantRuntime) {
   const env = {
     AGENTOS_HTTP_ADDR: '127.0.0.1:' + runtimeHttp.value,
     AGENTOS_GRPC_ADDR: '127.0.0.1:' + runtimeGrpc.value,
+    AGENTOS_NODE_NAME: nodeName,
   };
   if (existsSync(binary)) {
     run('runtime', binary, [], { env });
@@ -214,5 +220,6 @@ if (!runtimeOnly && wantWeb) {
   console.log('[dev]   web          : http://localhost:' + webPort.value);
 }
 console.log('[dev]   data dir     : ' + path.resolve(repoRoot, dataDir) + '  (one per running stack)');
-console.log('[dev]   node name    : ' + (process.env.AGENTOS_NODE_NAME ?? 'agentos-local (default)'));
+console.log('[dev]   node name    : ' + nodeName + '  (AGENTOS_NODE_NAME)');
+console.log('[dev]   node id      : persisted in the data dir, unique per stack');
 console.log('');

@@ -517,6 +517,34 @@ impl RuntimeConfig {
     /// The identity this node uses in events, the actor directory and worker records.
     /// An explicit AGENTOS_NODE_ID wins so identity survives a rename; otherwise the name is used,
     /// which keeps a single-instance setup zero-config.
+    /// Resolve this node's identity once, at bootstrap.
+    ///
+    /// An explicit AGENTOS_NODE_ID always wins. Otherwise the identity is generated on first start
+    /// and persisted next to the state, which makes it unique per instance and stable across
+    /// restarts.
+    ///
+    /// Falling back to the node *name* - as an earlier version did - was a bug: every node defaults
+    /// to the same name, so two checkouts advertised themselves under one identity, and because a
+    /// node skips the advertisement carrying its own id, neither could see the other.
+    pub fn resolve_node_identity(&mut self) -> Result<String> {
+        if let Some(id) = self.node.node_id.clone().filter(|id| !id.trim().is_empty()) {
+            return Ok(id);
+        }
+        let path = self.storage.data_dir.join("node.id");
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            let existing = existing.trim();
+            if !existing.is_empty() {
+                self.node.node_id = Some(existing.to_string());
+                return Ok(existing.to_string());
+            }
+        }
+        std::fs::create_dir_all(&self.storage.data_dir)?;
+        let generated = crate::ids::NodeId::new().to_string();
+        std::fs::write(&path, format!("{generated}\n"))?;
+        self.node.node_id = Some(generated.clone());
+        Ok(generated)
+    }
+
     pub fn effective_node_id(&self) -> String {
         self.node
             .node_id
@@ -584,16 +612,37 @@ mod tests {
     }
 
     #[test]
-    fn node_id_falls_back_to_the_name() {
+    fn an_explicit_node_id_wins() {
         let mut cfg = RuntimeConfig::default();
-        cfg.node.name = "agora-a".into();
-        assert_eq!(cfg.effective_node_id(), "agora-a", "name doubles as id when unset");
-
-        cfg.node.node_id = Some("   ".into());
-        assert_eq!(cfg.effective_node_id(), "agora-a", "blank ids are ignored");
-
         cfg.node.node_id = Some("node-a-01".into());
-        assert_eq!(cfg.effective_node_id(), "node-a-01", "explicit identity wins");
+        assert_eq!(cfg.resolve_node_identity().unwrap(), "node-a-01");
+        assert_eq!(cfg.effective_node_id(), "node-a-01");
+    }
+
+    #[test]
+    fn generated_identities_are_unique_per_instance_and_stable_across_restarts() {
+        let dir = std::env::temp_dir().join(format!("agora-nodeid-{}", crate::now_ms()));
+        let mut first = RuntimeConfig::default();
+        first.storage.data_dir = dir.join("a");
+        let mut second = RuntimeConfig::default();
+        second.storage.data_dir = dir.join("b");
+
+        let id_a = first.resolve_node_identity().unwrap();
+        let id_b = second.resolve_node_identity().unwrap();
+        assert_ne!(id_a, id_b, "two instances must not share an identity");
+        assert!(!id_a.is_empty());
+        assert!(dir.join("a").join("node.id").exists(), "identity is persisted with the state");
+
+        // Restarting the same data directory keeps the identity.
+        let mut restarted = RuntimeConfig::default();
+        restarted.storage.data_dir = dir.join("a");
+        assert_eq!(restarted.resolve_node_identity().unwrap(), id_a);
+
+        // Two nodes with the *same name* still have different identities: the name is a label.
+        assert_eq!(first.node.name, second.node.name);
+        assert_ne!(first.effective_node_id(), second.effective_node_id());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

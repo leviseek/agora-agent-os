@@ -60,6 +60,18 @@ export function ConnectionView() {
     };
   }, [connection, client, nodesNonce]);
 
+  /**
+   * Nodes are named by their owner, and two checkouts often carry the same name. When that happens
+   * the port is what tells them apart, so it is appended to the label instead of leaving two
+   * identical rows in the list.
+   */
+  const nodeLabel = (node: NodeSummary, all: NodeSummary[]): string => {
+    const duplicates = all.filter((other) => other.name === node.name).length;
+    if (duplicates < 2) return node.name;
+    const port = node.address.split(':').pop();
+    return port === undefined || port.length === 0 ? node.name : node.name + ':' + port;
+  };
+
   /** Jump to another node: same console, different runtime. */
   const switchTo = (node: NodeSummary): void => {
     setDraftBaseUrl(node.address);
@@ -191,7 +203,7 @@ export function ConnectionView() {
         ) : (
           <>
             <div className="node-row node-row-self">
-              <span className="node-name">{nodes.self.name}</span>
+              <span className="node-name">{nodeLabel(nodes.self, [nodes.self, ...nodes.nodes])}</span>
               <span className="mono">{nodes.self.address}</span>
               <Badge tone="muted">{t('nodes.self')}</Badge>
               <span className="muted small">{t('nodes.capabilities', { n: nodes.self.capabilities?.length ?? 0 })}</span>
@@ -202,7 +214,7 @@ export function ConnectionView() {
             ) : (
               nodes.nodes.map((node) => (
                 <div className="node-row" key={node.node_id}>
-                  <span className="node-name">{node.name}</span>
+                  <span className="node-name">{nodeLabel(node, [nodes.self, ...nodes.nodes])}</span>
                   <span className="mono">{node.address}</span>
                   {node.auth_required === true ? <Badge tone="warn">{t('nodes.needsToken')}</Badge> : null}
                   <span className="muted small">{t('nodes.capabilities', { n: node.capabilities?.length ?? 0 })}</span>

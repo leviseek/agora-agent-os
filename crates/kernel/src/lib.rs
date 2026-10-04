@@ -96,14 +96,17 @@ pub struct Kernel {
 
 impl Kernel {
     /// Build the whole runtime from configuration. Every failure here is fatal and explicit.
-    pub async fn bootstrap(config: RuntimeConfig) -> Result<Arc<Self>> {
+    pub async fn bootstrap(mut config: RuntimeConfig) -> Result<Arc<Self>> {
         config.validate()?;
         config.ensure_dirs()?;
+        // Identity before anything else: every plane below stamps the resolved id, and discovery
+        // cannot tell two nodes apart without it.
+        let node_identity = config.resolve_node_identity()?;
         // Identity vs. label: node_id is the stable, unique identity that appears in events, the
         // actor directory and worker records; node.name is the human label. When no explicit id is
         // configured the name doubles as the id, which keeps single-instance setups zero-config and
         // lets several instances on one machine be told apart.
-        let node = config.effective_node_id();
+        let node = node_identity;
 
         // --- data plane: storage ---------------------------------------------------
         let store = open_store(&config.storage).await?;
