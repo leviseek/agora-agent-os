@@ -514,6 +514,54 @@ async fn discovered_nodes_appear_in_the_gateway() {
     harness.shutdown.cancel();
 }
 
+/// A run publishes its answer as it is written, and the pieces add up to the answer.
+#[tokio::test]
+async fn streamed_deltas_reach_the_event_stream() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "stream" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let (status, body) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "what is 6*7?", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (_, events) = h.get("/v1/events?limit=400&kinds=agent_delta").await;
+    let deltas = events["events"].as_array().unwrap();
+    assert!(!deltas.is_empty(), "the answer must stream: {events}");
+
+    let streamed: String = deltas
+        .iter()
+        .filter_map(|event| event["payload"]["text"].as_str())
+        .collect();
+    assert!(!streamed.trim().is_empty(), "deltas carry text");
+    assert!(
+        deltas.iter().all(|event| event["payload"]["run_id"].is_string()),
+        "every delta names the run it belongs to"
+    );
+
+    // The preview is a prefix of the stored answer, never something else.
+    let answer = body["run"]["final_answer"].as_str().unwrap_or_default();
+    if !answer.is_empty() {
+        let trimmed = streamed.trim();
+        assert!(
+            answer.contains(trimmed) || trimmed.contains(answer.trim()),
+            "streamed {trimmed:?} vs stored {answer:?}"
+        );
+    }
+
+    // Batching means fewer events than words: the log is not a per-token transcript.
+    let answer_words = answer.split_whitespace().count();
+    if answer_words > 8 {
+        assert!(
+            deltas.len() < answer_words,
+            "{} delta events for {answer_words} words looks unbatched",
+            deltas.len()
+        );
+    }
+
+    h.shutdown.cancel();
+}
+
 /// Renaming must go through the actor, and listing must be searchable.
 #[tokio::test]
 async fn sessions_can_be_renamed_and_searched() {

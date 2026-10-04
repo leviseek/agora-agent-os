@@ -174,6 +174,10 @@ pub struct AgentLoop {
     session_id: agentos_core::SessionId,
     correlation: Correlation,
     cancellation: CancellationToken,
+    /// Where streamed deltas go, if anyone is listening. Deltas never change what the loop does:
+    /// they are a preview of an answer that is stored, returned and accounted for exactly as it
+    /// would be without them.
+    deltas: Option<crate::deltas::DeltaSink>,
 }
 
 impl AgentLoop {
@@ -183,7 +187,13 @@ impl AgentLoop {
         correlation: Correlation,
         cancellation: CancellationToken,
     ) -> Self {
-        Self { deps, session_id, correlation, cancellation }
+        Self { deps, session_id, correlation, cancellation, deltas: None }
+    }
+
+    /// Stream model deltas to this sink while the run is in progress.
+    pub fn with_deltas(mut self, sink: crate::deltas::DeltaSink) -> Self {
+        self.deltas = Some(sink);
+        self
     }
 
     fn transition(run: &mut AgentRun, next: AgentRunState) -> Result<()> {
@@ -576,15 +586,14 @@ impl AgentLoop {
                 ));
             }
         }
-        let response = self
-            .deps
-            .models
-            .complete(
-                ModelRequest::new(ModelTask::Summarize, messages)
-                    .with_tools(tools)
-                    .with_json(),
-            )
-            .await;
+        // The final answer is the one a user watches arrive, so it is the call that streams.
+        let request = ModelRequest::new(ModelTask::Summarize, messages)
+            .with_tools(tools)
+            .with_json();
+        let response = match &self.deltas {
+            Some(sink) => self.deps.models.complete_streaming(request, sink.as_ref()).await,
+            None => self.deps.models.complete(request).await,
+        };
         match response {
             Ok(r) => {
                 meter.record(&r.usage);

@@ -1180,6 +1180,34 @@ textarea:focus {
   background: transparent;
   color: var(--text-muted);
 }
+/* ------------------------------------------------------------------ streaming */
+
+.streaming-text {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.streaming-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: streaming-pulse 1s ease-in-out infinite;
+}
+
+@keyframes streaming-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* ------------------------------------------------------------------ session search */
 
 .search-row {

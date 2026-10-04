@@ -580,6 +580,7 @@ fn parse_event_kind(kind: &str) -> Option<EventKind> {
         EventKind::ContextLoaded,
         EventKind::SessionCompacted,
         EventKind::SessionRenamed,
+        EventKind::AgentDelta,
         EventKind::NodeDiscovered,
         EventKind::NodeLost,
         EventKind::Error,

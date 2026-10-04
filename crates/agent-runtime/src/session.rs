@@ -9,6 +9,7 @@
 use crate::agent_loop::{history_for_model, AgentLoop, PromptContext};
 use crate::context::load_workspace_context;
 use crate::compaction::compaction_window;
+use crate::deltas::DeltaPublisher;
 use crate::memory::{episode, recall_context, summary, MemoryStore};
 use agentos_actor_runtime::actor::{Actor, ActorContext, ErasedActor, TypedActor};
 use agentos_actor_runtime::checkpoint::CheckpointStore;
@@ -411,7 +412,17 @@ impl SessionActor {
             memory: memory_context.as_deref(),
         };
 
-        let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone());
+        // Deltas are published beside the run, never inside it: if the event bus is busy the
+        // preview is late, not the answer.
+        let deltas = DeltaPublisher::start(
+            self.deps.bus.clone(),
+            self.session_id.clone(),
+            run.id.as_str().to_string(),
+            self.deps.node_id.clone(),
+            120,
+        );
+        let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone())
+            .with_deltas(deltas.sink());
         let outcome = match tokio::time::timeout(
             std::time::Duration::from_millis(self.deps.run_timeout_ms.max(1)),
             loop_.run(&mut run, &goal, prompt_context),
@@ -424,6 +435,8 @@ impl SessionActor {
                 self.deps.run_timeout_ms
             ))),
         };
+        // The run is over: stop the ticker and flush whatever the last batch was holding.
+        deltas.finish().await;
         self.deps.run_tokens.write().remove(&self.session_id);
         let finished = now_ms();
 

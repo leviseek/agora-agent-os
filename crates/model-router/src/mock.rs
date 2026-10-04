@@ -162,6 +162,21 @@ impl ModelProvider for MockProvider {
         &self.model
     }
 
+    /// The built-in provider streams too, so the streaming path can be exercised end to end
+    /// without a network or a key. The chunking is by word and paced only by the caller.
+    async fn complete_streaming(
+        &self,
+        request: ModelRequest,
+        on_delta: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ModelResponse> {
+        let response = self.complete(request).await?;
+        // Nothing here sleeps: pacing belongs to the transport, not to a test double.
+        for word in response.content.split_inclusive(' ') {
+            on_delta(word.to_string());
+        }
+        Ok(response)
+    }
+
     async fn health(&self) -> ProviderHealth {
         ProviderHealth::Ready
     }

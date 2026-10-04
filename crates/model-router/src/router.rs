@@ -56,6 +56,14 @@ struct ProviderStats {
     tokens: u64,
 }
 
+/// How a completion is being asked for. Kept as one enum so the failover, accounting and
+/// back-off logic exist once, no matter which shape the caller wants.
+#[derive(Clone, Copy)]
+enum CallMode<'a> {
+    Plain,
+    Streaming(&'a (dyn Fn(String) + Send + Sync)),
+}
+
 pub struct ModelRouter {
     providers: HashMap<String, Arc<dyn ModelProvider>>,
     policy: RoutingPolicy,
@@ -168,6 +176,22 @@ impl ModelRouter {
 
     /// Ask for a completion, failing over across providers on retryable errors.
     pub async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+        self.call(request, CallMode::Plain).await
+    }
+
+    /// Ask for a completion, forwarding each chunk to on_delta as it arrives.
+    ///
+    /// Providers that cannot stream fall back to one delta containing the whole answer, so the
+    /// caller does not have to know which kind it is talking to.
+    pub async fn complete_streaming(
+        &self,
+        request: ModelRequest,
+        on_delta: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ModelResponse> {
+        self.call(request, CallMode::Streaming(on_delta)).await
+    }
+
+    async fn call(&self, request: ModelRequest, mode: CallMode<'_>) -> Result<ModelResponse> {
         // What the model was actually sent is the first thing to check when a follow-up question
         // behaves as if it had no history.
         tracing::debug!(
@@ -191,7 +215,13 @@ impl ModelRouter {
             while attempt < self.policy.max_retries_per_provider.max(1) {
                 attempt += 1;
                 let started = agentos_core::now_ms();
-                match provider.complete(request.clone()).await {
+                let outcome = match &mode {
+                    CallMode::Plain => provider.complete(request.clone()).await,
+                    CallMode::Streaming(sink) => {
+                        provider.complete_streaming(request.clone(), *sink).await
+                    }
+                };
+                match outcome {
                     Ok(response) => {
                         self.record(name, true, agentos_core::now_ms().saturating_sub(started), response.usage.total_tokens as u64);
                         return Ok(response);
@@ -309,6 +339,87 @@ impl ModelProvider for FailingProvider {
     }
     async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
         Err(RuntimeError::model("provider is broken").retryable(false))
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use crate::mock::MockProvider;
+    use crate::provider::ChatMessage;
+    use parking_lot::Mutex;
+
+    fn router() -> ModelRouter {
+        let mut r = ModelRouter::new(RoutingPolicy {
+            default_provider: "mock".into(),
+            fallback_chain: vec![],
+            max_retries_per_provider: 1,
+            ..Default::default()
+        });
+        r.register(Arc::new(MockProvider::default()));
+        r
+    }
+
+    #[tokio::test]
+    async fn deltas_arrive_and_reassemble_into_the_answer() {
+        let request = ModelRequest::new(
+            ModelTask::Think,
+            vec![ChatMessage::user("what is 6*7?")],
+        );
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let seen = seen.clone();
+            move |text: String| seen.lock().push(text)
+        };
+
+        let streamed = router().complete_streaming(request.clone(), &sink).await.unwrap();
+        let pieces = seen.lock().clone();
+        assert!(pieces.len() > 1, "the built-in provider streams in pieces: {pieces:?}");
+        assert_eq!(
+            pieces.concat().trim(),
+            streamed.content.trim(),
+            "the deltas are the answer, not a summary of it"
+        );
+
+        // And the streaming path returns exactly what the plain path returns.
+        let plain = router().complete(request).await.unwrap();
+        assert_eq!(plain.content, streamed.content);
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_cannot_stream_still_works() {
+        // The default implementation emits the whole answer as one delta, so a caller never has to
+        // ask whether a provider streams.
+        struct OneShot;
+        #[async_trait::async_trait]
+        impl ModelProvider for OneShot {
+            fn name(&self) -> &str { "oneshot" }
+            fn kind(&self) -> ProviderKind { ProviderKind::Local }
+            fn model(&self) -> &str { "oneshot-1" }
+            async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+                Ok(ModelResponse {
+                    content: "all at once".into(),
+                    tool_calls: vec![],
+                    provider: "oneshot".into(),
+                    model: "oneshot-1".into(),
+                    usage: crate::provider::Usage::default(),
+                    latency_ms: 1,
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+        let provider = OneShot;
+        let pieces = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let pieces = pieces.clone();
+            move |text: String| pieces.lock().push(text)
+        };
+        let response = provider
+            .complete_streaming(ModelRequest::new(ModelTask::Think, vec![ChatMessage::user("hi")]), &sink)
+            .await
+            .unwrap();
+        assert_eq!(response.content, "all at once");
+        assert_eq!(pieces.lock().len(), 1, "one delta is a valid stream");
     }
 }
 

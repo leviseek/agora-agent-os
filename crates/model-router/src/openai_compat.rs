@@ -237,6 +237,170 @@ impl ModelProvider for OpenAiCompatibleProvider {
             finish_reason,
         })
     }
+
+    /// Stream a completion using the OpenAI-compatible SSE protocol.
+    ///
+    /// The deltas are a preview: the same value the non-streaming call would return is assembled
+    /// here and returned, including tool calls, which arrive as fragments and have to be put back
+    /// together by index.
+    async fn complete_streaming(
+        &self,
+        request: ModelRequest,
+        on_delta: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ModelResponse> {
+        let started = agentos_core::now_ms();
+        let key = self.current_key();
+        if key.is_none() && !matches!(self.kind, ProviderKind::Local) {
+            return Err(RuntimeError::model(format!(
+                "provider {} has no API key: set {}",
+                self.name, self.key_env
+            ))
+            .retryable(false)
+            .with_detail("provider", self.name.clone()));
+        }
+
+        let mut body = self.build_body(&request);
+        body["stream"] = json!(true);
+        // Without this the final chunk carries no usage, and a streamed call would look free.
+        body["stream_options"] = json!({ "include_usage": true });
+
+        let mut builder = self
+            .client
+            .post(self.endpoint())
+            .header("content-type", "application/json")
+            .timeout(std::time::Duration::from_millis(
+                if request.timeout_ms > 0 { request.timeout_ms } else { self.timeout_ms },
+            ))
+            .json(&body);
+        if let Some(k) = &key {
+            builder = builder.bearer_auth(k);
+        }
+
+        let mut response = builder.send().await.map_err(|e| {
+            let kind = if e.is_timeout() {
+                RuntimeError::timeout(format!("provider {} timed out", self.name))
+            } else {
+                RuntimeError::network(format!("provider {} is unreachable: {e}", self.name))
+            };
+            kind.with_detail("provider", self.name.clone())
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            let retryable = status.as_u16() == 429 || status.is_server_error();
+            return Err(RuntimeError::model(format!(
+                "provider {} returned HTTP {status}",
+                self.name
+            ))
+            .retryable(retryable)
+            .with_detail("status", status.as_u16())
+            .with_detail("body", truncate(&text, 512)));
+        }
+
+        let mut buffer = String::new();
+        let mut content = String::new();
+        let mut fragments: Vec<ToolCallFragment> = Vec::new();
+        let mut usage: Value = json!({});
+        let mut finish_reason: Option<String> = None;
+
+        // Chunks arrive at arbitrary byte boundaries, so lines are only parsed once complete.
+        while let Some(bytes) = response.chunk().await.map_err(|e| {
+            RuntimeError::network(format!("provider {} stream broke: {e}", self.name))
+        })? {
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(index) = buffer.find('\n') {
+                let line: String = buffer[..index].trim().to_string();
+                buffer.drain(..=index);
+                let Some(payload) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let payload = payload.trim();
+                if payload.is_empty() || payload == "[DONE]" {
+                    continue;
+                }
+                let Ok(parsed) = serde_json::from_str::<Value>(payload) else {
+                    continue;
+                };
+                if let Some(reported) = parsed.get("usage").filter(|value| !value.is_null()) {
+                    usage = reported.clone();
+                }
+                let Some(choice) = parsed.get("choices").and_then(|c| c.get(0)) else {
+                    continue;
+                };
+                if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+                    finish_reason = Some(reason.to_string());
+                }
+                let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
+                if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
+                    if !text.is_empty() {
+                        content.push_str(text);
+                        on_delta(text.to_string());
+                    }
+                }
+                if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
+                    for call in calls {
+                        let index = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        while fragments.len() <= index {
+                            fragments.push(ToolCallFragment::default());
+                        }
+                        let slot = &mut fragments[index];
+                        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                            slot.id = Some(id.to_string());
+                        }
+                        if let Some(function) = call.get("function") {
+                            if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                                slot.name.push_str(name);
+                            }
+                            if let Some(args) = function.get("arguments").and_then(|v| v.as_str()) {
+                                slot.arguments.push_str(args);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let tool_calls = fragments
+            .into_iter()
+            .enumerate()
+            .filter(|(_, fragment)| !fragment.name.trim().is_empty())
+            .map(|(index, fragment)| ToolCall {
+                name: fragment.name,
+                arguments: serde_json::from_str(&fragment.arguments)
+                    .unwrap_or_else(|_| json!({ "raw": fragment.arguments })),
+                id: fragment.id.unwrap_or_else(|| format!("call-{index}")),
+            })
+            .collect::<Vec<_>>();
+
+        // Decided before the vector moves into the response.
+        let finish_reason = finish_reason.unwrap_or_else(|| {
+            if tool_calls.is_empty() { "stop".to_string() } else { "tool_calls".to_string() }
+        });
+
+        Ok(ModelResponse {
+            content,
+            tool_calls,
+            provider: self.name.clone(),
+            model: self.model.clone(),
+            usage: Usage {
+                prompt_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                completion_tokens: usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                total_tokens: usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            },
+            latency_ms: agentos_core::now_ms().saturating_sub(started),
+            finish_reason,
+        })
+    }
+}
+
+/// Tool calls stream in pieces: the name and the arguments arrive across several chunks and are
+/// stitched together by index.
+#[derive(Default)]
+struct ToolCallFragment {
+    id: Option<String>,
+    name: String,
+    arguments: String,
 }
 
 fn truncate(s: &str, max: usize) -> String {

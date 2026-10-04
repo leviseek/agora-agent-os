@@ -63,6 +63,7 @@ export function ChatView() {
     busy,
     connection,
     sessions,
+    streamed,
   } = useApp();
   const { setView } = useNav();
   const session = useSessionEvents(selectedSessionId, 200);
@@ -81,6 +82,8 @@ export function ChatView() {
   // newest turn instead, and keep following while a run is still going.
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const lastRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
+  // Streamed text belonging to the newest run of this session, if any is arriving.
+  const liveText = lastRun === undefined ? '' : streamed.get(lastRun.agent_id) ?? '';
   const lastRunState = lastRun === undefined ? '' : String(lastRun.state);
   const lastRunAnswer = lastRun === undefined ? null : lastRun.final_answer;
   useEffect(() => {
@@ -229,8 +232,17 @@ export function ChatView() {
 
                 {isRunning(run.state) ? (
                   <div className="bubble bubble-agent bubble-pending">
-                    <span className="bubble-role">{t('chat.agent')}</span>
-                    <p className="muted">{t('chat.workingHint')}</p>
+                    <span className="bubble-role">
+                      {t('chat.agent')}
+                      {liveText.length > 0 ? <span className="streaming-dot" aria-hidden="true" /> : null}
+                    </span>
+                    {liveText.length > 0 ? (
+                      // The preview of an answer still being written. It disappears when the run
+                      // finishes, because the stored answer takes its place.
+                      <p className="streaming-text">{liveText}</p>
+                    ) : (
+                      <p className="muted">{t('chat.workingHint')}</p>
+                    )}
                   </div>
                 ) : null}
 

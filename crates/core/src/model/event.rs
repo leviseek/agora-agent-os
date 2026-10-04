@@ -69,6 +69,9 @@ pub enum EventKind {
     SessionCompacted,
     /// Project instruction files were read from the workspace into a prompt.
     ContextLoaded,
+    /// A streamed fragment of an answer that is still being written. Best effort: a missing delta
+    /// costs a redraw, never an answer.
+    AgentDelta,
     /// A session was renamed.
     SessionRenamed,
     /// Memories were read back into a prompt. Deliberately not MemoryWritten: a recall is a read,
@@ -123,6 +126,7 @@ impl EventKind {
             EventKind::ContextLoaded => "context_loaded",
             EventKind::SessionCompacted => "session_compacted",
             EventKind::SessionRenamed => "session_renamed",
+            EventKind::AgentDelta => "agent_delta",
             EventKind::PolicyDenied => "policy_denied",
             EventKind::NodeDiscovered => "node_discovered",
             EventKind::NodeLost => "node_lost",

@@ -73,6 +73,8 @@ export interface AppStoreValue {
   sessions: SessionSummary[];
   sessionsError: ApiError | null;
   sessionsLoading: boolean;
+  /** Live answer text per run, replaced by the stored answer once the run finishes. */
+  streamed: Map<string, string>;
   selectedSessionId: string | null;
   detail: SessionDetail | null;
   detailError: ApiError | null;
@@ -132,6 +134,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionQuery, setSessionQueryState] = useState<string>('');
+  // Live answer text per run, replaced by the stored answer when the run completes.
+  const [streamed, setStreamed] = useState<Map<string, string>>(() => new Map());
   const [sessionsError, setSessionsError] = useState<ApiError | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -274,6 +278,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
         next.push(event);
         return next;
       });
+      if (event.kind === 'agent_delta') {
+        // The preview of an answer still being written. Keyed by run so two runs cannot blend,
+        // and dropped the moment the run finishes - the stored answer replaces it.
+        const payload = event.payload as { run_id?: string; text?: string } | null;
+        const runId = payload?.run_id;
+        const text = payload?.text;
+        if (typeof runId === 'string' && typeof text === 'string' && text.length > 0) {
+          setStreamed((previous) => {
+            const next = new Map(previous);
+            next.set(runId, (next.get(runId) ?? '') + text);
+            return next;
+          });
+        }
+      }
+      if (event.kind === 'run_completed' || event.kind === 'run_failed' || event.kind === 'run_cancelled') {
+        const payload = event.payload as { run_id?: string } | null;
+        const runId = payload?.run_id;
+        if (typeof runId === 'string') {
+          setStreamed((previous) => {
+            if (!previous.has(runId)) return previous;
+            const next = new Map(previous);
+            next.delete(runId);
+            return next;
+          });
+        }
+      }
       if (REFRESH_KINDS.has(event.kind)) {
         if (event.session_id !== null && event.session_id === selectedRef.current) {
           scheduleDetailRefresh();
@@ -516,6 +546,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessions,
       sessionsError,
       sessionsLoading,
+      streamed,
       sessionQuery,
       setSessionQuery,
       renameSession,
@@ -559,6 +590,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessions,
       sessionsError,
       sessionsLoading,
+      streamed,
       sessionQuery,
       setSessionQuery,
       renameSession,

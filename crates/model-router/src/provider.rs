@@ -271,6 +271,24 @@ pub trait ModelProvider: Send + Sync + 'static {
         true
     }
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse>;
+    /// Stream a completion: call on_delta for each chunk as it arrives, then return exactly what
+    /// complete would have returned.
+    ///
+    /// The default calls complete and emits the whole answer in one delta, so a provider that
+    /// cannot stream still works - it just arrives at once. Deltas are a preview channel: the
+    /// authoritative answer is always the returned response, and a caller that ignores deltas
+    /// entirely is still correct.
+    async fn complete_streaming(
+        &self,
+        request: ModelRequest,
+        on_delta: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ModelResponse> {
+        let response = self.complete(request).await?;
+        if !response.content.is_empty() {
+            on_delta(response.content.clone());
+        }
+        Ok(response)
+    }
     async fn health(&self) -> ProviderHealth {
         ProviderHealth::Ready
     }
