@@ -24,6 +24,13 @@ the timeout, retries retryable failures and emits `tool_call` / `tool_result` ev
 | `filesystem-edit` | 1.0.0 | fs_read + fs_write | patch an exact snippet; refuses an ambiguous match unless `replace_all`; same policy grant as write |
 | `filesystem-search` | 1.0.0 | fs_read | glob (`*`, `**`, `?`) plus a case-insensitive substring over file contents; bounded by results, files and file size; skips binary and hidden directories |
 
+External tools can also arrive over the Model Context Protocol. Each configured server is started as
+a child process, its tools are registered as `mcp.<server>.<tool>`, and each one declares
+`process_exec` + `network` permissions - so the policy gate denies it until an operator allows it.
+A tool that reports `isError` surfaces as a capability error, and a tool whose input schema our
+validator cannot reason about gets a permissive object schema rather than a false claim of
+validation.
+
 Search matches substrings rather than regular expressions: a regex engine is a large dependency to
 carry for the three wildcards a file search actually needs, and the glob matcher is hand written and
 unit tested instead. A caller that needs regexes can still add a capability that has one.

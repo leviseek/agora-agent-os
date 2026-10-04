@@ -21,6 +21,11 @@ async fn run() -> Result<()> {
         &config.observability.log_level,
         matches!(config.observability.log_format, agentos_core::config::LogFormat::Json),
     )?;
+    // Configuration is loaded before the subscriber exists, so anything the environment could not
+    // honour is reported now - loudly, and without stopping a runtime that still works.
+    for warning in &config.warnings {
+        tracing::warn!("{warning}");
+    }
 
     let http_addr = config.api.http_addr.clone();
     let grpc_addr = config.api.grpc_addr.clone();

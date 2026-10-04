@@ -219,6 +219,9 @@ async fn main() {
 async fn run(cli: Cli) -> Result<()> {
     let config = RuntimeConfig::load()?;
     agentos_core::telemetry::init_tracing(&config.observability.log_level, matches!(config.observability.log_format, agentos_core::config::LogFormat::Json))?;
+    for warning in &config.warnings {
+        tracing::warn!("{warning}");
+    }
 
     match cli.command {
         Command::Start(args) => start(config, args).await,

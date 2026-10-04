@@ -46,6 +46,12 @@ impl CapabilityPermission {
         self.network = true;
         self
     }
+    /// Grant "may run an external process". Nothing built in asks for this: it exists for
+    /// capabilities that are proxies to code we do not control, such as an MCP server.
+    pub fn with_process_exec(mut self) -> Self {
+        self.process_exec = true;
+        self
+    }
     pub fn summary(&self) -> String {
         let mut flags = Vec::new();
         if self.fs_read { flags.push("fs_read"); }

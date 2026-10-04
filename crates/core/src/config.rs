@@ -260,6 +260,40 @@ pub struct RuntimeConfig {
     pub observability: ObservabilityConfig,
     pub discovery: DiscoveryConfig,
     pub limits: RuntimeLimits,
+    pub mcp: McpConfig,
+    /// Values the environment supplied that could not be honoured.
+    ///
+    /// Environment overrides are applied before the log subscriber exists, so a warning emitted
+    /// there goes nowhere. Collecting them means a typo in an override is reported by the runtime
+    /// instead of being silently ignored - which is the failure mode this field exists to stop.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
+}
+
+/// External tool servers speaking the Model Context Protocol.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+/// One MCP server. It runs as a child process of this runtime, so the command and its arguments
+/// come from configuration an operator wrote, never from a model or a user message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpServerConfig {
+    /// Short name used in capability names ("mcp.<name>.<tool>") and in policy entries.
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for RuntimeConfig {
@@ -377,6 +411,8 @@ impl Default for RuntimeConfig {
             // On by default: "start a node, see it from the console" is the point of the feature.
             // It only writes a small file into a per-user directory, and AGENTOS_DISCOVERY=off
             // turns it off completely.
+            mcp: McpConfig::default(),
+            warnings: Vec::new(),
             discovery: DiscoveryConfig {
                 enabled: true,
                 dir: default_discovery_dir(),
@@ -455,16 +491,28 @@ impl RuntimeConfig {
         // and recall switches only worked for deployments that also set a step budget. Keep them
         // at the top level, and see the test below that pins each switch.
         if let Some(v) = Self::env_str("AGENTOS_HISTORY_MESSAGES") {
-            if let Ok(n) = v.parse() { self.policy.history_messages = n; }
+            match v.parse::<usize>() {
+                Ok(n) => self.policy.history_messages = n,
+                Err(_) => self.warnings.push(format!("AGENTOS_HISTORY_MESSAGES={v} is not a number; ignored")),
+            }
         }
         if let Some(v) = Self::env_str("AGENTOS_HISTORY_CHARS") {
-            if let Ok(n) = v.parse() { self.policy.history_chars = n; }
+            match v.parse::<usize>() {
+                Ok(n) => self.policy.history_chars = n,
+                Err(_) => self.warnings.push(format!("AGENTOS_HISTORY_CHARS={v} is not a number; ignored")),
+            }
         }
         if let Some(v) = Self::env_str("AGENTOS_MEMORY_RECALL_LIMIT") {
-            if let Ok(n) = v.parse() { self.policy.memory_recall_limit = n; }
+            match v.parse::<usize>() {
+                Ok(n) => self.policy.memory_recall_limit = n,
+                Err(_) => self.warnings.push(format!("AGENTOS_MEMORY_RECALL_LIMIT={v} is not a number; ignored")),
+            }
         }
         if let Some(v) = Self::env_str("AGENTOS_MEMORY_RECALL_CHARS") {
-            if let Ok(n) = v.parse() { self.policy.memory_recall_chars = n; }
+            match v.parse::<usize>() {
+                Ok(n) => self.policy.memory_recall_chars = n,
+                Err(_) => self.warnings.push(format!("AGENTOS_MEMORY_RECALL_CHARS={v} is not a number; ignored")),
+            }
         }
         if let Some(v) = Self::env_str("AGENTOS_CONTEXT_FILES") {
             // Comma separated, so the common case of one extra file needs no JSON edit.
@@ -475,13 +523,29 @@ impl RuntimeConfig {
                 .collect();
         }
         if let Some(v) = Self::env_str("AGENTOS_CONTEXT_FILES_CHARS") {
-            if let Ok(n) = v.parse() { self.policy.context_files_chars = n; }
+            match v.parse::<usize>() {
+                Ok(n) => self.policy.context_files_chars = n,
+                Err(_) => self.warnings.push(format!("AGENTOS_CONTEXT_FILES_CHARS={v} is not a number; ignored")),
+            }
+        }
+        if let Some(v) = Self::env_str("AGENTOS_MCP_SERVERS") {
+            // A JSON array, because a list of commands with arguments is not expressible as a comma
+            // separated string without inventing an escaping language nobody asked for.
+            match serde_json::from_str::<Vec<McpServerConfig>>(&v) {
+                Ok(servers) => self.mcp.servers = servers,
+                Err(error) => self
+                    .warnings
+                    .push(format!("AGENTOS_MCP_SERVERS is not a JSON array of servers ({error}); ignored")),
+            }
         }
         if let Some(v) = Self::env_str("AGENTOS_COMPACTION") {
             self.policy.compaction_enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
         }
         if let Some(v) = Self::env_str("AGENTOS_COMPACTION_MIN_MESSAGES") {
-            if let Ok(n) = v.parse() { self.policy.compaction_min_messages = n; }
+            match v.parse::<usize>() {
+                Ok(n) => self.policy.compaction_min_messages = n,
+                Err(_) => self.warnings.push(format!("AGENTOS_COMPACTION_MIN_MESSAGES={v} is not a number; ignored")),
+            }
         }
         if let Some(v) = Self::env_str("AGENTOS_MAX_CONCURRENT_TASKS") {
             if let Ok(n) = v.parse() { self.policy.max_concurrent_tasks = n; }
@@ -558,6 +622,27 @@ impl RuntimeConfig {
         }
         if self.limits.session_queue_capacity == 0 {
             return Err(RuntimeError::invalid_input("limits.session_queue_capacity must be > 0"));
+        }
+        let mut seen_names: Vec<&str> = Vec::new();
+        for server in &self.mcp.servers {
+            if server.name.trim().is_empty() {
+                return Err(RuntimeError::invalid_input("mcp.servers[].name must not be empty"));
+            }
+            if server.command.trim().is_empty() {
+                return Err(RuntimeError::invalid_input(format!(
+                    "mcp server {} has no command",
+                    server.name
+                )));
+            }
+            // The name is part of every capability name it publishes, so duplicates would silently
+            // shadow each other in the registry.
+            if seen_names.contains(&server.name.as_str()) {
+                return Err(RuntimeError::invalid_input(format!(
+                    "mcp server {} is configured twice",
+                    server.name
+                )));
+            }
+            seen_names.push(server.name.as_str());
         }
         if self.policy.compaction_enabled && self.policy.history_messages == 0 {
             return Err(RuntimeError::invalid_input(
@@ -663,6 +748,14 @@ impl RuntimeConfig {
 mod tests {
     use super::*;
 
+    /// Environment variables are process-global, so any test that sets them has to own the process
+    /// for the duration. Without this the cases below race each other and fail depending on order.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn defaults_validate() {
         RuntimeConfig::default().validate().unwrap();
@@ -731,7 +824,40 @@ mod tests {
     /// silently ignored - exactly the kind of failure a test has to catch, because the feature
     /// simply looks switched off.
     #[test]
+    fn an_override_that_cannot_be_honoured_is_reported() {
+        let _guard = env_guard();
+        // These are set before any log subscriber exists, so the only place they can be seen
+        // later is the warning list. A silent typo in a deployment is worse than a noisy one.
+        for key in [
+            "AGENTOS_MCP_SERVERS",
+            "AGENTOS_HISTORY_MESSAGES",
+            "AGENTOS_MEMORY_RECALL_CHARS",
+            "AGENTOS_COMPACTION_MIN_MESSAGES",
+        ] {
+            std::env::set_var(key, "definitely-not-what-this-wants");
+        }
+        let mut cfg = RuntimeConfig::default();
+        cfg.apply_env();
+        for key in [
+            "AGENTOS_MCP_SERVERS",
+            "AGENTOS_HISTORY_MESSAGES",
+            "AGENTOS_MEMORY_RECALL_CHARS",
+            "AGENTOS_COMPACTION_MIN_MESSAGES",
+        ] {
+            std::env::remove_var(key);
+            assert!(
+                cfg.warnings.iter().any(|warning| warning.contains(key)),
+                "{key} must be reported, got {:?}",
+                cfg.warnings
+            );
+        }
+        // And nothing was silently half-applied.
+        assert!(cfg.mcp.servers.is_empty());
+    }
+
+    #[test]
     fn context_switches_apply_from_the_environment_alone() {
+        let _guard = env_guard();
         const KEYS: [&str; 6] = [
             "AGENTOS_HISTORY_MESSAGES",
             "AGENTOS_HISTORY_CHARS",

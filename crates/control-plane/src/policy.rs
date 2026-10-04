@@ -11,6 +11,19 @@ pub struct PolicyEngine {
     cfg: PolicyConfig,
 }
 
+/// Does a policy list entry cover this capability name?
+///
+/// An entry is either exact, or a prefix ending in "*" - which exists because a single MCP server
+/// can publish thirty tools, and listing them by hand is how allow lists rot. The wildcard is only
+/// honoured at the end: "a*b" would invite the reader to guess, and guessing is what this gate is
+/// supposed to prevent.
+pub fn entry_matches(entry: &str, name: &str) -> bool {
+    match entry.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => entry == name,
+    }
+}
+
 impl PolicyEngine {
     pub fn new(cfg: PolicyConfig) -> Self {
         Self { cfg }
@@ -32,11 +45,11 @@ impl PolicyEngine {
     pub fn authorize_capability(&self, descriptor: &CapabilityDescriptor) -> Result<PolicyDecision> {
         let name = descriptor.name.as_str();
 
-        if self.cfg.denied_capabilities.iter().any(|d| d == name) {
+        if self.cfg.denied_capabilities.iter().any(|d| entry_matches(d, name)) {
             return Ok(PolicyDecision::deny(format!("{name} is on the deny list")));
         }
 
-        let explicitly_allowed = self.cfg.allowed_capabilities.iter().any(|a| a == name);
+        let explicitly_allowed = self.cfg.allowed_capabilities.iter().any(|a| entry_matches(a, name));
         if !self.cfg.allowed_capabilities.is_empty() && !explicitly_allowed {
             return Ok(PolicyDecision::deny(format!(
                 "{name} is not on the allow list for this node"
@@ -101,6 +114,35 @@ impl CapabilityPolicy for PolicyEngine {
             ));
         }
         Ok(decision)
+    }
+}
+
+#[cfg(test)]
+mod wildcard_tests {
+    use super::*;
+
+    #[test]
+    fn an_exact_entry_matches_only_itself() {
+        assert!(entry_matches("filesystem-read", "filesystem-read"));
+        assert!(!entry_matches("filesystem-read", "filesystem-read-all"));
+        assert!(!entry_matches("filesystem-read", "filesystem"));
+    }
+
+    #[test]
+    fn a_trailing_star_covers_a_family() {
+        // The reason this exists: one MCP server, many tools.
+        assert!(entry_matches("mcp.echo.*", "mcp.echo.echo"));
+        assert!(entry_matches("mcp.echo.*", "mcp.echo.anything-at-all"));
+        assert!(!entry_matches("mcp.echo.*", "mcp.other.echo"));
+        assert!(entry_matches("mcp.*", "mcp.echo.echo"));
+        assert!(entry_matches("*", "anything"));
+    }
+
+    #[test]
+    fn a_star_elsewhere_is_not_a_wildcard() {
+        // "a*b" is treated as a literal name: a matcher that guesses is worse than one that misses.
+        assert!(!entry_matches("mcp.*.echo", "mcp.echo.echo"));
+        assert!(entry_matches("mcp.*.echo", "mcp.*.echo"));
     }
 }
 

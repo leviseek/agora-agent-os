@@ -90,6 +90,9 @@ pub struct Kernel {
     pub transfer: Arc<dyn ActorTransfer>,
     /// Makes this node visible to others and lists the ones it can see.
     pub discovery: Arc<dyn NodeDiscovery>,
+    /// MCP servers this runtime started. Held so the child processes live exactly as long as the
+    /// runtime does: dropping a client kills its server.
+    pub mcp_clients: Vec<Arc<agentos_capability_runtime::mcp::StdioMcpClient>>,
     pub started_at: Timestamp,
     shutdown: tokio_util::sync::CancellationToken,
 }
@@ -129,6 +132,10 @@ impl Kernel {
         let policy = Arc::new(PolicyEngine::new(config.policy.clone()));
         let registry = Arc::new(CapabilityRegistry::new());
         register_builtins(&registry)?;
+        // External tool servers come last, and their failure is never fatal: a runtime that cannot
+        // start because an optional integration is missing would be a worse trade than one that
+        // starts without it and says so.
+        let mcp_clients = connect_mcp_servers(&config, &registry).await;
 
         let mesh = Arc::new(
             CapabilityMesh::new(
@@ -290,6 +297,7 @@ impl Kernel {
             wasm,
             transfer,
             discovery,
+            mcp_clients,
             started_at: now_ms(),
             shutdown: tokio_util::sync::CancellationToken::new(),
         });
@@ -566,6 +574,49 @@ fn advertised_http_url(config: &RuntimeConfig) -> String {
     } else {
         format!("http://{addr}")
     }
+}
+
+/// Start every enabled MCP server and register the tools it publishes.
+///
+/// A server that fails to start, or that answers the handshake with nonsense, is logged and
+/// skipped: the rest of the runtime keeps working.
+async fn connect_mcp_servers(
+    config: &RuntimeConfig,
+    registry: &Arc<CapabilityRegistry>,
+) -> Vec<Arc<agentos_capability_runtime::mcp::StdioMcpClient>> {
+    use agentos_capability_runtime::mcp::{connect_stdio, McpCapability};
+
+    let mut clients = Vec::new();
+    for server in config.mcp.servers.iter().filter(|server| server.enabled) {
+        match connect_stdio(server, config.policy.capability_timeout_ms.max(1_000)).await {
+            Ok(connection) => {
+                let mut registered = 0usize;
+                for tool in connection.tools {
+                    let capability = McpCapability::new(
+                        server.name.clone(),
+                        tool,
+                        connection.client.clone(),
+                    );
+                    match registry.register(Arc::new(capability)) {
+                        Ok(_) => registered += 1,
+                        Err(error) => {
+                            tracing::warn!(server = %server.name, error = %error, "cannot register mcp tool")
+                        }
+                    }
+                }
+                tracing::info!(
+                    server = %server.name,
+                    tools = registered,
+                    "mcp server connected"
+                );
+                clients.push(connection.client);
+            }
+            Err(error) => {
+                tracing::warn!(server = %server.name, error = %error, "mcp server unavailable; continuing without it");
+            }
+        }
+    }
+    clients
 }
 
 fn register_builtins(registry: &Arc<CapabilityRegistry>) -> Result<()> {

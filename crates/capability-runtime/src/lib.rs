@@ -10,6 +10,7 @@
 pub mod builtins;
 pub mod capability;
 pub mod file_tools;
+pub mod mcp;
 pub mod mesh;
 pub mod policy;
 pub mod registry;
@@ -19,6 +20,7 @@ pub mod workspace;
 
 pub use capability::{CallerContext, Capability, CapabilityContext, InvocationResult};
 pub use file_tools::{glob_match, FilesystemEditCapability, FilesystemSearchCapability};
+pub use mcp::{connect_stdio, McpCapability, McpConnection, McpServerConfig, McpTool, StdioMcpClient};
 pub use mesh::{CapabilityMesh, MeshConfig};
 pub use policy::{AllowAllPolicy, CapabilityPolicy, PolicyDecision, PolicyRequest};
 pub use registry::{CapabilityRegistry, DiscoveryQuery, RegisteredCapability};
