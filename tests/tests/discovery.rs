@@ -16,6 +16,12 @@ struct Fixture {
     discovery_dir: PathBuf,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 impl Fixture {
     fn new(label: &str) -> Self {
         let root = std::env::temp_dir().join(format!("agora-disc-{label}-{}", agentos_core::now_ms()));

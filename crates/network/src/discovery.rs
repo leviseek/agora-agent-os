@@ -399,10 +399,45 @@ mod tests {
 
     // --- local file discovery ---------------------------------------------------------------
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("agora-discovery-{label}-{}", now_ms()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch directory that removes itself when the test ends, so running the suite does not
+    /// slowly fill the temp directory with evidence of every past run.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("agora-discovery-{label}-{}", now_ms()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl From<&TempDir> for PathBuf {
+        fn from(dir: &TempDir) -> Self {
+            dir.0.clone()
+        }
+    }
+
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(label: &str) -> TempDir {
+        TempDir::new(label)
     }
 
     fn info(id: &str, name: &str, endpoint: &str) -> NodeInfo {
