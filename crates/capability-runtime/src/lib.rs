@@ -9,6 +9,7 @@
 
 pub mod builtins;
 pub mod capability;
+pub mod file_tools;
 pub mod mesh;
 pub mod policy;
 pub mod registry;
@@ -17,6 +18,7 @@ pub mod transport;
 pub mod workspace;
 
 pub use capability::{CallerContext, Capability, CapabilityContext, InvocationResult};
+pub use file_tools::{glob_match, FilesystemEditCapability, FilesystemSearchCapability};
 pub use mesh::{CapabilityMesh, MeshConfig};
 pub use policy::{AllowAllPolicy, CapabilityPolicy, PolicyDecision, PolicyRequest};
 pub use registry::{CapabilityRegistry, DiscoveryQuery, RegisteredCapability};

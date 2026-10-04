@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
-fn descriptor(
+pub(crate) fn descriptor(
     name: &str,
     version: &str,
     description: &str,

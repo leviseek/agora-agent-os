@@ -567,6 +567,12 @@ fn register_builtins(registry: &Arc<CapabilityRegistry>) -> Result<()> {
     registry.register(Arc::new(FilesystemReadCapability::default()))?;
     registry.register(Arc::new(FilesystemListCapability))?;
     registry.register(Arc::new(FilesystemWriteCapability::new(1024 * 1024)))?;
+    registry.register(Arc::new(agentos_capability_runtime::file_tools::FilesystemEditCapability::new(
+        1024 * 1024,
+    )))?;
+    registry.register(Arc::new(
+        agentos_capability_runtime::file_tools::FilesystemSearchCapability::default(),
+    ))?;
     registry.register(Arc::new(ClockCapability))?;
     Ok(())
 }

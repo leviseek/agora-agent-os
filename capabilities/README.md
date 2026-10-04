@@ -21,6 +21,12 @@ the timeout, retries retryable failures and emits `tool_call` / `tool_result` ev
 | `filesystem-list` | 1.0.0 | fs_read | workspace-jailed |
 | `filesystem-read` | 1.0.0 | fs_read | workspace-jailed, size-capped |
 | `filesystem-write` | 1.0.0 | fs_read + fs_write | denied unless the capability is on the policy allow list |
+| `filesystem-edit` | 1.0.0 | fs_read + fs_write | patch an exact snippet; refuses an ambiguous match unless `replace_all`; same policy grant as write |
+| `filesystem-search` | 1.0.0 | fs_read | glob (`*`, `**`, `?`) plus a case-insensitive substring over file contents; bounded by results, files and file size; skips binary and hidden directories |
+
+Search matches substrings rather than regular expressions: a regex engine is a large dependency to
+carry for the three wildcards a file search actually needs, and the glob matcher is hand written and
+unit tested instead. A caller that needs regexes can still add a capability that has one.
 
 Every descriptor carries `name`, `version`, `input_schema`, `output_schema`, `permission`,
 `provider`, `timeout_ms` and `idempotent`. Output is validated against the output schema
