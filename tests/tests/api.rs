@@ -370,6 +370,58 @@ async fn next_json_opt(
     }
 }
 
+/// Posting a goal without waiting is fire-and-forget: the POST returns as soon as the goal is
+/// queued, and the answer is read back from the transcript afterwards. The run completion event
+/// carries counters, not text, so without this read path a client that did not wait could never
+/// show a reply.
+#[tokio::test]
+async fn a_goal_posted_without_waiting_is_readable_from_the_transcript() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "async" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+
+    let started = std::time::Instant::now();
+    let (status, accepted) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "what is 9*9?", "wait": false }))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(accepted["accepted"], json!(true));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the POST must return as soon as the goal is queued, took {:?}",
+        started.elapsed()
+    );
+
+    // The run finishes on its own; poll the transcript the way a client would.
+    let mut answer = None;
+    for _ in 0..40 {
+        let (status, body) = h.get(&format!("/v1/sessions/{id}/transcript")).await;
+        assert_eq!(status, 200);
+        assert!(body["total"].as_u64().unwrap() >= 1, "the user goal is in the transcript");
+        let assistant = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == json!("assistant"));
+        if let Some(message) = assistant {
+            answer = message["parts"][0]["text"].as_str().map(str::to_string);
+            if answer.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let answer = answer.expect("the assistant reply lands in the transcript");
+    assert!(!answer.is_empty());
+
+    // And the same text is available the other way the console reads it: the run summary.
+    let (_, detail) = h.get(&format!("/v1/sessions/{id}")).await;
+    let run = &detail["runtime"]["runs"][0];
+    assert_eq!(run["final_answer"], json!(answer));
+
+    h.shutdown.cancel();
+}
+
 /// Discovery must be visible through the gateway: a peer that starts up in another checkout
 /// shows up in /v1/nodes and in the event stream, without restarting the runtime that sees it.
 #[tokio::test]

@@ -1,6 +1,6 @@
 /** View 3 - Chat: the session transcript (runs + live events) and the goal box. */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ApiErrorBanner, Badge, EmptyState, JsonBlock, Panel } from '../components';
 import { formatTime } from '../format';
@@ -69,6 +69,19 @@ export function ChatView() {
     () => (detail === null || detail.runtime === null ? [] : detail.runtime.runs),
     [detail],
   );
+
+  // The transcript is its own scroll area ABOVE the send form, so a goal posted without waiting
+  // finished out of sight: the reply was there, the user was looking at the input box. Follow the
+  // newest turn instead, and keep following while a run is still going.
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const lastRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
+  const lastRunState = lastRun === undefined ? '' : String(lastRun.state);
+  const lastRunAnswer = lastRun === undefined ? null : lastRun.final_answer;
+  useEffect(() => {
+    const box = transcriptRef.current;
+    if (box === null) return;
+    box.scrollTop = box.scrollHeight;
+  }, [runs.length, lastRunState, lastRunAnswer, session.data]);
 
   const byAgent = useMemo(() => {
     const grouped = new Map<string, EventRecord[]>();
@@ -154,7 +167,7 @@ export function ChatView() {
         <ApiErrorBanner error={detailError} scope="GET /v1/sessions/{id}" onRetry={() => void refreshDetail()} />
         <ApiErrorBanner error={session.error} scope="GET /v1/sessions/{id}/events" onRetry={session.reload} />
 
-        <div className="transcript">
+        <div className="transcript" ref={transcriptRef}>
           {runs.length === 0 && sessionOnly.length === 0 ? (
             <EmptyState title={t('chat.empty')} hint={t('chat.emptyHint')} />
           ) : null}

@@ -301,7 +301,7 @@ const en = {
   'chat.sessionEvents': '{n} session-level event(s)',
   'chat.sendAndWait': 'Send and wait',
   'chat.waitLabel': 'wait for completion (blocking POST; off = stream over the socket)',
-  'chat.accepted': 'Goal accepted - streaming the run below.',
+  'chat.accepted': 'Goal accepted. It runs in the background - the reply appears in the transcript above.',
   'chat.resultFinished': 'Run finished: state={state}, steps={steps}',
   'chat.resultFinishedError': 'Run finished: state={state}, steps={steps}, error={error}',
 
@@ -761,7 +761,7 @@ const zh: Partial<Record<MessageKey, string>> = {
   'chat.sessionEvents': '{n} 条会话级事件',
   'chat.sendAndWait': '发送并等待',
   'chat.waitLabel': '等待执行完成（阻塞式 POST；关闭则通过事件通道流式返回）',
-  'chat.accepted': '目标已接受——运行过程将在下方流式显示。',
+  'chat.accepted': '目标已接受，正在后台运行——回复会出现在上方对话区。',
   'chat.resultFinished': '运行结束：状态={state}，步骤={steps}',
   'chat.resultFinishedError': '运行结束：状态={state}，步骤={steps}，错误={error}',
 

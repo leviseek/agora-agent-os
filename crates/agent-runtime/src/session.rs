@@ -43,6 +43,8 @@ pub enum SessionMessage {
     Status,
     /// Inspect the most recent run only.
     LastRun,
+    /// Read the conversation: user goals and assistant replies, oldest first.
+    Transcript { limit: Option<usize> },
 }
 
 /// Everything the session actor is allowed to use. All of it is an interface.
@@ -411,6 +413,20 @@ impl Actor for SessionActor {
                 .last_run()
                 .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null)),
+            SessionMessage::Transcript { limit } => {
+                // Newest-last, so a client can append without re-sorting. A limit keeps a long
+                // conversation from being shipped whole on every poll.
+                let all = &self.state.transcript;
+                let start = match limit {
+                    Some(limit) if limit > 0 && all.len() > limit => all.len() - limit,
+                    _ => 0,
+                };
+                Ok(serde_json::json!({
+                    "messages": &all[start..],
+                    "total": all.len(),
+                    "truncated": start > 0,
+                }))
+            }
         }
     }
 }

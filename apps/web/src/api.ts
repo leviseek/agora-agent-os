@@ -331,6 +331,23 @@ export interface SessionRuntime {
   graphs: GraphSummary[];
 }
 
+/** One turn of the conversation, as stored by the session actor. */
+export interface TranscriptEntry {
+  id: string;
+  session_id: string;
+  role: string;
+  parts: { kind?: string; text?: string }[];
+  created_at: number;
+  correlation_id?: string | null;
+  agent_id?: string | null;
+}
+
+export interface TranscriptResponse {
+  messages: TranscriptEntry[];
+  total: number;
+  truncated: boolean;
+}
+
 export interface SessionDetail {
   session: SessionRecord;
   runtime: SessionRuntime | null;
@@ -752,6 +769,13 @@ export class AgentOsClient {
     return this.request<CancelResponse>('/v1/sessions/' + encodeURIComponent(id) + '/cancel', {
       method: 'POST',
       json: {},
+    });
+  }
+
+  /** The conversation so far: how a caller that did not wait for a run picks up its answer. */
+  sessionTranscript(id: string, limit = 200): Promise<TranscriptResponse> {
+    return this.request<TranscriptResponse>('/v1/sessions/' + id + '/transcript?limit=' + limit, {
+      method: 'GET',
     });
   }
 

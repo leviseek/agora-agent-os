@@ -174,6 +174,20 @@ pub struct LimitQuery {
     pub kinds: Option<String>,
 }
 
+/// The conversation: user goals and assistant replies, oldest first.
+///
+/// Posting a goal with "wait": false returns as soon as the goal is queued, so this is how a
+/// client picks up the answer afterwards - the run completion event carries counters, not text.
+pub async fn session_transcript(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let transcript = state.kernel.sessions.transcript(&session, q.limit).await?;
+    Ok(Json(transcript))
+}
+
 pub async fn session_events(
     State(state): State<ApiState>,
     Path(id): Path<String>,

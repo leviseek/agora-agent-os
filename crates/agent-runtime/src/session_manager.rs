@@ -258,6 +258,14 @@ impl SessionManager {
         handle.send(SessionMessage::LastRun).await
     }
 
+    /// The conversation so far. This is how a caller that posted a goal without waiting picks up
+    /// the answer: the reply is appended to the transcript when the run finishes, and the run
+    /// completion event carries only a summary.
+    pub async fn transcript(&self, session: &SessionId, limit: Option<usize>) -> Result<serde_json::Value> {
+        let handle = self.actor_for(session).await?;
+        handle.send(SessionMessage::Transcript { limit }).await
+    }
+
     pub async fn list(&self) -> Result<Vec<SessionSummary>> {
         let mut records = self.session_collection().list(self.store.as_ref(), 10_000).await?;
         records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
