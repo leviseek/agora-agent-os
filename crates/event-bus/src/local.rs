@@ -26,6 +26,14 @@ pub struct LocalEventBus {
     last_seq: AtomicU64,
     node_id: String,
     published: AtomicU64,
+    /// Serialises sequence assignment with the append that makes it real.
+    ///
+    /// Assigning a number and then appending are two steps, and two publishers that interleave
+    /// between them both believe they own the same number: the log then holds two events with the
+    /// same seq while the in-memory copies hold corrected ones. An event log whose ordering
+    /// metadata can collide cannot be resumed reliably, and publishing is already I/O-bound, so a
+    /// lock here costs nothing worth measuring.
+    publish_lock: tokio::sync::Mutex<()>,
 }
 
 impl LocalEventBus {
@@ -41,6 +49,7 @@ impl LocalEventBus {
             last_seq: AtomicU64::new(last),
             node_id: node_id.into(),
             published: AtomicU64::new(0),
+            publish_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -68,6 +77,7 @@ impl LocalEventBus {
 #[async_trait]
 impl EventBus for LocalEventBus {
     async fn publish(&self, event: NewEvent) -> Result<EventRecord> {
+        let _guard = self.publish_lock.lock().await;
         let seq = self.last_seq.load(Ordering::SeqCst) + 1;
         let record = EventRecord {
             id: EventId::new(),
@@ -88,13 +98,23 @@ impl EventBus for LocalEventBus {
             artifact_id: event.artifact_id,
         };
 
+        // The record is serialised with the sequence this publisher holds under the lock, so the
+        // copy on disk and the copy subscribers see carry the same number. The previous version
+        // wrote a pre-append guess to disk and corrected only the in-memory copy, which is how a
+        // log ended up with two events sharing a seq.
         let value = serde_json::to_value(&record)
             .map_err(|e| RuntimeError::internal(format!("serialize event: {e}")))?;
         let stored_seq = self.store.append_event(collections::LOG_EVENTS, value).await?;
         if stored_seq != seq {
-            // Another writer advanced the log (multi-process or warm restart race): trust storage.
-            self.last_seq.store(stored_seq, Ordering::SeqCst);
+            // Only a second writer on the same log can cause this, which the file store does not
+            // support anyway. Say so instead of silently renumbering.
+            tracing::warn!(
+                expected = seq,
+                stored = stored_seq,
+                "another writer advanced the event log; sequencing is not guaranteed"
+            );
         }
+        self.last_seq.store(stored_seq, Ordering::SeqCst);
         let mut record = record;
         record.seq = stored_seq;
 
@@ -221,6 +241,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(limited.len(), 2);
+    }
+
+
+    #[tokio::test]
+    async fn concurrent_publishes_get_distinct_sequences_on_disk_too() {
+        // Ordering metadata that can collide cannot be resumed reliably: a caller resuming from
+        // seq N would skip whichever event shares it. This used to happen because the sequence
+        // was guessed before the append and only the in-memory copy was corrected.
+        let b = Arc::new(bus().await);
+        let mut tasks = Vec::new();
+        for index in 0..50 {
+            let bus = b.clone();
+            tasks.push(tokio::spawn(async move {
+                bus.publish(NewEvent::new(EventKind::WorkerHeartbeat, format!("n{index}")))
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut seqs = Vec::new();
+        for task in tasks {
+            seqs.push(task.await.unwrap().seq);
+        }
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 50, "every publisher got its own sequence: {seqs:?}");
+
+        // And what was written to the log carries the same numbers as what publishers were told.
+        let stored = b
+            .replay(EventFilter { limit: 100, ..Default::default() })
+            .await
+            .unwrap();
+        let mut stored_seqs: Vec<u64> = stored.iter().map(|event| event.seq).collect();
+        stored_seqs.sort_unstable();
+        stored_seqs.dedup();
+        assert_eq!(
+            stored_seqs.len(),
+            50,
+            "the durable log must not contain duplicate sequences either"
+        );
     }
 
     #[tokio::test]
