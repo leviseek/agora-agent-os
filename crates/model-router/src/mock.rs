@@ -5,7 +5,7 @@
 //! tool calls, so the agent loop exercises the real code path.
 
 use crate::provider::{
-    ModelProvider, ModelRequest, ModelResponse, ModelTask, ProviderHealth, ToolCall, Usage,
+    ModelProvider, ModelRequest, ModelResponse, ModelTask, ProviderHealth, ToolCall, Usage, Vision,
 };
 use agentos_core::config::ProviderKind;
 use agentos_core::error::Result;
@@ -184,6 +184,13 @@ impl ModelProvider for MockProvider {
         &self.model
     }
 
+    /// The placeholder has no eyes, and says so. Pretending otherwise would produce the exact
+    /// failure this whole capability check exists to prevent: a confident description of a picture
+    /// nobody looked at.
+    fn vision(&self) -> Vision {
+        Vision::No
+    }
+
     /// The built-in provider streams too, so the streaming path can be exercised end to end
     /// without a network or a key. The chunking is by word and paced only by the caller.
     async fn complete_streaming(
@@ -233,8 +240,28 @@ impl ModelProvider for MockProvider {
             });
         }
 
-        // 2. A tool result is already in the transcript: produce the final answer.
-        if let Some(tool_msg) = request.messages.iter().rev().find(|m| m.role == "tool") {
+        // 2. Results are already in the transcript: produce the final answer.
+        //
+        // Two shapes are recognised on purpose. The runtime reports capability results to the model
+        // as a system message, because it never asks for tool_calls and a "tool" message without a
+        // preceding assistant tool_calls block is rejected by real providers (DeepSeek: "Messages
+        // with role 'tool' must be a response to a preceding message with 'tool_calls'"). The tool
+        // shape is still honoured for a run whose history was assembled by an older build.
+        let observation = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "tool")
+            .map(|m| m.content.trim().to_string())
+            .or_else(|| {
+                request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "system" && m.content.contains("Their results follow"))
+                    .map(|m| m.content.trim().to_string())
+            });
+        if let Some(observation) = observation {
             let goal = request
                 .messages
                 .iter()
@@ -243,8 +270,7 @@ impl ModelProvider for MockProvider {
                 .map(|m| m.content.clone())
                 .unwrap_or_else(|| "the request".into());
             let answer = format!(
-                "Goal: {goal}\nObservation from capability: {}\nAnswer: derived from the observation above.",
-                tool_msg.content.trim()
+                "Goal: {goal}\nObservation from capability: {observation}\nAnswer: derived from the observation above."
             );
             return Ok(ModelResponse {
                 content: answer,

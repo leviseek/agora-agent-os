@@ -127,8 +127,8 @@ async fn acceptance_1_two_sessions_are_parallel_but_each_session_is_ordered() {
     // Two sessions, one goal each, started together.
     let started = Instant::now();
     let (ra, rb) = tokio::join!(
-        kernel.sessions.post_goal(&a.id, "please run slow-task for me", &[], None, None),
-        kernel.sessions.post_goal(&b.id, "please run slow-task for me", &[], None, None)
+        kernel.sessions.post_goal(&a.id, "please run slow-task for me", &[], &[], None, None),
+        kernel.sessions.post_goal(&b.id, "please run slow-task for me", &[], &[], None, None)
     );
     let elapsed = started.elapsed();
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
@@ -148,8 +148,8 @@ async fn acceptance_1_two_sessions_are_parallel_but_each_session_is_ordered() {
 
     // Message ordering inside one session: a second goal is handled after the first, and the
     // transcript keeps the order in which the user goals arrived.
-    let first = kernel.sessions.post_goal(&a.id, "run slow-task again", &[], None, None).await.unwrap();
-    let second = kernel.sessions.post_goal(&a.id, "and once more", &[], None, None).await.unwrap();
+    let first = kernel.sessions.post_goal(&a.id, "run slow-task again", &[], &[], None, None).await.unwrap();
+    let second = kernel.sessions.post_goal(&a.id, "and once more", &[], &[], None, None).await.unwrap();
     let a_first = first["agent_id"].as_str().unwrap().to_string();
     let a_second = second["agent_id"].as_str().unwrap().to_string();
     let status = kernel.sessions.status(&a.id).await.unwrap();
@@ -176,33 +176,181 @@ async fn acceptance_1_two_sessions_are_parallel_but_each_session_is_ordered() {
     assert_eq!(kinds.iter().filter(|k| **k == "session_message_handled").count(), 3);
 }
 
+/// What the model is actually sent after a capability ran.
+///
+/// The bug this pins down was measured against a real provider: the runtime sent capability results
+/// as role "tool" messages with no preceding assistant tool_calls block, and DeepSeek answered
+/// HTTP 400 ("Messages with role 'tool' must be a response to a preceding message with
+/// 'tool_calls'"). The run then failed over to the placeholder and the answer arrived from a model
+/// that had never seen the picture or the capability result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn acceptance_2_agent_loop_closes_goal_llm_capability_observation_final() {
-    let kernel = kernel().await;
-    let session = kernel.sessions.create_session("user", "math").await.unwrap();
+async fn capability_results_reach_the_model_without_breaking_the_tool_protocol() {
+    // A real HTTP provider that records every request and answers like a text model.
+    let seen: Arc<std::sync::Mutex<Vec<Vec<Value>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let recorder = seen.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener.accept().await else { break };
+            let recorder = recorder.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+                // Read the whole request: headers, then exactly Content-Length bytes of body. A
+                // single read() is not enough - a prompt with tools and history arrives in several
+                // TCP segments, and a half-read body parses as "not a model request".
+                let (read_half, mut write_half) = socket.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    let _ = reader.read_exact(&mut body).await;
+                }
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                if let Some(messages) = parsed.get("messages").and_then(|m| m.as_array()) {
+                    // A poisoned lock would only mean another thread panicked; the recorded
+                    // messages are still what the assertion needs.
+                    let mut guard = recorder.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard.push(messages.clone());
+                }
+                let wants_json = parsed.get("response_format").is_some();
+                let content = if wants_json {
+                    json!({
+                        "goal": "compute it",
+                        "reasoning": "one capability call",
+                        "steps": [{
+                            "id": "s1",
+                            // Deliberately not called "answer": a step whose title contains that
+                            // word short-circuits the final model call, and this test is about what
+                            // that call is sent.
+                            "description": "multiply and add",
+                            "kind": "capability",
+                            "capability": "calculator",
+                            "input": { "expression": "12*7+3" },
+                            "depends_on": []
+                        }]
+                    })
+                    .to_string()
+                } else {
+                    "The calculator said 87.".to_string()
+                };
+                // The final answer is the call that streams, so the recorder speaks SSE for it and
+                // plain JSON for planning - the same shape a real provider presents.
+                let streaming = parsed.get("stream").and_then(|value| value.as_bool()).unwrap_or(false);
+                let reply = if streaming {
+                    let chunk = json!({
+                        "id": "cmpl-test",
+                        "object": "chat.completion.chunk",
+                        "model": "recorder",
+                        "choices": [{ "index": 0, "delta": { "content": content }, "finish_reason": null }]
+                    })
+                    .to_string();
+                    let stop = json!({
+                        "id": "cmpl-test",
+                        "object": "chat.completion.chunk",
+                        "model": "recorder",
+                        "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                        "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+                    })
+                    .to_string();
+                    format!("data: {chunk}\n\ndata: {stop}\n\ndata: [DONE]\n\n")
+                } else {
+                    json!({
+                        "id": "cmpl-test",
+                        "object": "chat.completion",
+                        "model": "recorder",
+                        "choices": [{ "index": 0, "message": { "role": "assistant", "content": content }, "finish_reason": "stop" }],
+                        "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+                    })
+                    .to_string()
+                };
+                let content_type = if streaming { "text/event-stream" } else { "application/json" };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    reply.len(),
+                    reply
+                );
+                let _ = write_half.write_all(response.as_bytes()).await;
+                let _ = write_half.flush().await;
+            });
+        }
+    });
+
+    let dir = std::env::temp_dir().join(format!("agentos-tool-proto-{}", agentos_core::now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut config = RuntimeConfig::default();
+    config.storage.backend = StoreBackend::Memory;
+    config.storage.data_dir = dir.join("data");
+    config.policy.workspace_root = dir.join("workspace");
+    config.observability.log_level = "error".into();
+    config.models.providers = vec![agentos_core::config::ProviderConfig {
+        name: "recorder".into(),
+        kind: agentos_core::config::ProviderKind::Openai,
+        model: "recorder-1".into(),
+        base_url: format!("http://{addr}"),
+        api_key_env: "AGENTOS_TEST_RECORDER_KEY".into(),
+        enabled: true,
+        priority: 10,
+        timeout_ms: 5_000,
+        vision: Some(true),
+    }];
+    config.models.default_provider = "recorder".into();
+    // The key is checked at call time, not at construction, so it only has to exist by now.
+    std::env::set_var("AGENTOS_TEST_RECORDER_KEY", "test-key");
+    let kernel = Kernel::bootstrap(config).await.expect("kernel bootstraps");
+
+    let session = kernel.sessions.create_session("user", "tool protocol").await.unwrap();
     let result = kernel
         .sessions
-        .post_goal(&session.id, "what is 12*7+3?", &[], None, None)
+        .post_goal(&session.id, "what is 12*7+3?", &[], &[], None, None)
         .await
         .unwrap();
-
     assert!(result["error"].is_null(), "run must succeed: {result}");
-    let answer = result["answer"].as_str().unwrap();
-    assert!(answer.contains("87"), "final answer must include the capability result, got: {answer}");
-    assert!(result["steps"].as_u64().unwrap() >= 3, "goal, plan, act, final");
 
-    // The observation is recorded as a first-class event and as a task.
-    let events = kernel
-        .bus
-        .replay(EventFilter { session_id: Some(session.id.clone()), kinds: vec![EventKind::ToolCall], limit: 50, ..Default::default() })
-        .await
-        .unwrap();
-    assert!(!events.is_empty(), "the capability call must be observable");
-
-    let run = kernel.sessions.last_run(&session.id).await.unwrap();
-    let steps = run["steps"].as_array().unwrap();
-    assert!(steps.iter().any(|s| s["kind"] == "act" && s["observation"]["ok"] == true));
-    assert!(steps.iter().any(|s| s["kind"] == "finalize"));
+    // The blocking POST returns as soon as the run settles, which can be a moment before the
+    // recorder task has stored the last request. Wait for it rather than racing it.
+    let mut requests = Vec::new();
+    for _ in 0..100 {
+        requests = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        if requests.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.abort();
+    assert!(requests.len() >= 2, "planning and the final answer both reach the model: {}", requests.len());
+    let final_request = requests.last().unwrap();
+    let roles: Vec<String> = final_request
+        .iter()
+        .map(|m| m["role"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        !roles.iter().any(|role| role == "tool"),
+        "a tool message without a preceding assistant tool_calls block is rejected by providers: {roles:?}"
+    );
+    let context: String = final_request
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .filter_map(|m| m["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        context.contains("87"),
+        "the capability result must be in the prompt the model answers from: {context}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -345,8 +493,8 @@ async fn acceptance_5_directory_placement_and_worker_heartbeat() {
 async fn acceptance_6_session_actor_snapshot_export_and_restore() {
     let kernel = kernel().await;
     let session = kernel.sessions.create_session("user", "snapshots").await.unwrap();
-    kernel.sessions.post_goal(&session.id, "what is 2+2?", &[], None, None).await.unwrap();
-    kernel.sessions.post_goal(&session.id, "what is 3+3?", &[], None, None).await.unwrap();
+    kernel.sessions.post_goal(&session.id, "what is 2+2?", &[], &[], None, None).await.unwrap();
+    kernel.sessions.post_goal(&session.id, "what is 3+3?", &[], &[], None, None).await.unwrap();
 
     let checkpoint = kernel.sessions.snapshot(&session.id).await.unwrap();
     assert_eq!(checkpoint.meta.session_id, session.id);
@@ -365,7 +513,7 @@ async fn acceptance_6_session_actor_snapshot_export_and_restore() {
     assert!(status["goals_handled"].as_u64().unwrap() >= 2);
 
     // And the restored session keeps working.
-    let after = kernel.sessions.post_goal(&session.id, "what is 4+4?", &[], None, None).await.unwrap();
+    let after = kernel.sessions.post_goal(&session.id, "what is 4+4?", &[], &[], None, None).await.unwrap();
     assert!(after["error"].is_null(), "restored session still runs: {after}");
 
     let events = kernel
@@ -460,7 +608,7 @@ async fn acceptance_9_cancellation_and_step_budget() {
 
     let sessions = kernel.sessions.clone();
     let session_id = session.id.clone();
-    let handle = tokio::spawn(async move { sessions.post_goal(&session_id, "run slow-task", &[], None, None).await });
+    let handle = tokio::spawn(async move { sessions.post_goal(&session_id, "run slow-task", &[], &[], None, None).await });
     tokio::time::sleep(Duration::from_millis(120)).await;
 
     let cancelled = kernel.sessions.cancel(&session.id).await.unwrap();

@@ -654,17 +654,25 @@ impl AgentLoop {
         push_context(&mut messages, &context);
         messages.push(ChatMessage::user(goal.to_string()).with_images(context.images.to_vec()));
         if !observations.is_empty() {
-            messages.push(ChatMessage::assistant(format!(
-                "I ran {} step(s): {}",
-                observations.len(),
-                observations.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>().join("; ")
-            )));
+            // What the capabilities returned belongs to the model as context, not as a tool
+            // exchange: this loop never asks a model for tool_calls, so there is no preceding
+            // assistant tool_calls block for a tool message to answer. Sending role "tool" anyway
+            // was a real bug - DeepSeek rejects it ("Messages with role 'tool' must be a response to
+            // a preceding message with 'tool_calls'"), the router fails over, and the answer arrives
+            // from the placeholder with the whole picture in an apology. Instructions and results
+            // as one system message is a shape every provider accepts.
+            let mut lines = vec![format!(
+                "The runtime ran {} step(s) for the goal above. Their results follow; use them to \
+                 answer, and do not invent results for steps that are not listed.",
+                observations.len()
+            )];
             for (title, value) in observations {
-                messages.push(ChatMessage::tool(
-                    serde_json::json!({ "step": title, "output": value }).to_string(),
-                    title.clone(),
+                lines.push(format!(
+                    "- {title}: {}",
+                    serde_json::json!({ "output": value })
                 ));
             }
+            messages.push(ChatMessage::system(lines.join("\n")));
         }
         // The final answer is the one a user watches arrive, so it is the call that streams - and
         // it is prose. Asking for JSON mode here was a real bug: DeepSeek rejects json_object
