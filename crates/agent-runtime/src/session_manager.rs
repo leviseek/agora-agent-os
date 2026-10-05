@@ -43,6 +43,10 @@ pub struct SessionSummary {
     pub created_at: u64,
     pub updated_at: u64,
     pub message_count: u64,
+    /// Who owns this conversation, so a list can say whose it is - and so another node's operator can
+    /// see what they would be asking for access to.
+    #[serde(default)]
+    pub owner: Option<agentos_core::model::PrincipalRef>,
 }
 
 impl From<&SessionRecord> for SessionSummary {
@@ -56,6 +60,7 @@ impl From<&SessionRecord> for SessionSummary {
             created_at: r.created_at,
             updated_at: r.updated_at,
             message_count: r.message_count,
+            owner: r.owner.clone(),
         }
     }
 }
@@ -135,8 +140,33 @@ impl SessionManager {
     }
 
     /// Create a session, place it on a worker and spawn its actor.
+    ///
+    /// The owner is the principal behind the request, not just a string in the body: `user_id` is
+    /// who the session is *for*, and the owner is who decides about it afterwards. They default to
+    /// the same person, and an admin creating for someone else can say so.
     pub async fn create_session(&self, user_id: &str, title: &str) -> Result<SessionRecord> {
+        self.create_session_for(user_id, title, None).await
+    }
+
+    /// Create a session owned by an explicit principal.
+    pub async fn create_session_for(
+        &self,
+        user_id: &str,
+        title: &str,
+        owner: Option<agentos_core::model::PrincipalRef>,
+    ) -> Result<SessionRecord> {
         let mut record = SessionRecord::new(user_id, title);
+        if let Some(owner) = owner {
+            record.owner = Some(owner);
+        }
+        // Name this node: a record that says only "alice" is a different principal from "alice on
+        // laptop", and the record should say which one it means.
+        if let Some(current) = record.owner.take() {
+            record.owner = Some(agentos_core::model::PrincipalRef::new(
+                current.user_id,
+                current.node_id.or_else(|| Some(self.node_id.as_str().to_string())),
+            ));
+        }
         self.session_collection().save(self.store.as_ref(), record.id.as_str(), &record).await?;
 
         let decision = self
@@ -188,6 +218,173 @@ impl SessionManager {
         Ok(record)
     }
 
+
+    /// Open a session again: the other half of close.
+    ///
+    /// Closing stops the actor and freezes the content; it does not delete anything, and the
+    /// record, the runs and the transcript all survive it. Opening therefore does three things and
+    /// no more: move the state back to active, take a lease on the conversation by bringing an
+    /// actor back, and say so on the bus.
+    ///
+    /// The conversation continues where it stopped. The exact transcript comes back when a
+    /// snapshot survived; otherwise it is rebuilt from the runs, turn by turn - the same path a
+    /// restart takes, and the reason it is worth having one path instead of two.
+    pub async fn open(&self, session: &SessionId) -> Result<SessionRecord> {
+        let Some(mut record) = self.get(session).await? else {
+            return Err(RuntimeError::not_found(format!("session {session} does not exist"))
+                .with_detail("session_id", session.as_str()));
+        };
+        if !record.state.is_terminal() {
+            // Already open. Opening twice is not an error: it is a client that is not sure.
+            if self.actors.lookup_session(session).is_none() {
+                self.spawn_from_history(session, &record).await?;
+            }
+            return Ok(record);
+        }
+        if record.state != SessionState::Closed {
+            return Err(RuntimeError::conflict(format!(
+                "session {session} is {}: only a closed session can be opened again",
+                record.state.as_str()
+            ))
+            .with_detail("state", record.state.as_str()));
+        }
+        record.state = record
+            .state
+            .transition(SessionState::Active)
+            .map_err(|error| RuntimeError::conflict(format!("cannot open {session}: {error}")))?;
+        record.closed_at = None;
+        record.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+
+        self.spawn_from_history(session, &record).await?;
+
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionOpened, "session opened")
+                    .session(session.clone())
+                    .actor(record.actor_id.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({ "owner": record.owner_label() })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    /// Bring an actor back for a session that has none, from what the store kept.
+    async fn spawn_from_history(&self, session: &SessionId, record: &SessionRecord) -> Result<()> {
+        let Some(handle) = self.actors.lookup_session(session) else {
+            let Some(state) = self.rebuild_state(session).await? else {
+                return Err(RuntimeError::not_found(format!(
+                    "session {session} has a record but no history to rebuild from"
+                ))
+                .with_detail("session_id", session.as_str()));
+            };
+            let checkpoint = self
+                .synthetic_checkpoint(&record.actor_id, session, &state)
+                .await?;
+            self.restore(checkpoint).await?;
+            return Ok(());
+        };
+        // Registered but not running here (a restart, or another node's actor): recover it.
+        let entry = self.directory.lookup(session).await?;
+        match entry {
+            Some(entry) => {
+                self.actors.recover(&entry.actor_id, self.factory.clone()).await?;
+                Ok(())
+            }
+            None => {
+                let Some(state) = self.rebuild_state(session).await? else {
+                    return Err(RuntimeError::not_found(format!(
+                        "session {session} has a record but no history to rebuild from"
+                    )));
+                };
+                let checkpoint = self
+                    .synthetic_checkpoint(&handle.id, session, &state)
+                    .await?;
+                self.restore(checkpoint).await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Hand out a role on a session. Only the owner (or an admin) may do this, and the caller has
+    /// already been checked by the gateway: this is the write.
+    pub async fn grant(
+        &self,
+        session: &SessionId,
+        grant: agentos_core::model::SessionGrant,
+        granted_by: &agentos_core::model::Principal,
+    ) -> Result<SessionRecord> {
+        let Some(mut record) = self.get(session).await? else {
+            return Err(RuntimeError::not_found(format!("session {session} does not exist")));
+        };
+        // A grant for the owner's own id is a no-op that would also be confusing to read back.
+        if let Some(owner) = &record.owner {
+            if owner.matches(&grant.as_ref()) && grant.role != agentos_core::model::SessionRole::Owner {
+                return Err(RuntimeError::invalid_input(format!(
+                    "{owner} owns this session: they hold every right already"
+                )));
+            }
+        }
+        let mut grant = grant;
+        grant.granted_by = Some(granted_by.as_ref().to_string());
+        grant.granted_at = Some(now_ms());
+        record
+            .grants
+            .retain(|existing| !existing.as_ref().matches(&grant.as_ref()));
+        record.grants.push(grant.clone());
+        record.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionAccessGranted, "session access granted")
+                    .session(session.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "user_id": grant.user_id,
+                        "node_id": grant.node_id,
+                        "role": grant.role.as_str(),
+                        "granted_by": grant.granted_by,
+                    })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    /// Take a role away.
+    pub async fn revoke(
+        &self,
+        session: &SessionId,
+        who: &agentos_core::model::PrincipalRef,
+    ) -> Result<SessionRecord> {
+        let Some(mut record) = self.get(session).await? else {
+            return Err(RuntimeError::not_found(format!("session {session} does not exist")));
+        };
+        let before = record.grants.len();
+        record.grants.retain(|grant| !grant.as_ref().matches(who));
+        if record.grants.len() == before {
+            return Err(RuntimeError::not_found(format!(
+                "{who} holds no role on session {session}"
+            )));
+        }
+        record.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionAccessRevoked, "session access revoked")
+                    .session(session.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({ "user_id": who.user_id, "node_id": who.node_id })),
+            )
+            .await?;
+        Ok(record)
+    }
     /// Hot path: resolve the actor for a session, consulting the control plane only on a miss.
     pub async fn actor_for(&self, session: &SessionId) -> Result<ActorHandle> {
         if let Some(handle) = self.actors.lookup_session(session) {
@@ -289,6 +486,7 @@ fn durable_status_json(session: &SessionId, state: &SessionActorState) -> serde_
                 "error": run.error,
                 "degraded": run.degraded,
                 "attachments": run.attachments,
+                "author": run.author,
                 "usage": run.usage,
             }))
             .collect::<Vec<_>>(),
@@ -375,6 +573,9 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
             );
             goal.created_at = run.created_at;
             goal.agent_id = Some(run.id.as_str().to_string());
+            // Whose turn it was, rebuilt from the run: a shared conversation that loses its authors
+            // when it is restored reads as if one person said everything.
+            goal.author = run.author.clone();
             // The files this goal carried, rebuilt from the run record: without them a restored
             // conversation shows the question and the answer but not what was attached to it.
             for attachment in &run.attachments {
@@ -420,6 +621,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
         attachments: &[String],
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+        author: Option<agentos_core::model::PrincipalRef>,
     ) -> Result<serde_json::Value> {
         let handle = self.actor_for(session).await?;
         let correlation = Correlation::new().with_session(session).with_actor(&handle.id);
@@ -433,6 +635,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
                 attachments: attachments.to_vec(),
                 model,
                 reasoning_effort,
+                author,
             })
             .await
     }
@@ -446,6 +649,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
         attachments: &[String],
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+        author: Option<agentos_core::model::PrincipalRef>,
     ) -> Result<()> {
         let handle = self.actor_for(session).await?;
         handle
@@ -456,6 +660,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
                 attachments: attachments.to_vec(),
                 model,
                 reasoning_effort,
+                author,
             })
             .await
     }

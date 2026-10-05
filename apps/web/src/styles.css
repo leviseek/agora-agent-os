@@ -1312,6 +1312,12 @@ textarea:focus {
   color: var(--danger, #c0392b);
 }
 
+.bubble-author {
+  margin-left: 6px;
+  font-weight: 400;
+  opacity: 0.75;
+}
+
 /* ------------------------------------------------------------------ turn attachments */
 
 /* The files a goal carried, inside that goal's bubble. Wrapped, because a goal can carry several and

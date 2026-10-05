@@ -47,6 +47,8 @@ pub fn router(state: ApiState) -> Router {
     let v1 = Router::new()
         .route("/v1/meta", get(handlers::meta))
         .route("/v1/auth/login", post(handlers::login))
+        // Who am I: the fastest way to tell a wrong token from a missing permission.
+        .route("/v1/auth/whoami", get(handlers::whoami))
         .route("/v1/ws", get(ws::upgrade))
         .route("/v1/sessions", get(handlers::list_sessions).post(handlers::create_session))
         .route(
@@ -62,6 +64,13 @@ pub fn router(state: ApiState) -> Router {
             post(handlers::upload_attachment),
         )
         .route("/v1/sessions/{id}/cancel", post(handlers::cancel_session))
+        // Closing stops the actor; opening takes it back. Neither touches ownership.
+        .route("/v1/sessions/{id}/open", post(handlers::open_session))
+        .route("/v1/sessions/{id}/close", post(handlers::close_session))
+        .route(
+            "/v1/sessions/{id}/access",
+            post(handlers::grant_access).delete(handlers::revoke_access),
+        )
         .route("/v1/sessions/{id}/transcript", get(handlers::session_transcript))
         .route("/v1/diagnostics", get(handlers::diagnostics))
         .route("/v1/approvals", get(handlers::list_approvals))

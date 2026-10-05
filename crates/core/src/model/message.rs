@@ -47,6 +47,11 @@ pub struct SessionMessage {
     pub created_at: Timestamp,
     pub correlation_id: Option<String>,
     pub agent_id: Option<String>,
+    /// Who said it. A conversation can have several participants once a session is shared, and a
+    /// transcript that cannot tell them apart is a transcript that attributes one person's words to
+    /// another. Older records have no author; their turns read as the session's own.
+    #[serde(default)]
+    pub author: Option<crate::model::PrincipalRef>,
 }
 
 impl SessionMessage {
@@ -59,6 +64,7 @@ impl SessionMessage {
             created_at: crate::now_ms(),
             correlation_id: None,
             agent_id: None,
+            author: None,
         }
     }
 

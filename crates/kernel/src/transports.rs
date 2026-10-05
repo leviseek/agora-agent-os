@@ -248,9 +248,11 @@ impl AgentHandler for KernelAgentHandler {
         // The gRPC/CLI transport in v1 carries text: images arrive over HTTP, where the bytes can
         // be uploaded and named. A gRPC caller that wants vision gets it the same way.
         if wait {
-            self.kernel.sessions.post_goal(session, goal, &[], &[], None, None).await
+            // The transport carries text only and no principal: the goal is attributed to nobody,
+            // which is what an unauthenticated internal call is.
+            self.kernel.sessions.post_goal(session, goal, &[], &[], None, None, None).await
         } else {
-            self.kernel.sessions.post_goal_async(session, goal, &[], &[], None, None).await?;
+            self.kernel.sessions.post_goal_async(session, goal, &[], &[], None, None, None).await?;
             Ok(serde_json::json!({ "accepted": true, "session_id": session.as_str() }))
         }
     }

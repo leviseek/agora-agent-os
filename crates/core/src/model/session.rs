@@ -25,14 +25,25 @@ pub struct SessionRecord {
     /// How much thinking this session asks for. None means "whatever the provider defaults to".
     #[serde(default)]
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
+    /// Who owns this conversation. Owners decide who else may take part; closing a session does not
+    /// change this, because ownership is about the record and closing is about the actor.
+    #[serde(default)]
+    pub owner: Option<crate::model::PrincipalRef>,
+    /// Roles handed out by the owner, one entry per person.
+    #[serde(default)]
+    pub grants: Vec<crate::model::SessionGrant>,
 }
 
 impl SessionRecord {
     pub fn new(user_id: impl Into<String>, title: impl Into<String>) -> Self {
         let now = crate::now_ms();
+        let user_id = user_id.into();
         Self {
             id: SessionId::new(),
-            user_id: user_id.into(),
+            // The owner defaults to the stated user: a record always has an owner, even one created
+            // by a caller that did not name a principal.
+            owner: Some(crate::model::PrincipalRef::new(user_id.clone(), None)),
+            user_id,
             title: title.into(),
             state: SessionState::Creating,
             actor_id: ActorId::new(),
@@ -44,10 +55,20 @@ impl SessionRecord {
             metadata: BTreeMap::new(),
             model_hint: None,
             reasoning_effort: None,
+            grants: Vec::new(),
         }
     }
 
+    /// A session with no actor is still a session: closed ones are read, archived ones are restored.
     pub fn is_open(&self) -> bool {
         !self.state.is_terminal()
+    }
+
+    /// Who owns it, as a display string, for logs and listings.
+    pub fn owner_label(&self) -> String {
+        self.owner
+            .as_ref()
+            .map(|owner| owner.to_string())
+            .unwrap_or_else(|| self.user_id.clone())
     }
 }

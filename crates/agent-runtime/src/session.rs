@@ -69,6 +69,10 @@ pub enum SessionMessage {
         attachments: Vec<String>,
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+        /// Who is asking. Recorded on the turn and on the run, so a shared conversation still says
+        /// whose words these are.
+        #[serde(default)]
+        author: Option<agentos_core::model::PrincipalRef>,
     },
     /// Cooperative cancellation of the run currently in flight.
     Cancel { reason: String },
@@ -197,11 +201,21 @@ impl SessionActor {
         is_placeholder_flavoured(message)
     }
 
+    /// Write the session record back, keeping the fields the actor does not own.
+    ///
+    /// Ownership and grants belong to the control plane: the manager writes them, and the actor holds
+    /// a copy of the record only to know its own settings. Saving that copy verbatim therefore
+    /// **undid every grant** the moment the next turn was persisted - a participant lost their role
+    /// the first time they spoke, which is precisely when it matters.
     fn persist_session(&self) -> impl std::future::Future<Output = Result<()>> + '_ {
         let store = self.deps.store.clone();
-        let record = self.state.session.clone();
+        let mut record = self.state.session.clone();
         async move {
             let collection: Collection<SessionRecord> = Collection::new(collections::SESSIONS);
+            if let Some(stored) = collection.load(store.as_ref(), record.id.as_str()).await? {
+                record.owner = stored.owner;
+                record.grants = stored.grants;
+            }
             collection.save(store.as_ref(), record.id.as_str(), &record).await
         }
     }
@@ -347,6 +361,7 @@ impl SessionActor {
         attachments: Vec<String>,
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
+        author: Option<agentos_core::model::PrincipalRef>,
     ) -> Result<serde_json::Value> {
         // What this run will actually use: the kernel's spec, narrowed by the session's stored
         // choice, narrowed again by anything asked for on this one goal. Computed per run so two
@@ -390,14 +405,31 @@ impl SessionActor {
         )
         .await?;
         let documents = crate::documents::attach_documents(&self.deps.artifacts, &attachments).await?;
-        // Every uploaded id must be readable as one or the other. An id that is neither is a client
-        // error, and silence would look like the attachment simply had no effect.
-        let claimed = attached.parts.len() + documents.len();
-        if claimed != attachments.len() {
+        // Every uploaded id must have been read. Matched by id, not by counting parts: a part can
+        // also come from a workspace image path, which is not an upload at all. Counting the two
+        // together made a goal that named only a workspace path fail with "1 of 0 uploaded
+        // attachment(s) could be read" - a refusal of something nobody uploaded.
+        let claimed: Vec<&str> = attached
+            .parts
+            .iter()
+            .chain(documents.iter().map(|document| &document.part))
+            .filter_map(|part| match part {
+                agentos_core::model::ContentPart::Image { artifact_id, .. }
+                | agentos_core::model::ContentPart::Artifact { artifact_id, .. } => {
+                    Some(artifact_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let unreadable: Vec<&String> = attachments
+            .iter()
+            .filter(|id| !claimed.contains(&id.as_str()))
+            .collect();
+        if !unreadable.is_empty() {
             return Err(RuntimeError::invalid_input(format!(
-                "{claimed} of {} uploaded attachment(s) could be read: an attachment must be an image \
-                 or a text file",
-                attachments.len()
+                "{} uploaded attachment(s) could not be read: an attachment must be an image or a text file ({})",
+                unreadable.len(),
+                unreadable.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", ")
             )));
         }
         if !attached.parts.is_empty() || !documents.is_empty() {
@@ -445,6 +477,7 @@ impl SessionActor {
         let user_message = crate::images::user_message(&self.session_id, &goal, &all_parts);
         let user_message = TranscriptMessage {
             correlation_id: Some(correlation.request()),
+            author: author.clone(),
             ..user_message
         };
         self.state.transcript.push(user_message.clone());
@@ -463,6 +496,7 @@ impl SessionActor {
         let mut run = AgentRun::new(self.session_id.clone(), &spec, goal.clone());
         // The attachments belong to the run, so the transcript can be rebuilt from runs after a
         // restart and still show what was sent with each goal.
+        run.author = author.clone();
         run.attachments = all_parts
             .iter()
             .map(|part| match part {
@@ -641,6 +675,8 @@ impl SessionActor {
                 created_at: now_ms(),
                 correlation_id: Some(correlation.request()),
                 agent_id: Some(run.id.as_str().to_string()),
+                // The answer is the runtime's, not a person's: nobody authored it.
+                author: None,
             });
             self.deps
                 .bus
@@ -727,6 +763,7 @@ impl SessionActor {
                 // What was attached to this goal. A console can then show it next to the turn it
                 // belongs to instead of guessing from a session-wide list.
                 "attachments": r.attachments,
+                "author": r.author,
                 "usage": r.usage,
             })).collect::<Vec<_>>(),
             // Session totals are summed from the runs rather than kept beside them: one source of
@@ -822,8 +859,8 @@ impl Actor for SessionActor {
 
     async fn handle(&mut self, message: SessionMessage, _ctx: &ActorContext) -> Result<serde_json::Value> {
         match message {
-            SessionMessage::UserGoal { text, correlation, images, attachments, model, reasoning_effort } => {
-                self.handle_goal(text, correlation, images, attachments, model, reasoning_effort).await
+            SessionMessage::UserGoal { text, correlation, images, attachments, model, reasoning_effort, author } => {
+                self.handle_goal(text, correlation, images, attachments, model, reasoning_effort, author).await
             }
             SessionMessage::Cancel { reason } => {
                 let cancelled = match self.deps.run_tokens.read().get(&self.session_id) {
@@ -932,6 +969,7 @@ mod placeholder_filter_tests {
             created_at: agentos_core::now_ms(),
             correlation_id: None,
             agent_id: None,
+            author: None,
         }
     }
 

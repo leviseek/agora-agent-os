@@ -74,6 +74,14 @@ impl ChatMessage {
     }
 }
 
+/// How the runtime tells a planner which capabilities exist, when it sends no tool list.
+///
+/// The planner is deliberately sent no tools - a tool list next to "respond with JSON only" invites
+/// a tool call instead of a plan - so the names travel in a system message. The constant is here, and
+/// not spelled out at each end, because a mock or a test that reads the prompt has to read exactly
+/// what the runtime wrote.
+pub const CAPABILITY_NAMES_MARKER: &str = "Capabilities you may name in a step:";
+
 /// A capability offered to the model as a tool. The schema comes straight from the capability
 /// descriptor, so the model can never call something that does not exist.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -273,6 +273,8 @@ export interface AppStoreValue {
   selectSession: (id: string | null) => void;
   refreshDetail: (id?: string) => Promise<void>;
   closeSession: (id: string) => Promise<void>;
+  /** Open a closed session again. */
+  openSession: (id: string) => Promise<void>;
   sendGoal: (
     text: string,
     wait: boolean,
@@ -760,24 +762,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [refreshDetail],
   );
 
-  const closeSession = useCallback(
-    async (id: string): Promise<void> => {
+  // Closing and opening are a pair now: closing stops the actor, and the record, the runs and the
+  // transcript stay. Selecting a different session afterwards is not needed any more, because the
+  // session is still there to look at.
+  const setSessionOpen = useCallback(
+    async (id: string, open: boolean): Promise<void> => {
       setBusy(true);
       setActionError(null);
       try {
-        await clientRef.current.closeSession(id);
-        if (selectedRef.current === id) {
-          setSelectedSessionId(null);
-          setDetail(null);
+        if (open) {
+          await clientRef.current.openSession(id);
+        } else {
+          await clientRef.current.closeSession(id);
         }
         await refreshSessions();
+        if (selectedRef.current === id) {
+          await refreshDetail(id);
+        }
       } catch (cause) {
         setActionError(toApiError(cause));
       } finally {
         setBusy(false);
       }
     },
-    [refreshSessions],
+    [refreshDetail, refreshSessions],
+  );
+
+  const closeSession = useCallback(
+    async (id: string): Promise<void> => setSessionOpen(id, false),
+    [setSessionOpen],
+  );
+
+  const openSession = useCallback(
+    async (id: string): Promise<void> => setSessionOpen(id, true),
+    [setSessionOpen],
   );
 
   const sendGoal = useCallback(
@@ -992,6 +1010,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       selectSession,
       refreshDetail,
       closeSession,
+      openSession,
       sendGoal,
       uploadAttachments,
       composerDrafts,
@@ -1050,6 +1069,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       selectSession,
       refreshDetail,
       closeSession,
+      openSession,
       sendGoal,
       uploadAttachments,
       composerDrafts,
@@ -1063,6 +1083,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       clearActionError,
       pingSocket,
       reconnectSocket,
+      openSession,
     ],
   );
 

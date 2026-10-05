@@ -305,6 +305,10 @@ export interface SessionSummary {
   created_at: Timestamp;
   updated_at: Timestamp;
   message_count: number;
+  /** Who owns it: a person, and optionally the node they are on. */
+  owner?: { user_id: string; node_id?: string | null } | null;
+  /** The caller's own role on this session, or null when they have none. */
+  my_role?: string | null;
 }
 
 /** Token accounting for one run or one session. All zero means "nobody recorded it". */
@@ -331,6 +335,8 @@ export interface RunSummary {
   degraded?: string | null;
   /** The files this goal carried, so a transcript can show them next to the turn they belong to. */
   attachments?: RunAttachment[];
+  /** Who asked for this run. Null on turns from before authorship was recorded. */
+  author?: { user_id: string; node_id?: string | null } | null;
   model: string | null;
   final_answer: string | null;
   error: string | null;
@@ -404,6 +410,26 @@ export interface TranscriptResponse {
 export interface SessionDetail {
   session: SessionRecord;
   runtime: SessionRuntime | null;
+  /** What the gateway says about the caller here: their role and what it allows. */
+  you?: SessionAccess;
+}
+
+/** The caller's own standing on one session, as the runtime computed it. */
+export interface SessionAccess {
+  user_id: string;
+  node_id: string | null;
+  roles: string[];
+  /** owner, editor, participant, viewer - or null when they have no role at all. */
+  session_role: string | null;
+  can: string[];
+}
+
+/** Who the gateway thinks the caller is, for the whole console. */
+export interface Whoami {
+  user_id: string;
+  node_id: string | null;
+  roles: string[];
+  admin: boolean;
 }
 
 export interface SessionsResponse {
@@ -834,6 +860,18 @@ export class AgentOsClient {
 
   closeSession(id: string): Promise<CloseResponse> {
     return this.request<CloseResponse>('/v1/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
+  }
+
+  /** Opening a closed session again. Closing stops the actor; this takes it back. */
+  openSession(id: string): Promise<{ opened: boolean; session: SessionRecord }> {
+    return this.request<{ opened: boolean; session: SessionRecord }>(
+      '/v1/sessions/' + encodeURIComponent(id) + '/open',
+      { method: 'POST', body: '{}' },
+    );
+  }
+
+  whoami(): Promise<Whoami> {
+    return this.request<Whoami>('/v1/auth/whoami', { method: 'GET' });
   }
 
   sessionStatus(id: string): Promise<SessionRuntime> {

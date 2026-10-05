@@ -5,6 +5,7 @@
 //! Behaviour lives in the owning crate; this module only owns shape and invariants that are
 //! local to a single record.
 
+pub mod access;
 pub mod actor;
 pub mod agent;
 pub mod artifact;
@@ -22,6 +23,10 @@ pub use actor::{
 pub use agent::{
     ActionCall, AgentRun, AgentSpec, AgentStep, AttachmentRef, Observation, Plan, PlanStep,
     PlanStepKind, ReasoningEffort, StepKind, TokenUsage,
+};
+pub use access::{
+    decide, role_allows, role_of, Denial, Principal, PrincipalRef, SessionAction, SessionGrant,
+    SessionRole,
 };
 pub use artifact::{ArtifactKind, ArtifactRecord};
 pub use capability::{

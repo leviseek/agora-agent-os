@@ -466,6 +466,22 @@ async fn next_of_type(
     panic!("no {wanted} frame arrived within 20 frames");
 }
 
+/// The next frame, or None if the socket stays quiet for `idle`.
+///
+/// Reads on a live socket have to be bounded. A drain loop that ended only when the server closed
+/// the connection hung this suite for tens of minutes: the socket is meant to stay open, so "read
+/// until closed" is a read that never returns, and a hung test binary looks exactly like a suite
+/// that is still working.
+async fn next_json_within(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    idle: Duration,
+) -> Option<Value> {
+    match tokio::time::timeout(idle, next_json_opt(socket)).await {
+        Ok(frame) => frame,
+        Err(_) => None,
+    }
+}
+
 async fn next_json_opt(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 ) -> Option<Value> {
@@ -960,7 +976,7 @@ async fn a_session_survives_a_restart_without_a_snapshot() {
         let session = kernel.sessions.create_session("u1", "survives").await.unwrap();
         let result = kernel
             .sessions
-            .post_goal(&session.id, "what is 6*7?", &[], &[], None, None)
+            .post_goal(&session.id, "what is 6*7?", &[], &[], None, None, None)
             .await
             .unwrap();
         assert!(result["answer"].is_string(), "the run answered: {result}");
@@ -1131,9 +1147,21 @@ async fn streamed_deltas_reach_live_subscribers() {
         .await;
     assert_eq!(status, 200);
 
-    // Drain whatever is still queued on the socket, then look at what arrived.
+    // Drain what is queued on the socket, then look at what arrived. Bounded on purpose: the run is
+    // already finished (the POST above waited for it), so the preview is in flight or gone - it is
+    // never worth blocking on a socket that is designed to stay open.
     let mut deltas: Vec<Value> = Vec::new();
-    while let Some(frame) = next_json_opt(&mut socket).await {
+    let mut idle = 0;
+    loop {
+        let Some(frame) = next_json_within(&mut socket, Duration::from_millis(500)).await else {
+            idle += 1;
+            // Two quiet half-seconds and the preview is done arriving.
+            if idle >= 2 {
+                break;
+            }
+            continue;
+        };
+        idle = 0;
         if frame["type"] == "event" && frame["event"]["kind"] == "agent_delta" {
             deltas.push(frame["event"].clone());
         }
@@ -1753,4 +1781,253 @@ async fn router_builds_without_io() {
     let _router = agentos_api::router(state);
     let kinds = agentos_api::ws::subscribable_kinds();
     assert!(kinds.contains(&"tool_call"));
+}
+// ---------------------------------------------------------------------------------------------
+// Principals, ownership and the open/close toggle
+// ---------------------------------------------------------------------------------------------
+
+/// Three people on two nodes: an owner, a stranger, and an admin who is not part of the session.
+fn three_principals() -> Vec<agentos_core::config::PrincipalConfig> {
+    use agentos_core::config::PrincipalConfig;
+    vec![
+        PrincipalConfig {
+            user_id: "alice".into(),
+            node_id: Some("node-a".into()),
+            roles: vec!["operator".into()],
+            token_env: None,
+            token: Some("alice-token".into()),
+        },
+        PrincipalConfig {
+            user_id: "bob".into(),
+            node_id: Some("node-b".into()),
+            roles: vec![],
+            token_env: None,
+            token: Some("bob-token".into()),
+        },
+        PrincipalConfig {
+            user_id: "root".into(),
+            node_id: None,
+            roles: vec!["admin".into()],
+            token_env: None,
+            token: Some("root-token".into()),
+        },
+    ]
+}
+
+impl Harness {
+    async fn start_with_principals() -> Self {
+        let dir = std::env::temp_dir().join(format!("agentos-api-acl-{}", agentos_core::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = RuntimeConfig::default();
+        config.storage.backend = StoreBackend::Memory;
+        config.storage.data_dir = dir.join("data");
+        config.policy.workspace_root = dir.join("workspace");
+        config.observability.log_level = "error".into();
+        config.api.principals = three_principals();
+        let kernel = Kernel::bootstrap(config).await.unwrap();
+        let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+        Self {
+            base: format!("http://{addr}"),
+            _kernel: kernel,
+            shutdown,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Send a request as somebody. `None` sends no token at all.
+    async fn send_as(
+        &self,
+        method: reqwest::Method,
+        token: Option<&str>,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
+        let mut request = self.client.request(method, self.url(path));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.unwrap();
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        (status, serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)))
+    }
+
+    async fn get_as(&self, token: Option<&str>, path: &str) -> (u16, Value) {
+        self.send_as(reqwest::Method::GET, token, path, None).await
+    }
+
+    async fn post_as(&self, token: Option<&str>, path: &str, body: Value) -> (u16, Value) {
+        self.send_as(reqwest::Method::POST, token, path, Some(body)).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_belongs_to_whoever_created_it() {
+    let h = Harness::start_with_principals().await;
+
+    let (status, body) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "alice's work" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let session_id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(body["owner"]["user_id"], "alice");
+    assert_eq!(body["owner"]["node_id"], "node-a", "the owner is a person on a node: {body}");
+
+    // Alice sees her own role without being told it.
+    let (status, body) = h.get_as(Some("alice-token"), &format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["you"]["session_role"], "owner");
+    assert!(body["you"]["can"].as_array().unwrap().iter().any(|a| a == "delete"));
+
+    // A stranger is refused, and the refusal says who to ask.
+    let (status, body) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 403, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default().to_string();
+    assert!(message.contains("alice"), "the refusal should name the owner: {message}");
+
+    // An admin is not part of the session and does not need to be.
+    let (status, _) = h.get_as(Some("root-token"), &format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 200);
+
+    // No token at all is not a principal.
+    let (status, _) = h.get_as(None, &format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_granted_role_decides_what_a_person_may_do() {
+    let h = Harness::start_with_principals().await;
+    let (_, created) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "shared" }))
+        .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Bob has nothing yet: he cannot even read it.
+    let (status, _) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{id}")).await;
+    assert_eq!(status, 403);
+
+    // Alice makes him a participant.
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/access"),
+            json!({ "user_id": "bob", "node_id": "node-b", "role": "participant" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["session"]["grants"][0]["role"], "participant");
+    assert_eq!(body["session"]["grants"][0]["granted_by"], "alice@node-a");
+
+    // Now he can read and speak...
+    let (status, body) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{id}")).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["you"]["session_role"], "participant");
+    let (status, body) = h
+        .post_as(Some("bob-token"), &format!("/v1/sessions/{id}/messages"), json!({ "text": "hello from bob" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    // ...but not close, open or hand out roles.
+    let refusals: [(reqwest::Method, String, Option<Value>); 3] = [
+        (reqwest::Method::DELETE, format!("/v1/sessions/{id}"), None),
+        (reqwest::Method::POST, format!("/v1/sessions/{id}/close"), Some(json!({}))),
+        (
+            reqwest::Method::POST,
+            format!("/v1/sessions/{id}/access"),
+            Some(json!({ "user_id": "carol", "role": "viewer" })),
+        ),
+    ];
+    for (method, path, body) in refusals {
+        let (status, response) = h.send_as(method, Some("bob-token"), &path, body).await;
+        assert_eq!(status, 403, "{path}: {response}");
+        let message = response["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("participant"), "{path}: {message}");
+    }
+
+    // Promoted to editor, the same requests change answer.
+    let (status, _) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/access"),
+            json!({ "user_id": "bob", "node_id": "node-b", "role": "editor" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = h
+        .post_as(Some("bob-token"), &format!("/v1/sessions/{id}/close"), json!({}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_and_opening_keeps_the_conversation_and_says_who_spoke() {
+    let h = Harness::start_with_principals().await;
+    let (_, created) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "a long conversation" }))
+        .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, _) = h
+        .post_as(Some("alice-token"), &format!("/v1/sessions/{id}/messages"), json!({ "text": "first question" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = h
+        .post_as(Some("alice-token"), &format!("/v1/sessions/{id}/close"), json!({}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, detail) = h.get_as(Some("alice-token"), &format!("/v1/sessions/{id}")).await;
+    assert_eq!(detail["session"]["state"], "closed");
+    assert!(detail["session"]["closed_at"].is_number());
+
+    // A closed session takes no goals...
+    let (status, body) = h
+        .post_as(Some("alice-token"), &format!("/v1/sessions/{id}/messages"), json!({ "text": "while closed" }))
+        .await;
+    assert_eq!(status, 409, "{body}");
+
+    // ...until it is opened again. Not restored: it was never gone.
+    let (status, body) = h
+        .post_as(Some("alice-token"), &format!("/v1/sessions/{id}/open"), json!({}))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["session"]["state"], "active");
+    assert!(body["session"]["closed_at"].is_null(), "opening clears the closed mark: {body}");
+
+    let (status, body) = h
+        .post_as(Some("alice-token"), &format!("/v1/sessions/{id}/messages"), json!({ "text": "second question" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    // The conversation has both turns, and each says who asked.
+    let (status, body) = h
+        .get_as(Some("alice-token"), &format!("/v1/sessions/{id}/transcript?limit=50"))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let messages = body["messages"].as_array().unwrap();
+    let asked: Vec<&Value> = messages.iter().filter(|m| m["role"] == "user").collect();
+    assert_eq!(asked.len(), 2, "both turns survived the close: {body}");
+    assert_eq!(asked[0]["author"]["user_id"], "alice");
+    assert_eq!(asked[0]["author"]["node_id"], "node-a");
+
+    // And the run records it too, which is what a rebuilt transcript reads from.
+    let (_, detail) = h.get_as(Some("alice-token"), &format!("/v1/sessions/{id}")).await;
+    let runs = detail["runtime"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2, "{detail}");
+    assert_eq!(runs[0]["author"]["user_id"], "alice");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn whoami_answers_who_the_gateway_thinks_you_are() {
+    let h = Harness::start_with_principals().await;
+    let (status, body) = h.get_as(Some("bob-token"), "/v1/auth/whoami").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["user_id"], "bob");
+    assert_eq!(body["node_id"], "node-b");
+    assert_eq!(body["admin"], false);
+    let (_, body) = h.get_as(Some("root-token"), "/v1/auth/whoami").await;
+    assert_eq!(body["admin"], true);
 }

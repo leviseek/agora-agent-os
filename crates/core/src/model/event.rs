@@ -31,6 +31,12 @@ impl EventSeverity {
 pub enum EventKind {
     SessionCreated,
     SessionClosed,
+    /// A closed session was opened again: the record is active and an actor holds the conversation.
+    SessionOpened,
+    /// The owner handed someone a role on a session.
+    SessionAccessGranted,
+    /// The owner took it back.
+    SessionAccessRevoked,
     SessionMessageQueued,
     SessionMessageHandled,
     ActorSpawned,
@@ -95,6 +101,9 @@ impl EventKind {
         match self {
             EventKind::SessionCreated => "session_created",
             EventKind::SessionClosed => "session_closed",
+            EventKind::SessionOpened => "session_opened",
+            EventKind::SessionAccessGranted => "session_access_granted",
+            EventKind::SessionAccessRevoked => "session_access_revoked",
             EventKind::SessionMessageQueued => "session_message_queued",
             EventKind::SessionMessageHandled => "session_message_handled",
             EventKind::ActorSpawned => "actor_spawned",

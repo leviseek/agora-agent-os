@@ -136,6 +136,31 @@ impl MockProvider {
         None
     }
 
+    /// The capability names the runtime listed in the prompt.
+    ///
+    /// The planner is sent no tools on purpose, so a mock that only read `request.tools` planned no
+    /// capability steps at all: the acceptance tests that exercise parallel capabilities and
+    /// cancellation kept passing their assertions while exercising nothing.
+    fn capability_names_in_prompt(request: &ModelRequest) -> Vec<String> {
+        request
+            .messages
+            .iter()
+            .filter_map(|message| {
+                message
+                    .content
+                    .split_once(crate::provider::CAPABILITY_NAMES_MARKER)
+                    .map(|(_, rest)| rest.to_string())
+            })
+            .flat_map(|rest| {
+                let line = rest.lines().next().unwrap_or_default().to_string();
+                line.split(',')
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     fn plan_json(goal: &str, tools: &[String]) -> String {
         let mut steps = vec![json!({
             "id": "think-1",
@@ -269,7 +294,11 @@ impl ModelProvider for MockProvider {
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
         let started = agentos_core::now_ms();
-        let tool_names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+        let tool_names: Vec<String> = if request.tools.is_empty() {
+            Self::capability_names_in_prompt(&request)
+        } else {
+            request.tools.iter().map(|t| t.name.clone()).collect()
+        };
 
         // 1. Planning: emit a machine readable plan.
         if request.json_mode && request.task == ModelTask::Plan {

@@ -3,6 +3,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::ApiState;
 use agentos_core::error::RuntimeError;
+use crate::middleware::Principal;
 use agentos_core::model::{EventFilter, EventKind, TaskGraphRecord, TaskRecord};
 use agentos_core::{now_ms, SessionId};
 use agentos_storage::store::{collections, Collection};
@@ -120,6 +121,7 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginRequest>
 /// costs nothing to filter - a query language can come later without moving the seam.
 pub async fn list_sessions(
     State(state): State<ApiState>,
+    principal: Option<Principal>,
     Query(q): Query<SessionListQuery>,
 ) -> ApiResult<Json<Value>> {
     let mut sessions = state.kernel.sessions.list().await?;
@@ -131,8 +133,24 @@ pub async fn list_sessions(
                 || session.user_id.to_lowercase().contains(&needle)
         });
     }
-    let total = sessions.len();
-    Ok(Json(json!({ "sessions": sessions, "total": total, "query": query })))
+    // Every row carries the caller's own role, resolved from the record. The list itself stays open:
+    // knowing that a conversation exists is not the same as being allowed into it, and a stranger
+    // who cannot see what they might ask for access to has nothing to ask about.
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let mut mine = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let role = match state.kernel.sessions.get(&session.id).await? {
+            Some(record) => agentos_core::model::role_of(&record, &me),
+            None => None,
+        };
+        let mut value = serde_json::to_value(&session)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("my_role".into(), json!(role));
+        }
+        mine.push(value);
+    }
+    let total = mine.len();
+    Ok(Json(json!({ "sessions": mine, "total": total, "query": query })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,15 +221,41 @@ pub struct CreateSessionRequest {
 
 pub async fn create_session(
     State(state): State<ApiState>,
+    principal: Option<Principal>,
     Json(body): Json<CreateSessionRequest>,
 ) -> ApiResult<Json<Value>> {
-    let user = body.user_id.unwrap_or_else(|| "anonymous".into());
+    // The owner is who is asking. A body that names someone else is honoured only for an admin:
+    // otherwise "create a session as someone else" would be a way to take over their conversations.
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let user = match body.user_id {
+        Some(requested) if requested != me.user_id => {
+            if !me.is_admin() {
+                return Err(ApiError(
+                    RuntimeError::policy_denied(format!(
+                        "{} may not create sessions for {requested}",
+                        me.user_id
+                    ))
+                    .with_detail("user_id", me.user_id.clone()),
+                ));
+            }
+            requested
+        }
+        _ => me.user_id.clone(),
+    };
     let title = body.title.unwrap_or_else(|| "untitled session".into());
-    let record = state.kernel.sessions.create_session(&user, &title).await?;
+    let record = state
+        .kernel
+        .sessions
+        .create_session_for(&user, &title, Some(me.as_ref()))
+        .await?;
     Ok(Json(json!(record)))
 }
 
-pub async fn get_session(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+pub async fn get_session(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
     let record = state
         .kernel
@@ -220,7 +264,31 @@ pub async fn get_session(State(state): State<ApiState>, Path(id): Path<String>) 
         .await?
         .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
     let status = state.kernel.sessions.status(&session).await.unwrap_or(Value::Null);
-    Ok(Json(json!({ "session": record, "runtime": status })))
+    // The caller's own role, so a console can show what this person may do here instead of
+    // repeating the permission table in TypeScript, where it would drift from the Rust one.
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let my_role = agentos_core::model::role_of(&record, &me);
+    let my_actions: Vec<&'static str> = ALL_SESSION_ACTIONS
+        .iter()
+        .filter(|action| match my_role {
+            Some(role) => agentos_core::model::role_allows(role, **action),
+            // No role at all: an admin still gets the list, everyone else gets nothing, which is
+            // what the gateway will enforce anyway.
+            None => me.is_admin(),
+        })
+        .map(|action| action.as_str())
+        .collect();
+    Ok(Json(json!({
+        "session": record,
+        "runtime": status,
+        "you": {
+            "user_id": me.user_id,
+            "node_id": me.node_id,
+            "roles": me.roles,
+            "session_role": my_role,
+            "can": my_actions,
+        },
+    })))
 }
 
 pub async fn close_session(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -229,6 +297,89 @@ pub async fn close_session(State(state): State<ApiState>, Path(id): Path<String>
     Ok(Json(json!({ "closed": true, "session_id": id })))
 }
 
+/// Open a closed session again. The other half of close, and not a restore: the conversation, its
+/// runs and its transcript were never gone - only the actor that held them.
+pub async fn open_session(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let record = state.kernel.sessions.open(&session).await?;
+    Ok(Json(json!({ "opened": true, "session": record })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccessRequest {
+    pub user_id: String,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// owner, editor, participant or viewer.
+    pub role: String,
+}
+
+/// Hand out a role on a session.
+pub async fn grant_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    Json(body): Json<AccessRequest>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let role = agentos_core::model::SessionRole::parse(&body.role).ok_or_else(|| {
+        ApiError(RuntimeError::invalid_input(format!(
+            "unknown role {:?}: use owner, editor, participant or viewer",
+            body.role
+        )))
+    })?;
+    if body.user_id.trim().is_empty() {
+        return Err(ApiError(RuntimeError::invalid_input("user_id must not be empty")));
+    }
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let grant = agentos_core::model::SessionGrant::new(body.user_id.trim(), body.node_id, role);
+    let record = state.kernel.sessions.grant(&session, grant, &me).await?;
+    Ok(Json(json!({ "session": record })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeRequest {
+    pub user_id: String,
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+/// Take a role away again.
+pub async fn revoke_access(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<RevokeRequest>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let who = agentos_core::model::PrincipalRef::new(body.user_id.trim(), body.node_id);
+    let record = state.kernel.sessions.revoke(&session, &who).await?;
+    Ok(Json(json!({ "session": record })))
+}
+
+/// Who the gateway thinks this caller is.
+///
+/// The console shows it, and it is the fastest way to tell a wrong token from a missing permission.
+pub async fn whoami(principal: Option<Principal>) -> ApiResult<Json<Value>> {
+    let principal = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    Ok(Json(json!({
+        "user_id": principal.user_id,
+        "node_id": principal.node_id,
+        "roles": principal.roles,
+        "admin": principal.is_admin(),
+    })))
+}
+
+/// The action names the console is told about, in the order the permission table lists them.
+pub const ALL_SESSION_ACTIONS: [agentos_core::model::SessionAction; 8] = [
+    agentos_core::model::SessionAction::Read,
+    agentos_core::model::SessionAction::Chat,
+    agentos_core::model::SessionAction::Open,
+    agentos_core::model::SessionAction::Close,
+    agentos_core::model::SessionAction::Archive,
+    agentos_core::model::SessionAction::Download,
+    agentos_core::model::SessionAction::Delete,
+    agentos_core::model::SessionAction::Grant,
+];
 pub async fn session_status(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
     Ok(Json(state.kernel.sessions.status(&session).await?))
@@ -262,6 +413,7 @@ fn default_true() -> bool {
 
 pub async fn post_message(
     State(state): State<ApiState>,
+    principal: Option<Principal>,
     Path(id): Path<String>,
     Json(body): Json<PostMessageRequest>,
 ) -> ApiResult<Json<Value>> {
@@ -270,6 +422,9 @@ pub async fn post_message(
         return Err(ApiError(RuntimeError::invalid_input("message text must not be empty")));
     }
     let effort = parse_effort(body.effort.as_deref())?;
+    // Who is speaking. Recorded on the turn and on the run, so a shared conversation keeps saying
+    // whose words are whose.
+    let author = principal.map(|value| value.0.as_ref());
     if body.wait {
         Ok(Json(
             state
@@ -282,6 +437,7 @@ pub async fn post_message(
                     &body.attachments,
                     body.model.clone(),
                     effort,
+                    author,
                 )
                 .await?,
         ))
@@ -296,6 +452,7 @@ pub async fn post_message(
                 &body.attachments,
                 body.model.clone(),
                 effort,
+                author,
             )
             .await?;
         Ok(Json(json!({ "accepted": true, "session_id": id })))
@@ -477,8 +634,12 @@ pub async fn upload_attachment(
         agentos_agent_runtime::documents::UploadedKind::Spreadsheet
     ) {
         let workbook = agentos_agent_runtime::xlsx::workbook_from_bytes(&body)?.ok_or_else(|| {
+            // Say why this one was refused *and* what would have been accepted: a refusal that
+            // reports only the specific problem leaves the sender guessing about everything else.
             ApiError(RuntimeError::invalid_input(format!(
-                "{name} is a zip archive but not a spreadsheet: no xl/workbook.xml inside it"
+                "{name} is a zip archive but not a spreadsheet: no xl/workbook.xml inside it. \
+                 Accepted: images (PNG, JPEG, GIF, WebP), text files (CSV, TSV, Markdown, JSON, \
+                 plain text) and .xlsx workbooks"
             )))
         })?;
         spreadsheet_note = json!({

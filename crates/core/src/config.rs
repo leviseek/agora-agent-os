@@ -165,6 +165,58 @@ pub struct ApiConfig {
     pub rate_limit_per_minute: u32,
     pub cors_allow_origin: String,
     pub request_timeout_ms: u64,
+    /// Who may talk to this runtime, and as whom.
+    ///
+    /// Empty means "the single static token is the operator", which is what every deployment written
+    /// before principals existed relies on: one token, full rights. Naming principals is how a
+    /// second person joins - each gets a token, a user id, a node and a set of global roles.
+    pub principals: Vec<PrincipalConfig>,
+}
+
+/// One identity the gateway accepts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrincipalConfig {
+    pub user_id: String,
+    /// Where this person is. Two nodes running as the same user are two principals.
+    pub node_id: Option<String>,
+    /// Global roles: "admin" acts on every session. Anything else acts only where it owns or was
+    /// granted a role on the session itself.
+    pub roles: Vec<String>,
+    /// Environment variable holding this principal's bearer token.
+    pub token_env: Option<String>,
+    /// The token itself. Supported for tests and single-machine setups; prefer `token_env`.
+    pub token: Option<String>,
+}
+
+impl Default for PrincipalConfig {
+    fn default() -> Self {
+        Self {
+            user_id: "operator".into(),
+            node_id: None,
+            // A named principal with no roles stated is an operator, not a viewer: the failure mode
+            // of "I configured someone and they can do nothing" is worse than the alternative.
+            roles: vec!["admin".into()],
+            token_env: None,
+            token: None,
+        }
+    }
+}
+
+impl PrincipalConfig {
+    /// This principal's token, if it has one. An unset variable is not an error: a principal with no
+    /// token simply cannot authenticate, which is the safe reading of a missing secret.
+    pub fn token(&self) -> Option<String> {
+        self.token
+            .clone()
+            .filter(|token| !token.trim().is_empty())
+            .or_else(|| {
+                self.token_env
+                    .as_ref()
+                    .and_then(|name| std::env::var(name).ok())
+                    .filter(|token| !token.trim().is_empty())
+            })
+    }
 }
 
 impl ApiConfig {
@@ -173,6 +225,36 @@ impl ApiConfig {
     }
     pub fn auth_required(&self) -> bool {
         self.auth_token().is_some()
+    }
+
+    /// The identities this gateway accepts, as (token, principal) pairs.
+    ///
+    /// With no principal table, the static token is one principal: the operator, with every right.
+    /// That is the compatibility path, and it is deliberate - a runtime that needed a principal table
+    /// before it would answer a request would be a runtime nobody could upgrade.
+    pub fn resolved_principals(&self) -> Vec<(String, crate::model::Principal)> {
+        if self.principals.is_empty() {
+            return match self.auth_token() {
+                Some(token) => vec![(token, crate::model::Principal::operator())],
+                // No token and no table: an open runtime. Every request is the operator, exactly as
+                // it was before principals existed.
+                None => vec![(String::new(), crate::model::Principal::operator())],
+            };
+        }
+        self.principals
+            .iter()
+            .filter_map(|entry| {
+                let token = entry.token()?;
+                Some((
+                    token,
+                    crate::model::Principal::new(
+                        entry.user_id.clone(),
+                        entry.node_id.clone(),
+                        entry.roles.clone(),
+                    ),
+                ))
+            })
+            .collect()
     }
 }
 
@@ -417,6 +499,7 @@ impl Default for ApiConfig {
             rate_limit_per_minute: 600,
             cors_allow_origin: "*".into(),
             request_timeout_ms: 30_000,
+            principals: Vec::new(),
         }
     }
 }

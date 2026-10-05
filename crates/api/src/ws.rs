@@ -18,11 +18,18 @@ use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 
-pub async fn upgrade(ws: WebSocketUpgrade, State(state): State<ApiState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle(socket, state))
+pub async fn upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<ApiState>,
+    principal: Option<crate::middleware::Principal>,
+) -> impl IntoResponse {
+    // The identity is resolved once, at the handshake, and carried for the life of the socket: the
+    // guard runs on the upgrade request, and a goal sent over the socket is still that person's goal.
+    let principal = principal.map(|value| value.0);
+    ws.on_upgrade(move |socket| handle(socket, state, principal))
 }
 
-async fn handle(socket: WebSocket, state: ApiState) {
+async fn handle(socket: WebSocket, state: ApiState, principal: Option<agentos_core::model::Principal>) {
     let (mut sink, mut stream) = socket.split();
     let mut subscription = state.kernel.bus.subscribe(EventFilter { limit: 0, ..Default::default() });
 
@@ -44,7 +51,7 @@ async fn handle(socket: WebSocket, state: ApiState) {
             incoming = stream.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        if let Some(reply) = command(&state, &text).await {
+                        if let Some(reply) = command(&state, &text, principal.as_ref()).await {
                             if sink.send(Message::Text(reply.to_string().into())).await.is_err() {
                                 break;
                             }
@@ -79,7 +86,11 @@ async fn handle(socket: WebSocket, state: ApiState) {
     tracing::debug!("websocket closed");
 }
 
-async fn command(state: &ApiState, text: &str) -> Option<Value> {
+async fn command(
+    state: &ApiState,
+    text: &str,
+    principal: Option<&agentos_core::model::Principal>,
+) -> Option<Value> {
     let value: Value = serde_json::from_str(text).ok()?;
     let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
     match kind {
@@ -131,7 +142,15 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
                 match state
                     .kernel
                     .sessions
-                    .post_goal(&session_id, text, &images, &attachments, model, effort)
+                    .post_goal(
+                        &session_id,
+                        text,
+                        &images,
+                        &attachments,
+                        model,
+                        effort,
+                        principal.map(|value| value.as_ref()),
+                    )
                     .await
                 {
                     Ok(result) => Some(json!({ "type": "goal_result", "result": result })),
@@ -141,7 +160,15 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
                 match state
                     .kernel
                     .sessions
-                    .post_goal_async(&session_id, text, &images, &attachments, model, effort)
+                    .post_goal_async(
+                        &session_id,
+                        text,
+                        &images,
+                        &attachments,
+                        model,
+                        effort,
+                        principal.map(|value| value.as_ref()),
+                    )
                     .await
                 {
                     Ok(()) => Some(json!({ "type": "accepted", "session_id": session })),

@@ -415,7 +415,18 @@ export function ChatView() {
                 </header>
 
                 <div className="bubble bubble-user">
-                  <span className="bubble-role">{t('agent.goal')}</span>
+                  <span className="bubble-role">
+                    {t('agent.goal')}
+                    {run.author !== undefined && run.author !== null ? (
+                      // Whose turn this was. One conversation can have several participants, and a
+                      // transcript that cannot tell them apart attributes one person's words to another.
+                      <span className="bubble-author">
+                        {run.author.node_id == null || run.author.node_id === ''
+                          ? run.author.user_id
+                          : run.author.user_id + '@' + run.author.node_id}
+                      </span>
+                    ) : null}
+                  </span>
                   <p>{run.goal}</p>
                   {run.attachments !== undefined && run.attachments.length > 0 ? (
                     // The files this goal carried, in the turn that carried them. They used to be

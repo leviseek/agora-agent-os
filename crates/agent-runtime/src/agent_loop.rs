@@ -560,7 +560,8 @@ impl AgentLoop {
                 let mut messages = vec![ChatMessage::system(system)];
                 if !capability_names.is_empty() {
                     messages.push(ChatMessage::system(format!(
-                        "Capabilities you may name in a step: {}",
+                        "{} {}",
+                        agentos_model_router::CAPABILITY_NAMES_MARKER,
                         capability_names.join(", ")
                     )));
                 }

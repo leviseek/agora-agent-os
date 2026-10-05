@@ -258,6 +258,10 @@ pub struct AgentRun {
     /// fallback's, and a reader deserves to know that before trusting it.
     #[serde(default)]
     pub degraded: Option<String>,
+    /// Who asked for this run. Kept on the run so a rebuilt transcript can still say whose turn it
+    /// was, exactly like the attachments.
+    #[serde(default)]
+    pub author: Option<crate::model::PrincipalRef>,
     /// What the user attached to this run's goal: image or document, by name and artifact id.
     ///
     /// On the run rather than only in the transcript because the transcript can be rebuilt - a
@@ -322,7 +326,8 @@ impl AgentRun {
             model_hint: spec.model_hint.clone(),
             reasoning_effort: spec.reasoning_effort,
             degraded: None,
-            // Filled in by whoever resolves the goal's attachments.
+            // Both filled in by whoever resolves the goal: its author and its attachments.
+            author: None,
             attachments: Vec::new(),
         }
     }

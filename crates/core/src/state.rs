@@ -114,6 +114,10 @@ state_machine! {
             Idle => Active, Idle => Suspended, Idle => Closing, Idle => Failed,
             Suspended => Active, Suspended => Closing, Suspended => Failed,
             Closing => Closed, Closing => Failed,
+            // A closed session can be opened again. Closing stops the actor and freezes the content;
+            // it is not a delete, and treating it as one made "close" the end of a conversation that
+            // the record, the runs and the transcript had all kept.
+            Closed => Active,
         ]
     }
 }
@@ -238,10 +242,17 @@ mod tests {
     }
 
     #[test]
-    fn closed_session_cannot_reopen() {
-        let e = SessionState::Closed.transition(SessionState::Active).unwrap_err();
-        assert_eq!(e.machine, "SessionState");
-        assert!(e.to_string().contains("closed -> active"));
+    fn a_closed_session_can_be_opened_again() {
+        // Closing is a pause, not an end: the record, the runs and the transcript all survive it,
+        // so the state has to be able to come back. What closing does end is the actor.
+        assert_eq!(
+            SessionState::Closed.transition(SessionState::Active).unwrap(),
+            SessionState::Active
+        );
+        // A failed session is the one that cannot come back: nothing about it finished.
+        assert!(SessionState::Failed.transition(SessionState::Active).is_err());
+        // Terminal still means "nothing runs here", which is what a closed session is.
+        assert!(SessionState::Closed.is_terminal());
     }
 
     #[test]

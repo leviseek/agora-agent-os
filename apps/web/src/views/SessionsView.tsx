@@ -37,6 +37,7 @@ export function SessionsView() {
     selectedSessionId,
     selectSession,
     closeSession,
+    openSession,
     connection,
     detail,
     busy,
@@ -76,6 +77,36 @@ export function SessionsView() {
   const onSelect = (id: string): void => {
     selectSession(id);
     setView('chat');
+  };
+
+  // What this person may do here, as the runtime answered it. The console hides what it knows will be
+  // refused, and the runtime refuses anyway: a hidden button is a courtesy, not a permission.
+  const myRole = detail === null ? null : (detail.you?.session_role ?? null);
+  const ownerLabel = (session: { owner?: { user_id: string; node_id?: string | null } | null; user_id: string }): string => {
+    const owner = session.owner ?? null;
+    if (owner === null) {
+      return session.user_id;
+    }
+    return owner.node_id == null || owner.node_id === '' ? owner.user_id : owner.user_id + '@' + owner.node_id;
+  };
+  const roleLabel = (role: string | null): string =>
+    role === null ? t('sessions.roleNone') : t('sessions.role.' + role);
+  /** May the caller do this, according to the runtime's own answer for this row? */
+  const rowAllows = (session: { my_role?: string | null }, action: string): boolean => {
+    const role = session.my_role ?? null;
+    if (role === null || role === undefined) {
+      // The runtime did not say: let the server decide rather than guessing "no".
+      return true;
+    }
+    if (role === 'owner') {
+      return true;
+    }
+    const table: Record<string, string[]> = {
+      editor: ['read', 'chat', 'open', 'close', 'archive', 'download'],
+      participant: ['read', 'chat', 'download'],
+      viewer: ['read', 'download'],
+    };
+    return (table[role] ?? []).includes(action);
   };
 
   return (
@@ -146,7 +177,7 @@ export function SessionsView() {
                 <th>{t('sessions.sessionTitle')}</th>
                 <th>{t('sessions.sessionId')}</th>
                 <th>{t('common.state')}</th>
-                <th>{t('sessions.user')}</th>
+                <th>{t('sessions.owner')}</th>
                 <th>{t('sessions.msgs')}</th>
                 <th>{t('common.updated')}</th>
                 <th />
@@ -166,7 +197,7 @@ export function SessionsView() {
                   <td>
                     <Badge tone={stateTone(session.state)}>{tState(session.state)}</Badge>
                   </td>
-                  <td>{session.user_id}</td>
+                  <td>{ownerLabel(session)}</td>
                   <td>{session.message_count}</td>
                   <td>{formatDateTime(session.updated_at)}</td>
                   <td className="cell-actions">
@@ -180,17 +211,35 @@ export function SessionsView() {
                     >
                       {t('sessions.open')}
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-small"
-                      disabled={busy}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void closeSession(session.id);
-                      }}
-                    >
-                      {t('sessions.close')}
-                    </button>
+                    {session.state === 'closed' ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-small"
+                        // The row's own role decides, when the runtime sent one: the detail panel is
+                        // about one session, and a list is about all of them.
+                        disabled={busy || !rowAllows(session, 'open')}
+                        title={t('sessions.openHint')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void openSession(session.id);
+                        }}
+                      >
+                        {t('sessions.reopen')}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-small"
+                        disabled={busy || !rowAllows(session, 'close')}
+                        title={t('sessions.closeHint')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void closeSession(session.id);
+                        }}
+                      >
+                        {t('sessions.close')}
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -249,6 +298,13 @@ export function SessionsView() {
                 actor: detail.session.actor_id,
                 worker: detail.session.worker_id ?? t('sessions.unassigned'),
                 created: formatDateTime(detail.session.created_at),
+              })}
+            </p>
+            <p className="muted small">
+              {t('sessions.accessLine', {
+                owner: ownerLabel(detail.session),
+                role: roleLabel(myRole),
+                capabilities: (detail.you?.can ?? []).join(', '),
               })}
             </p>
             {detail.runtime === null ? (
