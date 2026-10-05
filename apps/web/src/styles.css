@@ -1312,6 +1312,48 @@ textarea:focus {
   color: var(--danger, #c0392b);
 }
 
+/* ------------------------------------------------------------------ diagrams */
+
+.mermaid-figure {
+  margin: 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mermaid {
+  overflow-x: auto;
+  /* A diagram is drawn at its natural size and scrolled, never squeezed: a squeezed flowchart is
+     unreadable and the labels collide. */
+  max-width: 100%;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mermaid-pending,
+.mermaid-error {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.mermaid-error pre {
+  margin: 4px 0 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
 /* ------------------------------------------------------------------ degraded runs */
 
 .degraded-note {

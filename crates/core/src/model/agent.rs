@@ -17,6 +17,12 @@ pub struct AgentSpec {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub temperature: f32,
     pub timeout_ms: u64,
+    /// Output ceiling for the final answer. Zero leaves it to the provider.
+    #[serde(default)]
+    pub final_answer_max_tokens: u32,
+    /// Output ceiling for the planning call. Zero leaves it to the provider.
+    #[serde(default)]
+    pub plan_max_tokens: u32,
 }
 
 /// How hard the model should think before answering.
@@ -79,6 +85,8 @@ impl Default for AgentSpec {
             reasoning_effort: None,
             temperature: 0.2,
             timeout_ms: 60_000,
+            final_answer_max_tokens: 0,
+            plan_max_tokens: 0,
         }
     }
 }

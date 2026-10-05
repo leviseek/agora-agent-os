@@ -249,6 +249,10 @@ impl Kernel {
             spec: AgentSpec {
                 allowed_capabilities: vec![],
                 max_steps: config.policy.max_steps_per_run,
+                // Ceilings from policy: the last call of a run is the one that must not be starved
+                // by a thinking model's own reasoning.
+                final_answer_max_tokens: config.policy.final_answer_max_tokens,
+                plan_max_tokens: config.policy.plan_max_tokens,
                 ..AgentSpec::default()
             },
             node_id: node.clone(),
@@ -648,6 +652,11 @@ fn register_builtins(registry: &Arc<CapabilityRegistry>) -> Result<()> {
         agentos_capability_runtime::file_tools::FilesystemSearchCapability::default(),
     ))?;
     registry.register(Arc::new(ClockCapability))?;
+    // Reading an attachment that was too long for the prompt. Registered here because the kernel is
+    // where the artifact store is in scope.
+    registry.register(Arc::new(
+        agentos_agent_runtime::documents::DocumentReadCapability,
+    ))?;
     Ok(())
 }
 

@@ -576,6 +576,9 @@ impl AgentLoop {
         let mut request = request;
         request.reasoning_effort = self.spec.reasoning_effort;
         request.model_hint = self.spec.model_hint.clone();
+        if self.spec.plan_max_tokens > 0 {
+            request.max_tokens = Some(self.spec.plan_max_tokens);
+        }
 
         if let Err(e) = self
             .deps
@@ -855,6 +858,12 @@ impl AgentLoop {
         let mut request = ModelRequest::new(ModelTask::Summarize, messages).with_tools(tools);
         request.reasoning_effort = self.spec.reasoning_effort;
         request.model_hint = self.spec.model_hint.clone();
+        // Room for the answer, on purpose. Without a ceiling the provider decides, and a thinking
+        // model that spends that room on reasoning returns no answer text at all - measured on a long
+        // table, where the whole plan had succeeded and only the last call came back empty.
+        if self.spec.final_answer_max_tokens > 0 {
+            request.max_tokens = Some(self.spec.final_answer_max_tokens);
+        }
         let response = match &self.deltas {
             Some(sink) => self.deps.models.complete_streaming(request, sink.as_ref()).await,
             None => self.deps.models.complete(request).await,

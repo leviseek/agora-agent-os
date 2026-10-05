@@ -206,12 +206,156 @@ pub fn documents_context(documents: &[AttachedDocument]) -> Option<String> {
         lines.push(format!("--- {name} ---"));
         lines.push(document.text.clone());
         if document.truncated {
+            // Say how to continue, in the terms the capability takes. A model told only that "the rest
+            // is somewhere" asks the user to re-upload the file, which is exactly what this note is
+            // here to prevent.
             lines.push(format!(
-                "--- {name}: cut after {MAX_DOCUMENT_CHARS} characters; the whole file is in the artifact store ---"
+                "--- {name}: only the first {MAX_DOCUMENT_CHARS} characters are above. The rest is \
+                 readable: call the attachment-read capability with \"name\" set to \"{name}\" and an \
+                 \"offset\" to continue from. A multi-sheet spreadsheet is divided by '## sheet: <name>' \
+                 sections. ---"
             ));
         }
     }
     Some(lines.join("\n"))
+}
+
+
+/// Read an attached document, in slices.
+///
+/// The prompt carries the beginning of an attached file (`MAX_DOCUMENT_CHARS`). A table longer than
+/// that is neither lost nor has to be uploaded again: this capability reads the rest, by name and by
+/// offset, out of the artifact store.
+///
+/// Scoped to the session that owns the file, on purpose. An artifact id is a capability of its own,
+/// and a reader that accepted any id would let one session read another session's attachments.
+pub struct DocumentReadCapability;
+
+/// Default slice: a comfortable page of a table, well under what a prompt can carry.
+const DOCUMENT_PAGE_CHARS: usize = 8_000;
+/// The most a single call may return.
+const DOCUMENT_PAGE_MAX: usize = 24_000;
+
+#[async_trait::async_trait]
+impl agentos_capability_runtime::capability::Capability for DocumentReadCapability {
+    fn descriptor(&self) -> agentos_core::model::CapabilityDescriptor {
+        use agentos_core::model::{
+            CapabilityDescriptor, CapabilityKind, CapabilityPermission, CapabilityProvider,
+        };
+        use agentos_core::state::CapabilityHealth;
+        CapabilityDescriptor {
+            id: agentos_core::CapabilityId::new(),
+            name: "attachment-read".into(),
+            version: "1.0.0".into(),
+            description: "Read an attached text file (CSV, TSV, Markdown, JSON, plain text, or a spreadsheet already read into rows). The prompt shows the beginning; use offset to continue.".into(),
+            kind: CapabilityKind::Builtin,
+            tags: vec!["attachment".into(), "read".into(), "table".into()],
+            input_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "name": { "type": "string", "maxLength": 256, "description": "Part of the file name; omit when the session has one attachment." },
+                    "offset": { "type": "number", "minimum": 0, "description": "Character offset to start at." },
+                    "limit": { "type": "number", "minimum": 1, "maximum": DOCUMENT_PAGE_MAX, "description": "Characters to return." }
+                }
+            }),
+            output_schema: serde_json::json!({
+                "type": "object",
+                "required": ["name", "content", "offset", "total_chars", "has_more"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "content": { "type": "string" },
+                    "offset": { "type": "number" },
+                    "total_chars": { "type": "number" },
+                    "next_offset": { "type": "number" },
+                    "has_more": { "type": "boolean" }
+                }
+            }),
+            permission: CapabilityPermission::read_only_fs(),
+            provider: CapabilityProvider::Local,
+            timeout_ms: 5_000,
+            idempotent: true,
+            health: CapabilityHealth::Healthy,
+            load: None,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        input: serde_json::Value,
+        ctx: agentos_capability_runtime::capability::CapabilityContext,
+    ) -> Result<serde_json::Value> {
+        let Some(artifacts) = ctx.artifacts.clone() else {
+            return Err(RuntimeError::unavailable("this runtime has no artifact store"));
+        };
+        let session = ctx.caller.session_id.clone();
+        // Only this session's text files: an id from somewhere else is not addressable here.
+        let records = artifacts.list(&session, 500).await?;
+        let documents: Vec<ArtifactRecord> = records
+            .into_iter()
+            .filter(|record| record.kind == ArtifactKind::Text)
+            .collect();
+        if documents.is_empty() {
+            return Err(RuntimeError::not_found(
+                "this session has no attached text file: attach one, then name it in the goal",
+            ));
+        }
+        let wanted = input
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let chosen = match wanted {
+            Some(name) => documents
+                .iter()
+                .find(|record| record.name.eq_ignore_ascii_case(name))
+                .or_else(|| documents.iter().find(|record| record.name.contains(name)))
+                .ok_or_else(|| {
+                    RuntimeError::not_found(format!(
+                        "no attached file matches {name:?}; this session has: {}",
+                        documents
+                            .iter()
+                            .map(|record| record.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?,
+            // No name: the newest attachment is what "the file" means to a reader.
+            None => documents.last().expect("checked non-empty"),
+        };
+        let bytes = artifacts.read(&chosen.id).await?.ok_or_else(|| {
+            RuntimeError::not_found(format!("attachment {} has no bytes", chosen.name))
+        })?;
+        let text = String::from_utf8_lossy(&bytes);
+        let characters: Vec<char> = text.chars().collect();
+        let total = characters.len();
+        let offset = input
+            .get("offset")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let limit = input
+            .get("limit")
+            .and_then(|value| value.as_u64())
+            .map(|value| (value as usize).clamp(1, DOCUMENT_PAGE_MAX))
+            .unwrap_or(DOCUMENT_PAGE_CHARS);
+        if total > 0 && offset >= total {
+            return Err(RuntimeError::invalid_input(format!(
+                "offset {offset} is past the end of {} ({total} characters)",
+                chosen.name
+            )));
+        }
+        let end = (offset + limit).min(total);
+        let content: String = characters[offset..end].iter().collect();
+        Ok(serde_json::json!({
+            "name": chosen.name,
+            "content": content,
+            "offset": offset,
+            "returned_chars": end - offset,
+            "total_chars": total,
+            "next_offset": end,
+            "has_more": end < total,
+        }))
+    }
 }
 
 #[cfg(test)]

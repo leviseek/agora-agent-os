@@ -231,6 +231,16 @@ pub struct PolicyConfig {
     pub capability_retries: u32,
     pub allow_network_capabilities: bool,
     pub max_artifact_bytes: u64,
+    /// Output ceiling for the call that writes the final answer.
+    ///
+    /// A thinking model spends its budget on reasoning first, and an answer with no ceiling is
+    /// answered by whatever the provider defaults to - which was measured returning reasoning and no
+    /// answer text at all on a long table. A floor on the room available is what stops the last call
+    /// of a run from being the one that fails.
+    pub final_answer_max_tokens: u32,
+    /// Output ceiling for the planning call. A plan with several steps and their inputs is not
+    /// short, and a truncated plan is a parse failure.
+    pub plan_max_tokens: u32,
 }
 
 /// Every field falls back to its default when a configuration file omits it, so a file written
@@ -518,6 +528,10 @@ impl Default for PolicyConfig {
             capability_retries: 2,
             allow_network_capabilities: false,
             max_artifact_bytes: 8 * 1024 * 1024,
+            // Generous enough that a table plus prose fits, small enough that one call cannot run
+            // away with a provider's whole context.
+            final_answer_max_tokens: 4096,
+            plan_max_tokens: 2048,
         }
     }
 }
