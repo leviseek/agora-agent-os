@@ -570,8 +570,8 @@ impl SessionManager {
             let Ok(canonical) = tokio::fs::canonicalize(entry.path()).await else {
                 continue;
             };
-            // A symlink pointing outside the root is not a place a workspace may live.
-            if !canonical.starts_with(&root) {
+            // A symlink pointing outside every allowed root is not a place a workspace may live.
+            if !roots.iter().any(|allowed| canonical.starts_with(allowed)) {
                 continue;
             }
             let claimed_by = claimed.get(&canonical.to_string_lossy().to_string()).cloned();
