@@ -13,7 +13,7 @@ function isPlaceholderProvider(provider: string): boolean {
   return PLACEHOLDER_PROVIDERS.has(provider) || provider.startsWith('agentos-mock');
 }
 import { useNav } from '../navigation';
-import { EMPTY_DRAFT, IMAGE_TYPES, useApp } from '../store';
+import { EMPTY_DRAFT, IMAGE_TYPES, MAX_IMAGE_BYTES, useApp } from '../store';
 import type { PendingAttachment } from '../store';
 import type { EventRecord, RunSummary } from '../api';
 
@@ -160,16 +160,30 @@ export function ChatView() {
       if (session === null || files.length === 0) return;
       const accepted = files.filter((file) => file.size > 0);
       const stagedFor = session;
-      const items: PendingAttachment[] = accepted.map((file) => ({
-        key: 'att-' + ++attachmentKey,
-        name: file.name.length > 0 ? file.name : 'pasted image',
-        status: 'uploading',
-        // A blob URL renders the thumbnail before the bytes have made the round trip.
-        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
-      }));
+      const tooLarge = accepted.filter((file) => file.size > MAX_IMAGE_BYTES);
+      const sendable = accepted.filter((file) => file.size <= MAX_IMAGE_BYTES);
+      const items: PendingAttachment[] = [
+        ...sendable.map((file) => ({
+          key: 'att-' + ++attachmentKey,
+          name: file.name.length > 0 ? file.name : 'pasted image',
+          status: 'uploading' as const,
+          // A blob URL renders the thumbnail before the bytes have made the round trip.
+          previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+        })),
+        // Refused here rather than by the gateway: the answer is the same, minus the megabytes and
+        // the wait.
+        ...tooLarge.map((file) => ({
+          key: 'att-' + ++attachmentKey,
+          name: file.name,
+          status: 'error' as const,
+          previewUrl: null,
+          error: `${(file.size / (1024 * 1024)).toFixed(1)} MiB is over the ${MAX_IMAGE_BYTES / (1024 * 1024)} MiB image limit`,
+        })),
+      ];
       if (items.length === 0) return;
       updateComposerDraft(stagedFor, { pending: [...(composerDrafts[stagedFor]?.pending ?? []), ...items] });
-      const { uploaded, failed } = await uploadAttachments(session, accepted);
+      if (sendable.length === 0) return;
+      const { uploaded, failed } = await uploadAttachments(session, sendable);
       // The queue of the session the file was dropped into, never the one on screen now: uploading
       // takes a moment and the user may have moved on. Applying by key means a batch that finishes
       // first cannot be overwritten by one that finishes later.

@@ -89,16 +89,20 @@ pub fn router(state: ApiState) -> Router {
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz))
         .merge(v1)
-        // Sized for an image, not for a JSON payload: the runtime accepts images up to 5 MiB
-        // (agent_runtime::images::MAX_IMAGE_BYTES) and base64 inflates them by a third. The old
-        // 4 MiB limit rejected a legal image before any handler could explain why - the client saw
-        // a bare 413 for a file the UI had just accepted.
-        .layer(RequestBodyLimitLayer::new(
-            agentos_agent_runtime::images::MAX_IMAGE_BYTES as usize * 2 + 1024 * 1024,
-        ))
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES))
+        // A 413 from the body limit is raised before any handler runs, so without this the caller
+        // sees axum's "length limit exceeded" and has no way to tell what the limit is.
+        .layer(axum::middleware::from_fn(request_too_large))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
+
+/// The largest request the gateway will read.
+///
+/// Sized for an image, not for a JSON payload: the runtime accepts images up to 5 MiB
+/// (`agent_runtime::images::MAX_IMAGE_BYTES`) and base64 inflates them by a third. The old 4 MiB
+/// limit rejected a legal image before any handler could explain why.
+pub const MAX_REQUEST_BYTES: usize = agentos_agent_runtime::images::MAX_IMAGE_BYTES as usize * 2 + 1024 * 1024;
 
 /// Serve until cancelled. Returns the bound address.
 pub async fn serve(
@@ -129,6 +133,30 @@ pub async fn serve(
     .await
     .map_err(|e| RuntimeError::network(format!("gateway failed: {e}")))?;
     Ok(bound)
+}
+
+/// Turn the body limiter's refusal into the same error shape as every other route.
+async fn request_too_large(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let response = next.run(request).await;
+    if response.status() != axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        return response;
+    }
+    let body = serde_json::json!({
+        "error": {
+            "code": "invalid_input",
+            "message": format!(
+                "the request body is larger than this gateway reads ({MAX_REQUEST_BYTES} bytes). An image is capped at {} bytes before encoding.",
+                agentos_agent_runtime::images::MAX_IMAGE_BYTES,
+            ),
+            "retryable": false,
+            "details": null,
+        }
+    });
+    (axum::http::StatusCode::PAYLOAD_TOO_LARGE, axum::Json(body)).into_response()
 }
 
 /// Serve on an ephemeral port and return it. Used by integration tests.

@@ -86,6 +86,15 @@ export interface UploadedAttachment {
 export const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp';
 
 /**
+ * The runtime's own cap on an image, in bytes.
+ *
+ * Duplicated here on purpose: the upload would fail with a size error anyway, but spending a
+ * multi-megabyte round trip to be told so - and leaving the composer waiting on it - is worse than
+ * saying no immediately. The runtime remains the authority.
+ */
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
  * One file on its way to the runtime.
  *
  * `uploading` exists so the composer never lies: a drop that has not landed yet must not look
