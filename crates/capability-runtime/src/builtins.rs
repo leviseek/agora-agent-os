@@ -181,8 +181,32 @@ impl Capability for CalculatorCapability {
     }
 }
 
+/// The operators as they are actually written.
+///
+/// A model answering in Chinese writes "400×(1003+2200)/2" - and the parser, which takes ASCII, threw
+/// "unexpected trailing input" at the sign. Failing a step over a multiplication sign is not a
+/// correctness property, it is a spelling test; the characters are normalised before parsing.
+fn normalise_operators(expression: &str) -> String {
+    expression
+        .chars()
+        .map(|character| match character {
+            '×' | '✕' | '＊' => '*',
+            '÷' | '／' => '/',
+            '＋' => '+',
+            '－' | '—' | '−' => '-',
+            '％' => '%',
+            '＾' => '^',
+            '（' => '(',
+            '）' => ')',
+            '，' | '、' => ',',
+            other => other,
+        })
+        .collect()
+}
+
 /// Evaluate an arithmetic expression. Rejects anything that is not arithmetic.
 pub fn evaluate(expression: &str) -> Result<f64> {
+    let expression = normalise_operators(expression);
     let mut parser = Parser { chars: expression.chars().collect(), pos: 0 };
     let value = parser.expression()?;
     parser.skip_ws();
@@ -563,6 +587,32 @@ mod tests {
         let d = std::env::temp_dir().join(format!("agentos-cap-{}", agentos_core::now_ms()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_calculator_takes_the_operators_a_model_actually_writes() {
+        // Measured: a Chinese-language answer wrote "400×(1003+2200)/2" and the parser rejected the
+        // multiplication sign, which failed the step and cost the run its verification.
+        assert_eq!(evaluate("400×(1003+2200)/2").unwrap(), 640_600.0);
+        assert_eq!(evaluate("6÷2").unwrap(), 3.0);
+        assert_eq!(evaluate("（1＋2）×3").unwrap(), 9.0);
+        assert_eq!(evaluate("10－4").unwrap(), 6.0);
+        // Still strict about everything else.
+        assert!(evaluate("sum(营收)").is_err());
+    }
+
+    #[tokio::test]
+    async fn the_calculator_answers_several_expressions_in_one_call() {
+        let cap = CalculatorCapability::new();
+        let out = cap
+            .invoke(
+                json!({"expression": "1+1; 2+2\n3+3", "note": "three sums"}),
+                ctx(CapabilityPermission::pure(), &tmpdir()),
+            )
+            .await
+            .expect("three expressions evaluate");
+        assert_eq!(out["results"], json!([2.0, 4.0, 6.0]), "{out}");
+        assert_eq!(out["result"], json!(6.0), "the single field carries the last one: {out}");
     }
 
     #[tokio::test]
