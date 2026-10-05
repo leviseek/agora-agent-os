@@ -17,3 +17,7 @@ apps/web/mdcheck-dist
 # The default archive root (storage.archive_dir). Archived conversations are the user's data and
 # belong on disk, not in the repository.
 /archives
+
+# The default workspace root (policy.workspace_root). One directory per workspace, and everything a
+# capability may write lives under it - which is user data for the same reason /data is.
+/workspace
