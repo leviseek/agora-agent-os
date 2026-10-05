@@ -167,6 +167,13 @@ pub struct ModelResponse {
     pub usage: Usage,
     pub latency_ms: u64,
     pub finish_reason: String,
+    /// The model's thinking, when it streamed any and produced no answer text.
+    ///
+    /// Kept apart from `content` on purpose: reasoning is not an answer, and a caller that shows it
+    /// as one is presenting the model's notes as its conclusion. It is here so a caller can retry
+    /// with a hint, or say plainly that the model only thought and never answered.
+    #[serde(default)]
+    pub reasoning: String,
     /// Providers that were tried first and failed, as "name: error".
     ///
     /// The router fails over by design, but a caller - and the person reading the answer - must be
@@ -187,6 +194,7 @@ impl ModelResponse {
             usage: Usage::default(),
             latency_ms: 0,
             finish_reason: "stop".into(),
+            reasoning: String::new(),
             failed_over_from: vec![],
         }
     }

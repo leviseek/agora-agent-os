@@ -162,6 +162,48 @@ pub fn history_for_model(
     kept
 }
 
+/// The results of the steps a run executed, as text for a model - or for the reader, when no model
+/// produced an answer and the results are all there is.
+fn observations_context(observations: &[(String, serde_json::Value)]) -> Option<String> {
+    if observations.is_empty() {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "The runtime ran {} step(s) for the goal above. Their results follow; use them to answer, and \
+         do not invent results for steps that are not listed.",
+        observations.len()
+    )];
+    for (title, value) in observations {
+        lines.push(format!(
+            "- {title}: {}",
+            serde_json::json!({ "output": value })
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
+/// The results a step's dependencies produced, as text for the model.
+///
+/// A step in the middle of a plan is otherwise blind to everything the plan already did, which is
+/// how a parse step ends up telling the user it cannot read the file that was just read.
+fn plan_result_context(dependency_outputs: &std::collections::BTreeMap<TaskId, serde_json::Value>) -> String {
+    if dependency_outputs.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec![format!(
+        "Results of the {} step(s) this one depends on. Use them; do not claim you cannot see data \
+         that is written here.",
+        dependency_outputs.len()
+    )];
+    for (task, value) in dependency_outputs {
+        lines.push(format!(
+            "- step {task} returned: {}",
+            serde_json::json!({ "output": value })
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Assemble everything that precedes the goal, in the order that makes it readable.
 fn push_context(messages: &mut Vec<ChatMessage>, context: &PromptContext<'_>) {
     // Instructions from the repository come first: they are the rules of the place.
@@ -484,18 +526,30 @@ impl AgentLoop {
             "{}\nRespond with JSON only: {{\"goal\": string, \"reasoning\": string, \"steps\": [{{\"id\": string, \"description\": string, \"kind\": \"think\"|\"capability\"|\"respond\", \"capability\": string|null, \"input\": object, \"depends_on\": [string]}}]}}",
             self.spec.system_prompt
         );
+        // No tools on this request, deliberately. The planner's whole job is to answer with a plan,
+        // and a tool list next to "respond with JSON only" invites the model to call a capability
+        // instead of writing one - which comes back as tool_calls with no content, leaves nothing to
+        // parse, and the run continues on a fallback plan nobody chose. What the planner needs to
+        // know is which capabilities *exist*, and that is in the system prompt: the runtime executes
+        // the plan itself, through the mesh, with policy, retries and timeouts.
+        let capability_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let request = ModelRequest::new(
             ModelTask::Plan,
             {
                 // The plan is where a follow-up like "now do the same for the other file" is
                 // understood, so the conversation goes in front of the goal, not behind it.
                 let mut messages = vec![ChatMessage::system(system)];
+                if !capability_names.is_empty() {
+                    messages.push(ChatMessage::system(format!(
+                        "Capabilities you may name in a step: {}",
+                        capability_names.join(", ")
+                    )));
+                }
                 push_context(&mut messages, &context);
                 messages.push(ChatMessage::user(goal.to_string()).with_images(context.images.to_vec()));
                 messages
             },
         )
-        .with_tools(tools)
         .with_json();
         let mut request = request;
         request.reasoning_effort = self.spec.reasoning_effort;
@@ -534,19 +588,55 @@ impl AgentLoop {
         let plan = parsed
             .as_ref()
             .and_then(|v| parse_plan(goal, v))
-            .unwrap_or_else(|| Plan {
-                goal: goal.to_string(),
-                reasoning: format!("the model did not return a parsable plan ({}), answering directly", response.provider),
-                steps: vec![PlanStep {
-                    id: "respond-1".into(),
-                    description: "Answer the user directly.".into(),
-                    kind: PlanStepKind::Respond,
-                    capability: None,
-                    input: serde_json::json!({ "content": response.content }),
-                    depends_on: vec![],
-                }],
-                answered_by: Some((response.provider.clone(), response.model.clone())),
-                failed_over_from: response.failed_over_from.clone(),
+            .unwrap_or_else(|| {
+                // No parsable plan. Two very different situations, and the difference is whether the
+                // model said anything: prose becomes the answer (it answered instead of planning),
+                // but *nothing* must not become an empty answer - that is how a run "succeeded" with
+                // an empty string and the user got a blank bubble.
+                let answered_in_prose = !response.content.trim().is_empty();
+                if !answered_in_prose {
+                    tracing::warn!(
+                        provider = response.provider.as_str(),
+                        finish_reason = response.finish_reason.as_str(),
+                        tool_calls = response.tool_calls.len(),
+                        "the planner returned no content; falling back to a plain answer step"
+                    );
+                }
+                Plan {
+                    goal: goal.to_string(),
+                    reasoning: if answered_in_prose {
+                        format!(
+                            "the model did not return a parsable plan ({}), answering directly",
+                            response.provider
+                        )
+                    } else {
+                        format!(
+                            "the model returned no plan and no text ({}); asking it for a direct answer",
+                            response.provider
+                        )
+                    },
+                    steps: vec![if answered_in_prose {
+                        PlanStep {
+                            id: "respond-1".into(),
+                            description: "Answer the user directly.".into(),
+                            kind: PlanStepKind::Respond,
+                            capability: None,
+                            input: serde_json::json!({ "content": response.content }),
+                            depends_on: vec![],
+                        }
+                    } else {
+                        PlanStep {
+                            id: "think-1".into(),
+                            description: "Answer the user directly.".into(),
+                            kind: PlanStepKind::Think,
+                            capability: None,
+                            input: serde_json::json!({}),
+                            depends_on: vec![],
+                        }
+                    }],
+                    answered_by: Some((response.provider.clone(), response.model.clone())),
+                    failed_over_from: response.failed_over_from.clone(),
+                }
             });
         let mut plan = plan;
         // The plan carries its own provenance, so an answer that came out of planning can still say
@@ -688,6 +778,64 @@ impl AgentLoop {
         match response {
             Ok(r) => {
                 meter.record(&r.usage);
+                // No answer text, but the model did think. Asking the same question again, with only
+                // the goal and the results in front of it, is the cheapest thing that can turn
+                // "here is my reasoning" into an answer - measured on a CSV summary where the whole
+                // plan had succeeded and the final call returned thinking alone.
+                if r.content.trim().is_empty() && !r.reasoning.trim().is_empty() {
+                    tracing::warn!(
+                        provider = r.provider.as_str(),
+                        "the final call answered with reasoning only; asking once more, directly"
+                    );
+                    let mut retry = ModelRequest::new(
+                        ModelTask::Summarize,
+                        {
+                            let mut messages = vec![ChatMessage::system(format!(
+                                "{}\nAnswer the goal directly, in prose. Do not plan, do not explain \
+                                 your process, and do not ask for tools: the results below are already \
+                                 the evidence.",
+                                self.spec.system_prompt
+                            ))];
+                            if let Some(upstream) = observations_context(observations) {
+                                messages.push(ChatMessage::system(upstream));
+                            }
+                            messages.push(ChatMessage::user(goal.to_string()));
+                            messages
+                        },
+                    );
+                    retry.reasoning_effort = self.spec.reasoning_effort;
+                    retry.model_hint = self.spec.model_hint.clone();
+                    if let Ok(again) = self.deps.models.complete(retry).await {
+                        meter.record(&again.usage);
+                        if !again.content.trim().is_empty() {
+                            return Ok(FinalAnswer {
+                                text: again.content,
+                                answered_by: Some((again.provider, again.model)),
+                                failed_over_from: again.failed_over_from,
+                            });
+                        }
+                    }
+                    // Still nothing but thinking. Say so, and hand over what the plan produced: an
+                    // honest report beats both an empty bubble and a run marked failed after every
+                    // step of it succeeded.
+                    return Ok(FinalAnswer {
+                        text: match observations_context(observations) {
+                            Some(results) => format!(
+                                "The model returned no answer text - only its reasoning - so here are \
+                                 the results of the steps it ran.\n\n{results}"
+                            ),
+                            None => format!(
+                                "The model returned no answer text (provider {}, finish reason {}), \
+                                 only its reasoning. Its notes:\n\n{}",
+                                r.provider,
+                                r.finish_reason,
+                                r.reasoning.trim()
+                            ),
+                        },
+                        answered_by: None,
+                        failed_over_from: r.failed_over_from,
+                    });
+                }
                 if r.content.trim().is_empty() {
                     return Err(RuntimeError::model("the model returned an empty final answer"));
                 }
@@ -823,10 +971,21 @@ impl TaskRunner for PlanTaskRunner {
                 Ok(result.output)
             }
             TaskPayload::Model { prompt, model_hint } => {
-                let mut request = ModelRequest::new(
-                    ModelTask::Think,
-                    vec![ChatMessage::system(self.system_prompt.clone()), ChatMessage::user(prompt.clone())],
-                );
+                // What this step's dependencies produced, in the prompt.
+                //
+                // Without it a step in the middle of a plan is blind: a planner that reads a file in
+                // step 2 and parses it in step 3 produced a step 3 whose model answered "cannot read
+                // the workspace" - truthfully, because it had been handed nothing. Measured on a CSV
+                // summary: the read succeeded, the parse step refused, the calculator steps received
+                // the planner's placeholder text and failed, and the run ended with the model
+                // thinking out loud instead of a table.
+                let upstream = plan_result_context(&ctx.dependency_outputs);
+                let mut messages = vec![ChatMessage::system(self.system_prompt.clone())];
+                if !upstream.is_empty() {
+                    messages.push(ChatMessage::system(upstream));
+                }
+                messages.push(ChatMessage::user(prompt.clone()));
+                let mut request = ModelRequest::new(ModelTask::Think, messages);
                 // A step that names a provider wins; otherwise the run's choice applies.
                 request.model_hint = model_hint.clone().or_else(|| self.model_hint.clone());
                 request.reasoning_effort = self.reasoning_effort;

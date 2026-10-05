@@ -781,6 +781,7 @@ mod streaming_tests {
                     latency_ms: 1,
                     finish_reason: "stop".into(),
                     failed_over_from: vec![],
+                    reasoning: String::new(),
                 })
             }
         }

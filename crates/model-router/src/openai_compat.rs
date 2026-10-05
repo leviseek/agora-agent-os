@@ -241,21 +241,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .with_detail("body", truncate(&text, 512))
             })?;
 
-        let mut content = message
+        let content = message
             .get("content")
             .and_then(|c| c.as_str())
             .unwrap_or_default()
             .to_string();
-        if content.trim().is_empty() {
-            if let Some(reasoning) = message.get("reasoning_content").and_then(|c| c.as_str()) {
-                if !reasoning.trim().is_empty() {
-                    content = format!(
-                        "_(no answer text came back; this is the model's reasoning)_\n\n{}",
-                        reasoning.trim()
-                    );
-                }
-            }
-        }
+        // A plain completion can also answer with reasoning and no text; both fields travel.
+        let reasoning = message
+            .get("reasoning_content")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string();
 
         let mut tool_calls = Vec::new();
         if let Some(calls) = message.get("tool_calls").and_then(|c| c.as_array()) {
@@ -304,6 +300,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             },
             latency_ms: agentos_core::now_ms().saturating_sub(started),
             finish_reason,
+            reasoning,
             failed_over_from: vec![],
         })
     }
@@ -458,22 +455,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
             if tool_calls.is_empty() { "stop".to_string() } else { "tool_calls".to_string() }
         });
 
-        // Empty prose is not an answer, but it is also not nothing: if the model reasoned and then
-        // produced no visible text, the reasoning is what it said. Handing that back is honest and
-        // useful; an empty string here became "the model returned an empty final answer", which
-        // told the reader nothing at all.
+        // No answer text. The reasoning is NOT substituted for it: reasoning is the model's notes,
+        // and a caller that prints notes as the conclusion is putting words in its mouth. It travels
+        // in its own field, so the caller can retry with a hint or say plainly what happened.
         if content.trim().is_empty() && !reasoning.trim().is_empty() {
             tracing::warn!(
                 provider = self.name.as_str(),
                 finish_reason = finish_reason.as_str(),
                 reasoning_chars = reasoning.len(),
-                "the model streamed reasoning but no answer; returning the reasoning"
+                "the model streamed reasoning but no answer text"
             );
-            content = format!(
-                "_(no answer text came back; this is the model's reasoning)_\n\n{}",
-                reasoning.trim()
-            );
-            on_delta(content.clone());
         }
 
         Ok(ModelResponse {
@@ -488,6 +479,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             },
             latency_ms: agentos_core::now_ms().saturating_sub(started),
             finish_reason,
+            reasoning,
             failed_over_from: vec![],
         })
     }

@@ -287,6 +287,7 @@ impl ModelProvider for MockProvider {
                 latency_ms: agentos_core::now_ms().saturating_sub(started),
                 finish_reason: "stop".into(),
                 failed_over_from: vec![],
+                reasoning: String::new(),
             });
         }
 
@@ -335,6 +336,7 @@ impl ModelProvider for MockProvider {
                 latency_ms: agentos_core::now_ms().saturating_sub(started),
                 finish_reason: "stop".into(),
                 failed_over_from: vec![],
+                reasoning: String::new(),
             });
         }
 
@@ -359,6 +361,7 @@ impl ModelProvider for MockProvider {
                     latency_ms: agentos_core::now_ms().saturating_sub(started),
                     finish_reason: "tool_calls".into(),
                     failed_over_from: vec![],
+                    reasoning: String::new(),
                 });
             }
         }
@@ -378,6 +381,7 @@ impl ModelProvider for MockProvider {
                     latency_ms: agentos_core::now_ms().saturating_sub(started),
                     finish_reason: "tool_calls".into(),
                     failed_over_from: vec![],
+                    reasoning: String::new(),
                 });
             }
         }
@@ -394,6 +398,7 @@ impl ModelProvider for MockProvider {
             latency_ms: agentos_core::now_ms().saturating_sub(started),
             finish_reason: "stop".into(),
             failed_over_from: vec![],
+            reasoning: String::new(),
         })
     }
 }
