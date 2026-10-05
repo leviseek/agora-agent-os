@@ -561,6 +561,8 @@ export interface WorkspaceDirectory {
 /** One level of the workspace-root picker. */
 export interface WorkspaceDirectoryListing {
   root: string;
+  /** Every root a workspace may live under (the node's own root plus any the operator added). */
+  roots?: string[];
   path: string;
   parent?: string | null;
   /** Whether this folder itself may be chosen. The root may not. */

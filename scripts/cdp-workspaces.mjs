@@ -131,6 +131,10 @@ await step('nav workspaces', () => clickByText('button', 'Workspaces'));
 await sleep(600);
 // The directory is chosen, not typed: open the picker (which lists folders under the workspace root),
 // make a new folder in it, and let "create and choose it" fill the form.
+// In a browser there is no desktop-shell bridge, so the Explorer button is not rendered: the page
+// cannot see a real path, and pretending otherwise would be a button that does nothing.
+console.log('[desktop shell bridge] ' + (await evaluate('typeof window.__TAURI__')));
+
 await step('open picker', () => clickByText('button', 'Browse...'));
 await sleep(800);
 const folderRows = await evaluate(

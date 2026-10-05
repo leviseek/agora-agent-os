@@ -344,3 +344,15 @@ directory; discovery shares knowledge, not state.
 选择器不能变成绕开旁边那份可发现索引的通道。根本身 `selectable: false`（根是所有工作区），
 `..` 被拒，指向根外的符号链接在列举时跳过。另外根路径 Display 去掉 Windows 的 `\?\` 前缀（那是比较用的，
 不是给人读的）。浏览器回归脚本因此不再输入路径，而是走一遍选择器。
+
+**后续（操作系统选择器与额外根，2026-10-05）。** 桌面壳接入 `tauri-plugin-dialog`，新增
+`pick_directory` 命令（`withGlobalTauri` 打开，能力加 `dialog:allow-open`）：控制台在桌面壳里多一个
+「用资源管理器选…」，选中的绝对路径直接回填目录。**浏览器里没有这个按钮**——File System Access API
+只给句柄、不给真实路径，页面没有可发给运行时的东西，这正是两种壳的差别所在。
+配套放开一处边界，且只由运维决定：`policy.extra_workspace_roots`（`AGENTOS_EXTRA_WORKSPACE_ROOTS`，
+分号/逗号分隔）列出**额外允许的工作区根**，默认空。也就是说「用资源管理器挑我自己的项目文件夹」在节点
+配好根之后可用；没配的节点仍然只接受自己根下的目录，公网上这是沙箱与整台机器的区别。
+`browse` 因此返回 `roots` 数组（控制台会说明工作区只能落在哪些根之下），拒绝信息也列出这些根。
+验证：`cargo check`（桌面壳含 dialog 插件）、`cargo test -p agentos-core extra_workspace`、
+HTTP 新测试 `a_workspace_can_live_in_a_configured_extra_root`（额外根下的绝对路径建成、清单列出两个根、
+两处之外的路径 `400` 且消息里点名可接受的根）。

@@ -134,8 +134,12 @@ pub struct WorkspaceDirectory {
 /// One level of the workspace-root picker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceDirectoryListing {
-    /// The node's workspace root, absolute, so the console can say where it is looking.
+    /// The node's own workspace root, absolute - where browsing starts and where a relative path is
+    /// resolved against.
     pub root: String,
+    /// Every root a workspace may live under (`workspace_root` plus any configured extras), so the
+    /// console can show why a folder somewhere else is or is not acceptable.
+    pub roots: Vec<String>,
     /// The path being listed, relative to the root (`""` is the root itself).
     pub path: String,
     /// The parent to go up to, or `None` at the root.
@@ -406,66 +410,99 @@ impl SessionManager {
     /// Creates it if it is not there (naming a folder is as good as making one), then refuses
     /// anything that is not a strict descendant of the node root.
     async fn resolve_workspace_directory(&self, directory: &str) -> Result<PathBuf> {
-        let root = self.workspace_root_canonical().await?;
-        let canonical = self.existing_directory(directory).await?;
-        if canonical == root {
-            return Err(RuntimeError::invalid_input(
-                "a workspace directory must be inside the workspace root, not the root itself",
-            )
+        let roots = self.allowed_workspace_roots().await?;
+        let canonical = self.resolve_directory(directory, true).await?;
+        // A workspace rooted *at* an allowed root would see every other workspace under it.
+        if roots.contains(&canonical) {
+            return Err(RuntimeError::invalid_input(format!(
+                "a workspace needs a folder inside {} - the root itself would contain every other \
+                 workspace",
+                canonical.display()
+            ))
             .with_detail("directory", directory));
         }
         Ok(canonical)
     }
 
-    /// The node's workspace root, canonicalised. Choosing a directory and browsing them have to be
-    /// checked against the same boundary, so it is resolved in one place.
-    async fn workspace_root_canonical(&self) -> Result<PathBuf> {
-        tokio::fs::canonicalize(&self.deps.workspace_root).await.map_err(|error| {
-            RuntimeError::unavailable(format!(
-                "workspace root {} is unusable: {error}",
+    /// Every root a workspace directory may live under.
+    ///
+    /// `workspace_root` is where the runtime's own state lives; the extras are for an operator who
+    /// wants workspaces over project folders somewhere else (`D:\projects`). Empty by default: a node
+    /// that has not said so does not let a caller point a workspace at an arbitrary path.
+    pub async fn allowed_workspace_roots(&self) -> Result<Vec<PathBuf>> {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        let configured = std::iter::once(&self.deps.workspace_root)
+            .chain(self.deps.extra_workspace_roots.iter());
+        for candidate in configured {
+            match tokio::fs::canonicalize(candidate).await {
+                Ok(canonical) => {
+                    if !roots.contains(&canonical) {
+                        roots.push(canonical);
+                    }
+                }
+                // A configured root that is not there is ignored rather than fatal: the runtime still
+                // has its own workspace root, and a missing NAS mount should not stop it booting.
+                Err(error) => tracing::warn!(
+                    root = %candidate.display(),
+                    %error,
+                    "configured workspace root is unusable; ignored"
+                ),
+            }
+        }
+        if roots.is_empty() {
+            return Err(RuntimeError::unavailable(format!(
+                "workspace root {} is unusable",
                 self.deps.workspace_root.display()
-            ))
-        })
+            )));
+        }
+        Ok(roots)
     }
 
-    /// A directory that exists after this call, inside the workspace root (created if missing).
+    /// A directory inside one of the allowed roots, optionally created first.
     ///
-    /// Refusals are checked after canonicalisation, so a symlink out of the root is caught too. The
-    /// root itself is allowed here - it is a legal place to *look*; refusing it as a *workspace* is
-    /// `resolve_workspace_directory`'s job.
-    async fn existing_directory(&self, directory: &str) -> Result<PathBuf> {
+    /// Refusals are checked after canonicalisation, so a symlink out of a root is caught too. The
+    /// roots themselves are allowed here - they are legal places to *look*; refusing one as a
+    /// *workspace* is `resolve_workspace_directory`'s job.
+    async fn resolve_directory(&self, directory: &str, create: bool) -> Result<PathBuf> {
         let requested = Path::new(directory);
         if requested
             .components()
             .any(|part| matches!(part, std::path::Component::ParentDir))
         {
             return Err(RuntimeError::invalid_input(format!(
-                "a workspace directory may not climb out of the workspace root: {directory}"
+                "a workspace directory may not climb out of a workspace root: {directory}"
             ))
             .with_detail("field", "directory"));
         }
-        let root = self.workspace_root_canonical().await?;
+        let roots = self.allowed_workspace_roots().await?;
+        // Relative means "inside the node's own root", which is the default the console offers.
         let target = if requested.is_absolute() {
             requested.to_path_buf()
         } else {
-            root.join(requested)
+            roots[0].join(requested)
         };
-        tokio::fs::create_dir_all(&target).await.map_err(|error| {
-            RuntimeError::invalid_input(format!(
-                "cannot create workspace directory {}: {error}",
-                target.display()
-            ))
-        })?;
+        if create {
+            tokio::fs::create_dir_all(&target).await.map_err(|error| {
+                RuntimeError::invalid_input(format!(
+                    "cannot create workspace directory {}: {error}",
+                    target.display()
+                ))
+            })?;
+        }
         let canonical = tokio::fs::canonicalize(&target).await.map_err(|error| {
             RuntimeError::invalid_input(format!(
                 "workspace directory {} is unusable: {error}",
                 target.display()
             ))
         })?;
-        if !canonical.starts_with(&root) {
+        if !roots.iter().any(|root| canonical.starts_with(root)) {
             return Err(RuntimeError::invalid_input(format!(
-                "a workspace directory must live under {}: {}",
-                root.display(),
+                "a workspace directory must live under one of {}: {}",
+                roots
+                    .iter()
+                    .map(|root| root.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 canonical.display()
             ))
             .with_detail("directory", directory));
@@ -484,17 +521,21 @@ impl SessionManager {
         path: &str,
         principal: &Principal,
     ) -> Result<WorkspaceDirectoryListing> {
-        let root = self.workspace_root_canonical().await?;
+        let roots = self.allowed_workspace_roots().await?;
+        let root = roots[0].clone();
         let current = if path.trim().is_empty() {
             root.clone()
         } else {
-            self.existing_directory(path).await?
+            // `false`: browsing must not create the folder it is looking at.
+            self.resolve_directory(path, false).await?
         };
+        // Under the node's own root a path comes back relative (what a create request takes); under an
+        // extra root it comes back absolute, because there is no single root to be relative to.
         let relative = |target: &Path| -> String {
-            target
-                .strip_prefix(&root)
-                .map(|rest| rest.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default()
+            match target.strip_prefix(&root) {
+                Ok(rest) => rest.to_string_lossy().replace('\\', "/"),
+                Err(_) => printable_path(target),
+            }
         };
 
         // Who claims which directory, resolved once for the whole listing.
@@ -545,6 +586,7 @@ impl SessionManager {
 
         Ok(WorkspaceDirectoryListing {
             root: printable_path(&root),
+            roots: roots.iter().map(|root| printable_path(root)).collect(),
             path: relative(&current),
             parent: if current == root {
                 None

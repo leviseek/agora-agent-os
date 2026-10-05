@@ -17,6 +17,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# The OS folder picker. Only the desktop shell can offer one: a browser page never sees a real path.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

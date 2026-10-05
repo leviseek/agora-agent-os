@@ -347,6 +347,15 @@ pub struct StorageConfig {
 pub struct PolicyConfig {
     /// The only directory any filesystem capability may touch. Path traversal is denied.
     pub workspace_root: PathBuf,
+    /// Extra roots a workspace directory may live under, beside `workspace_root`.
+    ///
+    /// `workspace_root` is where the runtime's own state lives (`./workspace` by default, next to the
+    /// data directory). These are for the operator who wants workspaces over existing project folders
+    /// somewhere else - `D:\projects`, a mounted drive - so a workspace can be pointed at a real
+    /// project instead of a copy under the node's own tree. Empty by default: a node that has not said
+    /// so does not let a caller point a workspace at an arbitrary path, and on a public node that is
+    /// the difference between an agent sandbox and full access to the machine.
+    pub extra_workspace_roots: Vec<PathBuf>,
     /// Empty means "every registered capability is allowed".
     pub allowed_capabilities: Vec<String>,
     pub denied_capabilities: Vec<String>,
@@ -670,6 +679,7 @@ impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
             workspace_root: PathBuf::from("./workspace"),
+            extra_workspace_roots: Vec::new(),
             allowed_capabilities: vec![],
             denied_capabilities: vec![],
             approval_required: vec![],
@@ -842,6 +852,15 @@ impl RuntimeConfig {
             };
         }
         if let Some(v) = Self::env_str("AGENTOS_WORKSPACE_ROOT") { self.policy.workspace_root = PathBuf::from(v); }
+        // Semicolon or comma separated. Not `:` - a Windows path has one in it ("D:\projects").
+        if let Some(v) = Self::env_str("AGENTOS_EXTRA_WORKSPACE_ROOTS") {
+            self.policy.extra_workspace_roots = v
+                .split([';', ','])
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(PathBuf::from)
+                .collect();
+        }
         if let Some(v) = Self::env_str("AGENTOS_MAX_STEPS") {
             if let Ok(n) = v.parse() { self.policy.max_steps_per_run = n; }
         }
@@ -1284,6 +1303,26 @@ mod tests {
     /// silently ignored - exactly the kind of failure a test has to catch, because the feature
     /// simply looks switched off.
     #[test]
+    #[test]
+    fn extra_workspace_roots_come_from_the_environment() {
+        let _guard = env_guard();
+        std::env::set_var("AGENTOS_EXTRA_WORKSPACE_ROOTS", "D:\\projects; /mnt/games , ");
+        let mut cfg = RuntimeConfig::default();
+        cfg.apply_env();
+        std::env::remove_var("AGENTOS_EXTRA_WORKSPACE_ROOTS");
+        // Semicolon or comma; blank entries dropped. A Windows drive letter has a colon in it, which is
+        // why `:` is not a separator.
+        assert_eq!(
+            cfg.policy.extra_workspace_roots,
+            vec![
+                PathBuf::from("D:\\projects"),
+                PathBuf::from("/mnt/games"),
+            ]
+        );
+        // And empty means empty: a node that has not said so allows no extra roots.
+        assert!(RuntimeConfig::default().policy.extra_workspace_roots.is_empty());
+    }
+
     fn an_override_that_cannot_be_honoured_is_reported() {
         let _guard = env_guard();
         // These are set before any log subscriber exists, so the only place they can be seen

@@ -266,6 +266,7 @@ impl Kernel {
             checkpoints: checkpoints.clone(),
             workspaces: workspace_resolver.clone(),
             workspace_root: config.policy.workspace_root.clone(),
+            extra_workspace_roots: config.policy.extra_workspace_roots.clone(),
             spec: AgentSpec {
                 allowed_capabilities: vec![],
                 max_steps: config.policy.max_steps_per_run,

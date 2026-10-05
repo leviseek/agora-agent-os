@@ -125,15 +125,35 @@ fn data_dir() -> String {
     DesktopConfig::default().data_dir
 }
 
+/// Open the operating system's own folder picker and return what was chosen.
+///
+/// A browser cannot do this: the File System Access API hands the page a handle, never a path, so the
+/// page has nothing to send to the runtime. The desktop shell can, which is exactly the difference
+/// between the two shells. Returns `None` when the dialog is cancelled.
+#[tauri::command(rename_all = "camelCase")]
+async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file().set_title("Choose a workspace folder");
+    if let Some(path) = default_path.filter(|path| !path.trim().is_empty()) {
+        dialog = dialog.set_directory(path);
+    }
+    let picked = dialog.blocking_pick_folder();
+    Ok(picked.and_then(|entry| entry.into_path().ok()).map(|path| {
+        path.to_string_lossy().to_string()
+    }))
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(RuntimeHandle(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             runtime_config,
             runtime_health,
             start_runtime,
             stop_runtime,
-            data_dir
+            data_dir,
+            pick_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Agent OS desktop shell");

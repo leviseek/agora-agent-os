@@ -3026,3 +3026,63 @@ async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
     let (status, _) = h.get_as(Some("alice-token"), "/v1/workspaces/browse?path=../..").await;
     assert_eq!(status, 400);
 }
+
+/// A workspace may live under a root the operator allowed, and nowhere else.
+///
+/// This is what makes the desktop shell's Explorer picker usable on a real project folder: the shell
+/// can hand back any path on the machine, and the node decides whether that path is a place a
+/// workspace may be. Without the extra root, the answer is a refusal that names the roots it would
+/// accept - which is also what the console shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workspace_can_live_in_a_configured_extra_root() {
+    let dir = std::env::temp_dir().join(format!("agentos-ro-{}", agentos_core::now_ms()));
+    let workspace_root = dir.join("workspace");
+    let projects = dir.join("projects");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    std::fs::create_dir_all(projects.join("my-game")).unwrap();
+
+    let mut config = RuntimeConfig::default();
+    config.storage.backend = StoreBackend::Memory;
+    config.storage.data_dir = dir.join("data");
+    config.policy.workspace_root = workspace_root.clone();
+    config.policy.extra_workspace_roots = vec![projects.clone()];
+    config.observability.log_level = "error".into();
+    config.api.auth_token_env = "AGENTOS_TEST_ROOTS_TOKEN".into();
+    std::env::remove_var("AGENTOS_TEST_ROOTS_TOKEN");
+    let kernel = Kernel::bootstrap(config).await.unwrap();
+    let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _kernel: kernel,
+        shutdown,
+        client: reqwest::Client::new(),
+    };
+
+    // The operator's own folder, picked with Explorer: an absolute path under the extra root.
+    let picked = projects.join("my-game").display().to_string();
+    let (status, created) = h
+        .post("/v1/workspaces", json!({ "directory": picked, "name": "my game" }))
+        .await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["workspace"]["directory"], picked);
+
+    // The browse listing names both roots, so the console can say where a workspace may live.
+    let (status, listing) = h.get("/v1/workspaces/browse").await;
+    assert_eq!(status, 200, "{listing}");
+    let roots = listing["roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 2, "{listing}");
+
+    // Somewhere that is neither root is refused, and the refusal says what it would accept.
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (status, refused) = h
+        .post("/v1/workspaces", json!({ "directory": elsewhere.display().to_string() }))
+        .await;
+    assert_eq!(status, 400, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("must live under one of"), "{message}");
+    assert!(message.contains("projects"), "the refusal names the roots: {message}");
+
+    h.shutdown.cancel();
+    let _ = std::fs::remove_dir_all(&dir);
+}

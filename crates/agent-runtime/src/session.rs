@@ -108,6 +108,9 @@ pub struct SessionDeps {
     /// resolved against it; kept here as well as inside the resolver because creating a workspace has
     /// to check the choice against the same boundary the resolver enforces.
     pub workspace_root: std::path::PathBuf,
+    /// Extra roots a workspace directory may live under, beside `workspace_root`. Empty unless the
+    /// operator configured some - a node that has not said so does not let a workspace point anywhere.
+    pub extra_workspace_roots: Vec<std::path::PathBuf>,
     pub spec: AgentSpec,
     pub node_id: String,
     pub run_timeout_ms: u64,

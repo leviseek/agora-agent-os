@@ -9,6 +9,18 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ApiErrorBanner, Badge, EmptyState, Loading, Panel } from '../components';
 import type { WorkspaceDirectoryListing } from '../api';
+
+/**
+ * The desktop shell's folder picker, when there is one.
+ *
+ * A browser page cannot do this: the File System Access API hands it a handle, never a path, so there
+ * would be nothing to send to the runtime. The Tauri shell can, which is the one thing it adds here.
+ */
+const nativePicker = (
+  window as unknown as {
+    __TAURI__?: { core?: { invoke?: (command: string, args?: unknown) => Promise<unknown> } };
+  }
+).__TAURI__?.core?.invoke;
 import type { Tone } from '../components';
 import { formatDateTime } from '../format';
 import { useI18n } from '../i18n';
@@ -91,6 +103,20 @@ export function WorkspacesView() {
   };
 
   /** Choosing from the picker fills the directory, and the name follows when it has not been edited. */
+  /** Pick a folder in Explorer/Finder. Returns silently in a browser, where there is no such thing. */
+  const pickWithExplorer = async (): Promise<void> => {
+    if (nativePicker === undefined) return;
+    try {
+      const picked = await nativePicker('pick_directory', {
+        defaultPath: directory.trim().length > 0 ? directory.trim() : (picker?.root ?? ''),
+      });
+      if (typeof picked === 'string' && picked.length > 0) chooseDirectory(picked);
+    } catch {
+      // A cancelled dialog is not an error, and a shell too old to know the command should not stop
+      // anybody: the picker panel is still there.
+    }
+  };
+
   const chooseDirectory = (path: string): void => {
     setDirectory(path);
     if (!nameTouched) setName(folderName(path));
@@ -176,6 +202,11 @@ export function WorkspacesView() {
                 }}
                 spellCheck={false}
               />
+              {nativePicker !== undefined ? (
+                <button type="button" className="btn btn-ghost btn-small" onClick={() => void pickWithExplorer()}>
+                  {t('workspaces.pickNative')}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="btn btn-ghost btn-small"
@@ -222,6 +253,11 @@ export function WorkspacesView() {
                 {t('workspaces.pickerRoot')}
               </button>
             </div>
+            {picker.roots !== undefined && picker.roots.length > 1 ? (
+              <p className="muted small">
+                {t('workspaces.pickerRoots', { roots: picker.roots.join(' · ') })}
+              </p>
+            ) : null}
             {picker.directories.length === 0 ? (
               <p className="muted small">{t('workspaces.pickerEmpty')}</p>
             ) : (
