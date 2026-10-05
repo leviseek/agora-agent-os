@@ -61,7 +61,12 @@ pub enum SessionMessage {
     UserGoal {
         text: String,
         correlation: Option<Correlation>,
+        /// Workspace-relative image paths, read by the runtime through the workspace jail.
         images: Vec<String>,
+        /// Artifact ids from an upload (POST /v1/sessions/{id}/attachments). A console cannot write
+        /// into the runtime's workspace, so the bytes arrive through the API and are named here.
+        #[serde(default)]
+        attachments: Vec<String>,
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
     },
@@ -339,6 +344,7 @@ impl SessionActor {
         text: String,
         correlation: Option<Correlation>,
         images: Vec<String>,
+        attachments: Vec<String>,
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
     ) -> Result<serde_json::Value> {
@@ -379,6 +385,7 @@ impl SessionActor {
             &self.deps.artifacts,
             &self.session_id,
             &images,
+            &attachments,
         )
         .await?;
         if !attached.parts.is_empty() {
@@ -390,7 +397,28 @@ impl SessionActor {
                         .node(self.deps.node_id.clone())
                         .payload(serde_json::json!({
                             "count": attached.parts.len(),
-                            "names": images,
+                            // Names for a human reading the log; ids for a client that wants to
+                            // render the image without walking the transcript.
+                            "names": attached
+                                .parts
+                                .iter()
+                                .filter_map(|part| match part {
+                                    agentos_core::model::ContentPart::Image { name, .. } => {
+                                        Some(name.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>(),
+                            "artifact_ids": attached
+                                .parts
+                                .iter()
+                                .filter_map(|part| match part {
+                                    agentos_core::model::ContentPart::Image { artifact_id, .. } => {
+                                        Some(artifact_id.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>(),
                         })),
                 )
                 .await?;
@@ -757,8 +785,8 @@ impl Actor for SessionActor {
 
     async fn handle(&mut self, message: SessionMessage, _ctx: &ActorContext) -> Result<serde_json::Value> {
         match message {
-            SessionMessage::UserGoal { text, correlation, images, model, reasoning_effort } => {
-                self.handle_goal(text, correlation, images, model, reasoning_effort).await
+            SessionMessage::UserGoal { text, correlation, images, attachments, model, reasoning_effort } => {
+                self.handle_goal(text, correlation, images, attachments, model, reasoning_effort).await
             }
             SessionMessage::Cancel { reason } => {
                 let cancelled = match self.deps.run_tokens.read().get(&self.session_id) {
