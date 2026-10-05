@@ -55,6 +55,7 @@ acceptance suite and the demo run with no network. Add `DEEPSEEK_API_KEY` / `OPE
 | `GET /v1/sessions/{id}/export?format=markdown` | the whole conversation as a document, with what each run cost |
 | `POST /v1/sessions/{id}/branch` | fork a session: inherits the conversation, then lives its own life |
 | `node scripts/cdp-errors.mjs <cdp-endpoint> <console-url> <runtime-url>` | drives a headless browser through connect and the views, printing browser-side errors |
+| `node scripts/cdp-desktop-check.mjs <cdp-endpoint>` | the desktop shell's WebView2 window answers over CDP: the Tauri bridge exists and the "Explorer..." folder-picker button is rendered (picking a folder is the OS dialog, so it stays a human's click) |
 | `node scripts/cdp-workspaces.mjs <cdp-endpoint> <console-url>` | a real browser connects, creates a workspace, creates a session inside it, and the session list reports that workspace as the session's column (prints the visible text and any browser-side error) |
 
 ---

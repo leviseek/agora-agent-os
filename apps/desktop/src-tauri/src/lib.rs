@@ -130,6 +130,9 @@ fn data_dir() -> String {
 /// A browser cannot do this: the File System Access API hands the page a handle, never a path, so the
 /// page has nothing to send to the runtime. The desktop shell can, which is exactly the difference
 /// between the two shells. Returns `None` when the dialog is cancelled.
+///
+/// The callback form, not `blocking_pick_folder`: on Windows the dialog needs the UI thread's message
+/// loop to run, and blocking an async command's thread on it is a hang waiting to happen.
 #[tauri::command(rename_all = "camelCase")]
 async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -137,10 +140,17 @@ async fn pick_directory(app: tauri::AppHandle, default_path: Option<String>) -> 
     if let Some(path) = default_path.filter(|path| !path.trim().is_empty()) {
         dialog = dialog.set_directory(path);
     }
-    let picked = dialog.blocking_pick_folder();
-    Ok(picked.and_then(|entry| entry.into_path().ok()).map(|path| {
-        path.to_string_lossy().to_string()
-    }))
+    let (tx, mut rx) = tauri::async_runtime::channel(1);
+    dialog.pick_folder(move |picked| {
+        let _ = tx.blocking_send(picked);
+    });
+    let picked = rx
+        .recv()
+        .await
+        .ok_or_else(|| "the folder dialog closed without an answer".to_string())?;
+    Ok(picked
+        .and_then(|entry| entry.into_path().ok())
+        .map(|path| path.to_string_lossy().to_string()))
 }
 
 pub fn run() {
