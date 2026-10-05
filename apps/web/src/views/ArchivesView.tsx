@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { useApp } from '../store';
 import { useI18n } from '../i18n';
 import { useNav } from '../navigation';
-import { ApiErrorBanner, Badge, Panel } from '../components';
+import { ApiErrorBanner, Badge, CopyableText, Panel } from '../components';
 import type { ArchiveDetail, ArchiveEntry } from '../api';
 import { formatDateTime } from '../format';
 
@@ -17,6 +17,11 @@ function ownerLabel(entry: ArchiveEntry): string {
   const owner = entry.manifest.owner ?? null;
   if (owner === null) return '-';
   return owner.node_id == null || owner.node_id === '' ? owner.user_id : owner.user_id + '@' + owner.node_id;
+}
+
+/** What the column shows: the user id. The node is on hover, and one click away. */
+function ownerUser(entry: ArchiveEntry): string {
+  return entry.manifest.owner?.user_id ?? '-';
 }
 
 /** The first turns of an archived conversation, as a preview. */
@@ -112,7 +117,9 @@ export function ArchivesView() {
                     <div>{entry.manifest.title}</div>
                     <div className="muted small">{entry.manifest.session_id}</div>
                   </td>
-                  <td>{ownerLabel(entry)}</td>
+                  <td>
+                    <CopyableText value={ownerLabel(entry)} display={ownerUser(entry)} />
+                  </td>
                   <td className="muted small">
                     {t('archives.counts', {
                       runs: entry.manifest.runs,

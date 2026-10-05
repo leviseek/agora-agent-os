@@ -1,6 +1,6 @@
 /** Small shared presentational pieces. No data fetching happens here. */
 
-import { Component } from 'react';
+import { Component, useState } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { jsonText } from './api';
 import type { ApiError } from './api';
@@ -167,6 +167,91 @@ export function KeyValue({ rows }: { rows: [string, ReactNode][] }) {
   );
 }
 
+/**
+ * A short value that carries a longer one, with the long one on hover and one click away.
+ *
+ * Written for owner columns: `alice` is what a reader needs, `alice@node-7f3a` is what they need
+ * when two people share a user id across machines. Showing both at once makes every row wider for
+ * information that matters in the rare case, so the short form is shown, the full form is in the
+ * tooltip, and clicking copies it.
+ */
+/**
+ * Put text on the clipboard, with a fallback that actually works everywhere.
+ *
+ * The async clipboard is the right API and refuses in more places than people expect: an insecure
+ * origin, a document that is not focused, a browser that wants a permission nobody granted. Measured
+ * in a headless browser: the call rejects and the click looks like it did nothing. The selection
+ * based copy below is deprecated but it is the one that still works there, so the fallback is not
+ * nostalgia - it is the difference between a copy button and a decoration.
+ */
+async function copyText(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText !== undefined) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Fall through to the older path.
+  }
+  try {
+    const area = document.createElement('textarea');
+    area.value = value;
+    area.setAttribute('readonly', '');
+    // Off-screen rather than hidden: a display:none node cannot be selected, and selecting it is
+    // the whole mechanism.
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+export function CopyableText({
+  value,
+  display,
+  className,
+}: {
+  /** The full text: what the tooltip shows and what a click copies. */
+  value: string;
+  /** What is rendered. Defaults to the full text. */
+  display?: string;
+  className?: string;
+}) {
+  const { t } = useI18n();
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const shown = display ?? value;
+
+  const onCopy = async (): Promise<void> => {
+    const ok = await copyText(value);
+    setState(ok ? 'copied' : 'failed');
+    window.setTimeout(() => setState('idle'), 1500);
+  };
+
+  return (
+    <button
+      type="button"
+      className={className === undefined ? 'copyable' : 'copyable ' + className}
+      title={
+        state === 'copied'
+          ? t('common.copied')
+          : state === 'failed'
+            ? t('common.copyFailed')
+            : t('common.clickToCopy', { value })
+      }
+      onClick={(event) => {
+        // A row that selects a session must not select it because somebody copied the owner.
+        event.stopPropagation();
+        void onCopy();
+      }}
+    >
+      {state === 'idle' ? shown : state === 'copied' ? t('common.copied') : t('common.copyFailed')}
+    </button>
+  );
+}
 export function Mono({ children, title }: { children: ReactNode; title?: string }) {
   return (
     <code className="mono" title={title}>

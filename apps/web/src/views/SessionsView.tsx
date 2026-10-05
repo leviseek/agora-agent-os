@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { ApiErrorBanner, Badge, EmptyState, Loading, Mono, Panel } from '../components';
+import { ApiErrorBanner, Badge, CopyableText, EmptyState, Loading, Mono, Panel } from '../components';
 import type { Tone } from '../components';
 import { formatDateTime } from '../format';
 import { useI18n } from '../i18n';
@@ -83,6 +83,7 @@ export function SessionsView() {
   // What this person may do here, as the runtime answered it. The console hides what it knows will be
   // refused, and the runtime refuses anyway: a hidden button is a courtesy, not a permission.
   const myRole = detail === null ? null : (detail.you?.session_role ?? null);
+  /** The full owner: user, or user@node when the record names a node. */
   const ownerLabel = (session: { owner?: { user_id: string; node_id?: string | null } | null; user_id: string }): string => {
     const owner = session.owner ?? null;
     if (owner === null) {
@@ -90,6 +91,9 @@ export function SessionsView() {
     }
     return owner.node_id == null || owner.node_id === '' ? owner.user_id : owner.user_id + '@' + owner.node_id;
   };
+  /** What the column shows: the user id alone. The node is the rare case, and it is on hover. */
+  const ownerUser = (session: { owner?: { user_id: string; node_id?: string | null } | null; user_id: string }): string =>
+    session.owner?.user_id ?? session.user_id;
   const roleLabel = (role: string | null): string =>
     role === null ? t('sessions.roleNone') : t('sessions.role.' + role);
   /** May the caller do this, according to the runtime's own answer for this row? */
@@ -198,7 +202,9 @@ export function SessionsView() {
                   <td>
                     <Badge tone={stateTone(session.state)}>{tState(session.state)}</Badge>
                   </td>
-                  <td>{ownerLabel(session)}</td>
+                  <td>
+                    <CopyableText value={ownerLabel(session)} display={ownerUser(session)} />
+                  </td>
                   <td>{session.message_count}</td>
                   <td>{formatDateTime(session.updated_at)}</td>
                   <td className="cell-actions">
