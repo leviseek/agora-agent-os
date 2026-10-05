@@ -296,20 +296,46 @@ impl agentos_capability_runtime::capability::Capability for DocumentReadCapabili
         let session = ctx.caller.session_id.clone();
         // Only this session's text files: an id from somewhere else is not addressable here.
         let records = artifacts.list(&session, 500).await?;
-        let documents: Vec<ArtifactRecord> = records
-            .into_iter()
-            .filter(|record| record.kind == ArtifactKind::Text)
-            .collect();
-        if documents.is_empty() {
-            return Err(RuntimeError::not_found(
-                "this session has no attached text file: attach one, then name it in the goal",
-            ));
-        }
         let wanted = ["name", "file", "path"]
             .iter()
             .find_map(|key| input.get(*key).and_then(|value| value.as_str()))
             .map(str::trim)
             .filter(|name| !name.is_empty());
+        let documents: Vec<ArtifactRecord> = records
+            .iter()
+            .filter(|record| record.kind == ArtifactKind::Text)
+            .cloned()
+            .collect();
+        // Asked for an image: say so instead of handing back the nearest text file. A model looking
+        // for "the attachment" reaches for this capability by name, and answering with a CSV is how a
+        // step that was meant to describe a picture reported "the result was not an image description".
+        if let Some(name) = wanted {
+            let asked_for_an_image = records.iter().any(|record| {
+                record.kind != ArtifactKind::Text
+                    && (record.name.eq_ignore_ascii_case(name) || record.name.contains(name))
+            });
+            if asked_for_an_image {
+                return Err(RuntimeError::invalid_input(format!(
+                    "{name} is an image, not a text file. It is already in this prompt for you to \
+                     look at directly - do not read it with a capability. Text files this session has: \
+                     {}",
+                    if documents.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        documents
+                            .iter()
+                            .map(|record| record.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                )));
+            }
+        }
+        if documents.is_empty() {
+            return Err(RuntimeError::not_found(
+                "this session has no attached text file: attach one, then name it in the goal",
+            ));
+        }
         let chosen = match wanted {
             Some(name) => documents
                 .iter()
