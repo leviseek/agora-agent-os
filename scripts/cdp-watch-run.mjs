@@ -4,7 +4,11 @@ const pageUrl = process.argv[3];
 const runtimeUrl = process.argv[4];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const targets = await (await fetch(endpoint + '/json/list')).json();
-const target = targets.find((t) => t.type === 'page' && /^https?:/.test(t.url));
+// Any page will do: the script navigates it itself. A freshly started browser only has about:blank,
+// and demanding an http(s) page first is how this probe used to die on its own.
+const target =
+  targets.find((t) => t.type === 'page' && /^https?:/.test(t.url)) ??
+  targets.find((t) => t.type === 'page');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
 const pending = new Map();
