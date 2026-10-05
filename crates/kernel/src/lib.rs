@@ -570,7 +570,7 @@ impl Kernel {
     /// Convenience used by the CLI and the demo: run one goal end to end.
     pub async fn demo_goal(&self, goal: &str) -> Result<serde_json::Value> {
         let session = self.sessions.create_session("demo", "demo session").await?;
-        self.sessions.post_goal(&session.id, goal, &[], None, None).await
+        self.sessions.post_goal(&session.id, goal, &[], &[], None, None).await
     }
 }
 

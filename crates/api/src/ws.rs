@@ -108,16 +108,21 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
                     }
                 },
             };
-            // Images travel the same way over the socket as over HTTP.
-            let images: Vec<String> = value
-                .get("images")
-                .and_then(|v| v.as_array())
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Images travel the same way over the socket as over HTTP: workspace paths and
+            // uploaded attachment ids, both accepted on one goal.
+            let strings = |key: &str| -> Vec<String> {
+                value
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let images: Vec<String> = strings("images");
+            let attachments: Vec<String> = strings("attachments");
             let session_id = match SessionId::parse(session) {
                 Ok(id) => id,
                 Err(e) => return Some(json!({ "type": "error", "code": "invalid_input", "message": e.to_string() })),
@@ -126,7 +131,7 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
                 match state
                     .kernel
                     .sessions
-                    .post_goal(&session_id, text, &images, model, effort)
+                    .post_goal(&session_id, text, &images, &attachments, model, effort)
                     .await
                 {
                     Ok(result) => Some(json!({ "type": "goal_result", "result": result })),
@@ -136,7 +141,7 @@ async fn command(state: &ApiState, text: &str) -> Option<Value> {
                 match state
                     .kernel
                     .sessions
-                    .post_goal_async(&session_id, text, &images, model, effort)
+                    .post_goal_async(&session_id, text, &images, &attachments, model, effort)
                     .await
                 {
                     Ok(()) => Some(json!({ "type": "accepted", "session_id": session })),

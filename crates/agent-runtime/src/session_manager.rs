@@ -398,6 +398,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
         session: &SessionId,
         text: &str,
         images: &[String],
+        attachments: &[String],
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
     ) -> Result<serde_json::Value> {
@@ -410,6 +411,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
                 text: text.to_string(),
                 correlation: Some(correlation),
                 images: images.to_vec(),
+                attachments: attachments.to_vec(),
                 model,
                 reasoning_effort,
             })
@@ -422,6 +424,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
         session: &SessionId,
         text: &str,
         images: &[String],
+        attachments: &[String],
         model: Option<String>,
         reasoning_effort: Option<agentos_core::model::ReasoningEffort>,
     ) -> Result<()> {
@@ -431,6 +434,7 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
                 text: text.to_string(),
                 correlation: None,
                 images: images.to_vec(),
+                attachments: attachments.to_vec(),
                 model,
                 reasoning_effort,
             })

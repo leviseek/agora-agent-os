@@ -92,6 +92,7 @@ dependencies = [
 name = "agentos-api"
 version = "0.1.0"
 dependencies = [
+ "agentos-agent-runtime",
  "agentos-capability-runtime",
  "agentos-core",
  "agentos-event-bus",

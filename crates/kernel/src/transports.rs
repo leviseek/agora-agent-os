@@ -245,10 +245,12 @@ impl AgentHandler for KernelAgentHandler {
     }
 
     async fn post_goal(&self, session: &SessionId, goal: &str, wait: bool) -> Result<serde_json::Value> {
+        // The gRPC/CLI transport in v1 carries text: images arrive over HTTP, where the bytes can
+        // be uploaded and named. A gRPC caller that wants vision gets it the same way.
         if wait {
-            self.kernel.sessions.post_goal(session, goal, &[], None, None).await
+            self.kernel.sessions.post_goal(session, goal, &[], &[], None, None).await
         } else {
-            self.kernel.sessions.post_goal_async(session, goal, &[], None, None).await?;
+            self.kernel.sessions.post_goal_async(session, goal, &[], &[], None, None).await?;
             Ok(serde_json::json!({ "accepted": true, "session_id": session.as_str() }))
         }
     }

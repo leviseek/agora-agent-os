@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 agentos-core.workspace = true
 agentos-kernel.workspace = true
+agentos-agent-runtime.workspace = true
 agentos-capability-runtime.workspace = true
 agentos-storage.workspace = true
 agentos-event-bus.workspace = true

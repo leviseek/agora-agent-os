@@ -46,9 +46,95 @@ pub struct Attached {
 
 /// Read, verify and store the images a user attached to one message.
 ///
-/// A path that cannot be read is an error, not a silent omission: a user who attached a screenshot
-/// and got an answer about nothing would have no way to tell why.
+/// `paths` are workspace-relative files (the runtime reads them through the jail); `attachment_ids`
+/// are artifacts an earlier upload already stored (a console cannot write into the runtime's
+/// workspace, so the bytes arrive through the API instead). Both end up as the same kind of
+/// artifact and the same kind of model input.
+///
+/// A path or an id that cannot be resolved is an error, not a silent omission: a user who attached
+/// a screenshot and got an answer about nothing would have no way to tell why.
 pub async fn attach_images(
+    workspace: &Workspace,
+    artifacts: &Arc<dyn ArtifactStore>,
+    session: &SessionId,
+    paths: &[String],
+    attachment_ids: &[String],
+) -> Result<Attached> {
+    let mut attached = attach_uploaded(artifacts, session, attachment_ids).await?;
+    let from_paths = attach_paths(workspace, artifacts, session, paths).await?;
+    attached.parts.extend(from_paths.parts);
+    attached.images.extend(from_paths.images);
+    Ok(attached)
+}
+
+/// Store bytes a client uploaded. The type is decided by content here too: the caller's declared
+/// mime is a hint, never the decision.
+pub async fn store_upload(
+    artifacts: &Arc<dyn ArtifactStore>,
+    session: &SessionId,
+    name: &str,
+    declared_mime: Option<&str>,
+    bytes: &[u8],
+) -> Result<agentos_core::model::ArtifactRecord> {
+    if bytes.is_empty() {
+        return Err(RuntimeError::invalid_input("the uploaded image is empty"));
+    }
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(RuntimeError::invalid_input(format!(
+            "the uploaded image is {} bytes, the limit is {MAX_IMAGE_BYTES}",
+            bytes.len()
+        )));
+    }
+    let mime = sniff_mime(bytes).ok_or_else(|| {
+        RuntimeError::invalid_input(format!(
+            "{} is not a PNG, JPEG, GIF or WebP image (the declared type {} was not trusted: the \
+             type is decided by content)",
+            name,
+            declared_mime.unwrap_or("none")
+        ))
+    })?;
+    artifacts
+        .put(session.clone(), name, ArtifactKind::Binary, mime, bytes)
+        .await
+}
+
+/// Turn stored artifacts into model input, checking the bytes again: an artifact id is a claim,
+/// and the claim is verified the same way a path is.
+async fn attach_uploaded(
+    artifacts: &Arc<dyn ArtifactStore>,
+    session: &SessionId,
+    attachment_ids: &[String],
+) -> Result<Attached> {
+    let mut attached = Attached::default();
+    for id in attachment_ids {
+        let artifact_id = agentos_core::ArtifactId::from_raw(id.clone());
+        let record = artifacts.get(&artifact_id).await?.ok_or_else(|| {
+            RuntimeError::not_found(format!("no uploaded attachment with id {id}"))
+        })?;
+        let bytes = artifacts.read(&artifact_id).await?.ok_or_else(|| {
+            RuntimeError::not_found(format!("attachment {id} has no bytes"))
+        })?;
+        let mime = sniff_mime(&bytes).ok_or_else(|| {
+            RuntimeError::invalid_input(format!(
+                "attachment {id} ({}) is not a PNG, JPEG, GIF or WebP image",
+                record.name
+            ))
+        })?;
+        attached.parts.push(ContentPart::Image {
+            artifact_id: id.clone(),
+            name: record.name.clone(),
+            mime: mime.to_string(),
+        });
+        attached.images.push(ImageInput {
+            mime: mime.to_string(),
+            base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        });
+    }
+    let _ = session;
+    Ok(attached)
+}
+
+async fn attach_paths(
     workspace: &Workspace,
     artifacts: &Arc<dyn ArtifactStore>,
     session: &SessionId,

@@ -57,6 +57,10 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/sessions/{id}/status", get(handlers::session_status))
         .route("/v1/sessions/{id}/messages", post(handlers::post_message))
+        .route(
+            "/v1/sessions/{id}/attachments",
+            post(handlers::upload_attachment),
+        )
         .route("/v1/sessions/{id}/cancel", post(handlers::cancel_session))
         .route("/v1/sessions/{id}/transcript", get(handlers::session_transcript))
         .route("/v1/diagnostics", get(handlers::diagnostics))
@@ -85,7 +89,13 @@ pub fn router(state: ApiState) -> Router {
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz))
         .merge(v1)
-        .layer(RequestBodyLimitLayer::new(4 * 1024 * 1024))
+        // Sized for an image, not for a JSON payload: the runtime accepts images up to 5 MiB
+        // (agent_runtime::images::MAX_IMAGE_BYTES) and base64 inflates them by a third. The old
+        // 4 MiB limit rejected a legal image before any handler could explain why - the client saw
+        // a bare 413 for a file the UI had just accepted.
+        .layer(RequestBodyLimitLayer::new(
+            agentos_agent_runtime::images::MAX_IMAGE_BYTES as usize * 2 + 1024 * 1024,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

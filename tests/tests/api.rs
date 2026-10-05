@@ -1171,6 +1171,85 @@ async fn streamed_deltas_reach_live_subscribers() {
     h.shutdown.cancel();
 }
 
+/// An image a browser has the bytes for becomes an attachment the runtime can send to a model.
+///
+/// This is the path a drag-and-drop takes, and the reason it exists: a console cannot write into
+/// the runtime's workspace, so "type in a file path" was never going to work for a screenshot.
+#[tokio::test]
+async fn an_uploaded_image_becomes_an_attachment_the_goal_can_name() {
+    let h = Harness::start_with_models(
+        "AGENTOS_TEST_API_TOKEN",
+        None,
+        600,
+        Some(models_with_a_sighted_provider()),
+    )
+    .await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "attach" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+
+    // 1. what the runtime will not take: bytes that are not an image, however they are named
+    let (status, body) = h
+        .upload(
+            &format!("/v1/sessions/{id}/attachments"),
+            "not-an-image.png",
+            "image/png",
+            b"this is not a picture",
+        )
+        .await;
+    assert_eq!(status, 400, "content decides, not the name: {body}");
+    assert!(
+        body["error"]["message"].as_str().unwrap_or_default().contains("PNG"),
+        "the refusal must say what is accepted: {body}"
+    );
+
+    // 2. a real PNG is stored and its bytes can be read back
+    let (status, uploaded) = h
+        .upload(
+            &format!("/v1/sessions/{id}/attachments"),
+            "shot.png",
+            "image/png",
+            ONE_PIXEL_PNG,
+        )
+        .await;
+    assert_eq!(status, 200, "{uploaded}");
+    let artifact_id = uploaded["artifact_id"].as_str().unwrap().to_string();
+    assert_eq!(uploaded["content_type"], "image/png");
+    assert_eq!(uploaded["bytes"], ONE_PIXEL_PNG.len());
+
+    let (status, bytes, content_type) = h.get_bytes(&format!("/v1/artifacts/{artifact_id}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "image/png", "the artifact remembers what it is");
+    assert_eq!(bytes, ONE_PIXEL_PNG, "the bytes come back unchanged");
+
+    // 3. naming it in a goal is accepted, and the transcript records the image part
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "what is in this picture?", "attachments": [artifact_id], "wait": true }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, transcript) = h.get(&format!("/v1/sessions/{id}/transcript?limit=5")).await;
+    let parts = transcript["messages"][0]["parts"].as_array().cloned().unwrap_or_default();
+    assert!(
+        parts
+            .iter()
+            .any(|part| part["type"] == "image" && part["name"] == "shot.png"),
+        "the turn records the attached image: {transcript}"
+    );
+
+    // 4. an id nobody stored is refused, rather than quietly dropped
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "and this one?", "attachments": ["art_does_not_exist"], "wait": true }),
+        )
+        .await;
+    assert_eq!(status, 404, "{body}");
+
+    h.shutdown.cancel();
+}
+
 /// An image sent to a runtime whose only model cannot see is refused, not answered.
 ///
 /// The failure this pins down was measured end to end: the image went to a text-only model, the
