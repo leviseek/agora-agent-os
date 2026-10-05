@@ -1187,7 +1187,7 @@ async fn an_uploaded_image_becomes_an_attachment_the_goal_can_name() {
     let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "attach" })).await;
     let id = session["id"].as_str().unwrap().to_string();
 
-    // 1. what the runtime will not take: bytes that are not an image, however they are named
+    // 1. the name is not the type: text called .png is stored as text, not as an image
     let (status, body) = h
         .upload(
             &format!("/v1/sessions/{id}/attachments"),
@@ -1196,11 +1196,12 @@ async fn an_uploaded_image_becomes_an_attachment_the_goal_can_name() {
             b"this is not a picture",
         )
         .await;
-    assert_eq!(status, 400, "content decides, not the name: {body}");
-    assert!(
-        body["error"]["message"].as_str().unwrap_or_default().contains("PNG"),
-        "the refusal must say what is accepted: {body}"
+    assert_eq!(status, 200, "content decides, not the name: {body}");
+    assert_eq!(
+        body["kind"], "text",
+        "a file that is not an image is read as text, not refused as a broken image: {body}"
     );
+    assert_eq!(body["content_type"], "text/plain");
 
     // 2. a real PNG is stored and its bytes can be read back
     let (status, uploaded) = h
@@ -1250,6 +1251,81 @@ async fn an_uploaded_image_becomes_an_attachment_the_goal_can_name() {
     h.shutdown.cancel();
 }
 
+/// A text file the user attaches is stored, recorded in the turn, and read into the model's prompt.
+///
+/// This is the "table file" path: a browser can hand over a CSV it has, and the model should answer
+/// about the data in it without the file having to be in the runtime's workspace.
+#[tokio::test]
+async fn an_uploaded_text_file_becomes_a_document_the_goal_can_name() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "table" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let csv = "region,quarter,revenue\n华东,Q1,128000\n华东,Q2,143500\n";
+
+    let (status, uploaded) = h
+        .upload(
+            &format!("/v1/sessions/{id}/attachments"),
+            "sales.csv",
+            "text/csv",
+            csv.as_bytes(),
+        )
+        .await;
+    assert_eq!(status, 200, "{uploaded}");
+    assert_eq!(uploaded["kind"], "text");
+    assert_eq!(uploaded["content_type"], "text/csv", "the name says CSV: {uploaded}");
+    let artifact_id = uploaded["artifact_id"].as_str().unwrap().to_string();
+
+    // The bytes come back unchanged, so a client can show the file it sent.
+    let (status, bytes, content_type) = h.get_bytes(&format!("/v1/artifacts/{artifact_id}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "text/csv");
+    assert_eq!(bytes, csv.as_bytes());
+
+    // Posting a goal that names it records the document on the turn.
+    let (status, body) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "华东两个季度合计多少？", "attachments": [artifact_id], "wait": true }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, transcript) = h.get(&format!("/v1/sessions/{id}/transcript?limit=5")).await;
+    let parts = transcript["messages"][0]["parts"].as_array().cloned().unwrap_or_default();
+    assert!(
+        parts
+            .iter()
+            .any(|part| part["type"] == "artifact" && part["name"] == "sales.csv"),
+        "the turn records the document by name: {transcript}"
+    );
+
+    h.shutdown.cancel();
+}
+
+/// A file that is neither an image nor text is refused, and the refusal names both kinds.
+#[tokio::test]
+async fn an_upload_that_is_neither_an_image_nor_text_is_refused() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "junk" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    // A ZIP header: a NUL byte, so it is not text, and no image magic, so it is not an image.
+    let archive = [0x50u8, 0x4b, 0x03, 0x04, 0x00, 0x41, 0x42];
+    let (status, body) = h
+        .upload(
+            &format!("/v1/sessions/{id}/attachments"),
+            "archive.zip",
+            "application/zip",
+            &archive,
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("image") && message.contains("text"),
+        "the refusal must say what is accepted: {message}"
+    );
+    h.shutdown.cancel();
+}
+
 /// An image sent to a runtime whose only model cannot see is refused, not answered.
 ///
 /// The failure this pins down was measured end to end: the image went to a text-only model, the
@@ -1289,7 +1365,11 @@ async fn an_image_is_refused_when_no_configured_model_can_see() {
     assert!(
         // The provider list is what makes it fixable: it says who was asked and that all of them
         // are blind, so nobody has to guess which model answered.
-        message.contains("mock=no") && message.contains("model to one that accepts images"),
+        message.contains("mock=no"),
+        "the refusal must list who was asked: {message}"
+    );
+    assert!(
+        message.contains("vision: true") || message.contains("deepseek-flash"),
         "the refusal must name the fix: {message}"
     );
     h.shutdown.cancel();

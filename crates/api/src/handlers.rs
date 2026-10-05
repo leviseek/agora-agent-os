@@ -427,10 +427,19 @@ pub async fn upload_attachment(
             "session {id} does not exist"
         ))));
     }
-    let limit = state.config.policy.max_artifact_bytes;
+    // What the file is, decided once, by content. The two kinds have different caps because they
+    // cost different things: an image goes to the model base64-encoded, a text file is pasted into
+    // the prompt.
+    let kind = agentos_agent_runtime::documents::classify_upload(&body);
+    let limit = match kind {
+        Some(agentos_agent_runtime::documents::UploadedKind::Text) => {
+            state.config.policy.max_artifact_bytes.min(agentos_agent_runtime::documents::MAX_DOCUMENT_BYTES)
+        }
+        _ => state.config.policy.max_artifact_bytes,
+    };
     if body.len() as u64 > limit {
         return Err(ApiError(RuntimeError::invalid_input(format!(
-            "the upload is {} bytes, the limit is {limit}",
+            "the upload is {} bytes, the limit for this kind of file is {limit}",
             body.len()
         ))));
     }
@@ -448,9 +457,45 @@ pub async fn upload_attachment(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
     // The session manager owns the artifact store and the bus, so the gateway does not have to
-    // know which crate a stored image belongs to.
+    // know which crate a stored file belongs to.
     let deps = state.kernel.sessions.deps();
-    // Refuse before storing, when nothing can look at the picture. The runtime would answer such a
+    let Some(kind) = kind else {
+        return Err(ApiError(RuntimeError::invalid_input(format!(
+            "{name} is neither an image (PNG, JPEG, GIF, WebP) nor a text file (CSV, TSV, Markdown, \
+             JSON, plain text): the type is decided by content, and which one it is decides how the \
+             model receives it."
+        ))));
+    };
+    if matches!(kind, agentos_agent_runtime::documents::UploadedKind::Text) {
+        // A text file is read into the prompt, which every model can do. No vision check applies.
+        let record =
+            agentos_agent_runtime::documents::store_document(&deps.artifacts, &session, &name, &body)
+                .await?;
+        deps.bus
+            .publish(
+                agentos_core::model::NewEvent::new(
+                    agentos_core::model::EventKind::ArtifactCreated,
+                    "file uploaded",
+                )
+                .session(session)
+                .node(deps.node_id.clone())
+                .payload(json!({
+                    "artifact_id": record.id.as_str(),
+                    "name": record.name,
+                    "bytes": record.size,
+                    "content_type": record.content_type,
+                })),
+            )
+            .await?;
+        return Ok(Json(json!({
+            "artifact_id": record.id.as_str(),
+            "name": record.name,
+            "content_type": record.content_type,
+            "bytes": record.size,
+            "kind": "text",
+        })));
+    }
+    // An image. Refuse before storing, when nothing can look at it: the runtime would answer such a
     // goal with the placeholder's prose, which reads like a description of an image nobody saw.
     let sighted = state.kernel.models.vision_capable();
     if sighted.is_empty() {
@@ -517,6 +562,7 @@ pub async fn upload_attachment(
         "name": record.name,
         "content_type": record.content_type,
         "bytes": record.size,
+        "kind": "image",
     })))
 }
 

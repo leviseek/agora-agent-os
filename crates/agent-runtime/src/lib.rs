@@ -14,6 +14,7 @@ pub mod agent_loop;
 pub mod compaction;
 pub mod context;
 pub mod deltas;
+pub mod documents;
 pub mod images;
 pub mod export;
 pub mod memory;
@@ -25,6 +26,10 @@ pub use compaction::compaction_window;
 pub use deltas::{DeltaPublisher, DeltaSink};
 pub use context::{load_workspace_context, LoadedContext};
 pub use export::to_markdown;
+pub use documents::{
+    attach_documents, documents_context, looks_like_text, store_document, text_content_type,
+    AttachedDocument, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_CHARS,
+};
 pub use images::{attach_images, sniff_mime, Attached, MAX_IMAGE_BYTES};
 pub use memory::{MemoryStore, StoreMemoryStore};
 pub use session::{SessionActor, SessionActorState, SessionDeps, SessionMessage};

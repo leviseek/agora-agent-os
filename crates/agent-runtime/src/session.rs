@@ -378,8 +378,9 @@ impl SessionActor {
         self.set_session_state(SessionState::Active)?;
         self.state.session.message_count += 1;
 
-        // Attachments are read through the workspace jail and stored as artifacts before the run
-        // starts, so a bad path fails the goal immediately instead of mid-run.
+        // Attachments are resolved before the run starts, so a bad path or an id nobody stored
+        // fails the goal immediately instead of mid-run. Images come from the workspace or an
+        // upload; text files come from an upload, and the two are told apart by content.
         let attached = crate::images::attach_images(
             &self.deps.workspace,
             &self.deps.artifacts,
@@ -388,22 +389,34 @@ impl SessionActor {
             &attachments,
         )
         .await?;
-        if !attached.parts.is_empty() {
+        let documents = crate::documents::attach_documents(&self.deps.artifacts, &attachments).await?;
+        // Every uploaded id must be readable as one or the other. An id that is neither is a client
+        // error, and silence would look like the attachment simply had no effect.
+        let claimed = attached.parts.len() + documents.len();
+        if claimed != attachments.len() {
+            return Err(RuntimeError::invalid_input(format!(
+                "{claimed} of {} uploaded attachment(s) could be read: an attachment must be an image \
+                 or a text file",
+                attachments.len()
+            )));
+        }
+        if !attached.parts.is_empty() || !documents.is_empty() {
             self.deps
                 .bus
                 .publish(
-                    NewEvent::new(EventKind::ArtifactCreated, "images attached")
+                    NewEvent::new(EventKind::ArtifactCreated, "attachments resolved")
                         .session(self.session_id.clone())
                         .node(self.deps.node_id.clone())
                         .payload(serde_json::json!({
-                            "count": attached.parts.len(),
+                            "count": attached.parts.len() + documents.len(),
                             // Names for a human reading the log; ids for a client that wants to
                             // render the image without walking the transcript.
                             "names": attached
                                 .parts
                                 .iter()
                                 .filter_map(|part| match part {
-                                    agentos_core::model::ContentPart::Image { name, .. } => {
+                                    agentos_core::model::ContentPart::Image { name, .. }
+                                    | agentos_core::model::ContentPart::Artifact { name, .. } => {
                                         Some(name.clone())
                                     }
                                     _ => None,
@@ -413,9 +426,10 @@ impl SessionActor {
                                 .parts
                                 .iter()
                                 .filter_map(|part| match part {
-                                    agentos_core::model::ContentPart::Image { artifact_id, .. } => {
-                                        Some(artifact_id.clone())
-                                    }
+                                    agentos_core::model::ContentPart::Image { artifact_id, .. }
+                                    | agentos_core::model::ContentPart::Artifact {
+                                        artifact_id, ..
+                                    } => Some(artifact_id.clone()),
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>(),
@@ -424,7 +438,11 @@ impl SessionActor {
                 .await?;
         }
 
-        let user_message = crate::images::user_message(&self.session_id, &goal, &attached.parts);
+        // The transcript records the images and the names of the documents (not their text: a
+        // transcript that carries a spreadsheet is a transcript nobody can read).
+        let mut all_parts = attached.parts.clone();
+        all_parts.extend(documents.iter().map(|document| document.part.clone()));
+        let user_message = crate::images::user_message(&self.session_id, &goal, &all_parts);
         let user_message = TranscriptMessage {
             correlation_id: Some(correlation.request()),
             ..user_message
@@ -539,6 +557,7 @@ impl SessionActor {
         let prompt_context = PromptContext {
             history: &history,
             images: &attached.images,
+            documents: &documents,
             workspace: workspace_context.as_ref().map(|loaded| loaded.text.as_str()),
             memory: memory_context.as_deref(),
         };

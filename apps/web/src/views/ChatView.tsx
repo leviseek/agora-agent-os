@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent, FormEvent } from 'react';
 import { ApiErrorBanner, Badge, EmptyState, JsonBlock, Panel } from '../components';
-import { formatTime } from '../format';
+import { formatBytes, formatTime } from '../format';
 import { useSessionEvents } from '../hooks';
 import { MarkdownText } from '../MarkdownText';
 import { useI18n } from '../i18n';
@@ -14,7 +14,7 @@ function isPlaceholderProvider(provider: string): boolean {
   return PLACEHOLDER_PROVIDERS.has(provider) || provider.startsWith('agentos-mock');
 }
 import { useNav } from '../navigation';
-import { EMPTY_DRAFT, IMAGE_TYPES, MAX_IMAGE_BYTES, useApp } from '../store';
+import { ATTACHMENT_TYPES, EMPTY_DRAFT, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES, useApp } from '../store';
 import type { PendingAttachment } from '../store';
 import type { EventRecord, RunSummary } from '../api';
 
@@ -164,15 +164,21 @@ export function ChatView() {
       if (session === null || files.length === 0) return;
       const accepted = files.filter((file) => file.size > 0);
       const stagedFor = session;
-      const tooLarge = accepted.filter((file) => file.size > MAX_IMAGE_BYTES);
-      const sendable = accepted.filter((file) => file.size <= MAX_IMAGE_BYTES);
+      // The pre-check is a courtesy, not the rule: the gateway decides by content. A spreadsheet is
+      // small, an image is capped lower because it travels base64-encoded.
+      const capOf = (file: File): number => (file.type.startsWith('image/') ? MAX_IMAGE_BYTES : MAX_DOCUMENT_BYTES);
+      const sendable = accepted.filter((file) => file.size <= capOf(file));
+      const tooLarge = accepted.filter((file) => file.size > capOf(file));
       const items: PendingAttachment[] = [
         ...sendable.map((file) => ({
           key: 'att-' + ++attachmentKey,
-          name: file.name.length > 0 ? file.name : 'pasted image',
+          name: file.name.length > 0 ? file.name : 'pasted file',
           status: 'uploading' as const,
-          // A blob URL renders the thumbnail before the bytes have made the round trip.
+          // A blob URL renders the thumbnail before the bytes have made the round trip. A text file
+          // gets no preview: it is read into the prompt, not shown as a picture.
           previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+          bytes: file.size,
+          isImage: file.type.startsWith('image/'),
         })),
         // Refused here rather than by the gateway: the answer is the same, minus the megabytes and
         // the wait.
@@ -181,7 +187,9 @@ export function ChatView() {
           name: file.name,
           status: 'error' as const,
           previewUrl: null,
-          error: `${(file.size / (1024 * 1024)).toFixed(1)} MiB is over the ${MAX_IMAGE_BYTES / (1024 * 1024)} MiB image limit`,
+          bytes: file.size,
+          isImage: file.type.startsWith('image/'),
+          error: `${(file.size / (1024 * 1024)).toFixed(1)} MiB is over the ${capOf(file) / (1024 * 1024)} MiB limit for this kind of file`,
         })),
       ];
       if (items.length === 0) return;
@@ -575,11 +583,15 @@ export function ChatView() {
                   {item.previewUrl !== null ? (
                     <img src={item.previewUrl} alt={item.name} />
                   ) : (
+                    // A document has no thumbnail; the glyph and the size say what it is.
                     <span className="attachment-glyph" aria-hidden="true">
-                      🖼
+                      {item.isImage === false ? '📄' : '🖼'}
                     </span>
                   )}
                   <span className="attachment-name">{item.name}</span>
+                  {item.isImage === false && item.bytes !== undefined ? (
+                    <span className="muted small">{formatBytes(item.bytes)}</span>
+                  ) : null}
                   {item.status === 'uploading' ? (
                     <span className="muted small">{t('chat.uploading', { name: item.name })}</span>
                   ) : null}
@@ -611,7 +623,7 @@ export function ChatView() {
             <input
               ref={fileInputRef}
               type="file"
-              accept={IMAGE_TYPES}
+              accept={ATTACHMENT_TYPES}
               multiple
               hidden
               onChange={(event) => {

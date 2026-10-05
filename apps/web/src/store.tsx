@@ -86,6 +86,19 @@ export interface UploadedAttachment {
 export const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp';
 
 /**
+ * Text files the runtime reads into the prompt.
+ *
+ * Extension-based, unlike everything else here: a text file has no magic bytes to sniff, so the
+ * picker can only go by the name. The runtime still decides by content, and refuses a file that
+ * turns out to be binary.
+ */
+export const DOCUMENT_TYPES =
+  '.csv,.tsv,.md,.markdown,.json,.txt,.log,.yaml,.yml,.toml,text/csv,text/markdown,application/json,text/plain';
+
+/** Everything the paperclip offers. */
+export const ATTACHMENT_TYPES = IMAGE_TYPES + ',' + DOCUMENT_TYPES;
+
+/**
  * The runtime's own cap on an image, in bytes.
  *
  * Duplicated here on purpose: the upload would fail with a size error anyway, but spending a
@@ -93,6 +106,12 @@ export const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp';
  * saying no immediately. The runtime remains the authority.
  */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * The runtime's cap on a text file, in bytes. Mirrors
+ * `agentos_agent_runtime::documents::MAX_DOCUMENT_BYTES` for the same reason as the image cap.
+ */
+export const MAX_DOCUMENT_BYTES = 256 * 1024;
 
 /**
  * One file on its way to the runtime.
@@ -107,6 +126,10 @@ export interface PendingAttachment {
   previewUrl: string | null;
   artifactId?: string;
   error?: string;
+  /** Size in bytes, so a text file can say how big it is without a thumbnail. */
+  bytes?: number;
+  /** Images get a thumbnail; documents get a glyph and a size. */
+  isImage?: boolean;
 }
 
 /**

@@ -114,12 +114,13 @@ async fn attach_uploaded(
         let bytes = artifacts.read(&artifact_id).await?.ok_or_else(|| {
             RuntimeError::not_found(format!("attachment {id} has no bytes"))
         })?;
-        let mime = sniff_mime(&bytes).ok_or_else(|| {
-            RuntimeError::invalid_input(format!(
-                "attachment {id} ({}) is not a PNG, JPEG, GIF or WebP image",
-                record.name
-            ))
-        })?;
+        // Not an image: skipped, not refused. An upload may be a text document, and this function
+        // cannot tell the difference without looking - refusing here is how "attach a table" failed
+        // with a message about PNGs. The caller checks that at least one of the two readers claimed
+        // each attachment.
+        let Some(mime) = sniff_mime(&bytes) else {
+            continue;
+        };
         attached.parts.push(ContentPart::Image {
             artifact_id: id.clone(),
             name: record.name.clone(),

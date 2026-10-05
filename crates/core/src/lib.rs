@@ -48,6 +48,7 @@ pub const FEATURES: &[&str] = &[
     "model.vision-declared",
     "vision.capability-gated",
     "attachments.upload",
+    "attachments.text-documents",
     "observations.without-tool-protocol",
 ];
 

@@ -27,6 +27,10 @@ pub struct PromptContext<'a> {
     /// Images attached to the goal being handled. Only the current turn's images are sent: older
     /// ones appear in the history as markers.
     pub images: &'a [agentos_model_router::ImageInput],
+    /// Text files attached to the goal being handled, already read and capped. Like images, only
+    /// the current turn's: an earlier turn's spreadsheet is a name in the history, not 24k characters
+    /// sent again on every follow-up.
+    pub documents: &'a [crate::documents::AttachedDocument],
     /// Project instructions read from the workspace at the start of the run.
     pub workspace: Option<&'a str>,
     /// Memories the history window can no longer show.
@@ -160,6 +164,21 @@ pub fn history_for_model(
     }
     kept.reverse();
     kept
+}
+
+/// The goal, plus whatever files the user attached to it.
+///
+/// In the user's message on purpose. A document in a separate system message was measured being
+/// ignored: asked "what is the total in the attached table", the model answered that no table had
+/// been attached - while a direct "what is the header line" question got the right answer from the
+/// same prompt. Whatever the model is doing with a trailing system message, the reliable shape is the
+/// user's own words followed by the data they attached. The wording still says the file is data and
+/// not instructions, which is the part that matters for safety.
+fn goal_with_documents(goal: &str, documents: &[crate::documents::AttachedDocument]) -> String {
+    match crate::documents::documents_context(documents) {
+        Some(context) => format!("{goal}\n\n{context}"),
+        None => goal.to_string(),
+    }
 }
 
 /// The results of the steps a run executed, as text for a model - or for the reader, when no model
@@ -546,7 +565,10 @@ impl AgentLoop {
                     )));
                 }
                 push_context(&mut messages, &context);
-                messages.push(ChatMessage::user(goal.to_string()).with_images(context.images.to_vec()));
+                messages.push(
+                    ChatMessage::user(goal_with_documents(goal, context.documents))
+                        .with_images(context.images.to_vec()),
+                );
                 messages
             },
         )
@@ -742,7 +764,10 @@ impl AgentLoop {
         // Same rule as planning: conversation first, then the goal, then this run's exchange.
         let mut messages = vec![ChatMessage::system(self.spec.system_prompt.clone())];
         push_context(&mut messages, &context);
-        messages.push(ChatMessage::user(goal.to_string()).with_images(context.images.to_vec()));
+        messages.push(
+            ChatMessage::user(goal_with_documents(goal, context.documents))
+                .with_images(context.images.to_vec()),
+        );
         if !observations.is_empty() {
             // What the capabilities returned belongs to the model as context, not as a tool
             // exchange: this loop never asks a model for tool_calls, so there is no preceding
