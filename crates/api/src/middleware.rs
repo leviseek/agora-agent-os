@@ -74,6 +74,15 @@ pub fn required_action(method: &axum::http::Method, path: &str) -> Option<(agent
         (_, "close") => SessionAction::Close,
         (_, "archive") => SessionAction::Archive,
         (_, "access") => SessionAction::Grant,
+        // Narrowing what a session may use is the same authority as handing out a role in it.
+        (_, "capabilities") => SessionAction::Grant,
+        // Deciding is an act of authority over the session.
+        ("POST", "access-requests") if path.ends_with("/decide") => SessionAction::Grant,
+        // Asking is not. A request for access has to be reachable by somebody with no role at all -
+        // that is the entire point of asking - so it is deliberately NOT an action on the session and
+        // the ACL above checks nothing for it. Listing works the same way: the handler answers with
+        // your own requests when you have no standing to see anyone else's.
+        (_, "access-requests") => return None,
         (_, "migrate") => SessionAction::Open,
         (_, "branch") => SessionAction::Read,
         (_, "restore") => SessionAction::Read,
@@ -379,6 +388,13 @@ mod tests {
             // Export is a download: a viewer who may read a session may also take a copy of it.
             (Method::GET, "/v1/sessions/ses_1/export", SessionAction::Download),
             (Method::PATCH, "/v1/sessions/ses_1", SessionAction::Close),
+            (Method::GET, "/v1/sessions/ses_1/capabilities", SessionAction::Grant),
+            (Method::PUT, "/v1/sessions/ses_1/capabilities", SessionAction::Grant),
+            (
+                Method::POST,
+                "/v1/sessions/ses_1/access-requests/req_1/decide",
+                SessionAction::Grant,
+            ),
         ];
         for (method, path, expected) in cases {
             let (session, action) = required_action(&method, path)
@@ -386,6 +402,14 @@ mod tests {
             assert_eq!(session.as_str(), "ses_1");
             assert_eq!(action, expected, "{method} {path}");
         }
+    }
+
+    #[test]
+    fn asking_for_access_is_outside_the_session_acl() {
+        // Deliberate: the endpoint exists for people who have no role, so it cannot require one. The
+        // handler answers with the caller's own requests and refuses to decide anything.
+        assert!(required_action(&Method::POST, "/v1/sessions/ses_1/access-requests").is_none());
+        assert!(required_action(&Method::GET, "/v1/sessions/ses_1/access-requests").is_none());
     }
 
     #[test]

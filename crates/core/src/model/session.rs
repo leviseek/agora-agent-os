@@ -32,6 +32,13 @@ pub struct SessionRecord {
     /// Roles handed out by the owner, one entry per person.
     #[serde(default)]
     pub grants: Vec<crate::model::SessionGrant>,
+    /// What this session narrowed about capabilities. Default means "whatever the runtime allows".
+    #[serde(default)]
+    pub capabilities: crate::model::SessionCapabilities,
+    /// People asking for access, and what was decided. Kept here so the answer and the question
+    /// cannot drift apart.
+    #[serde(default)]
+    pub access_requests: Vec<crate::model::SessionAccessRequest>,
 }
 
 impl SessionRecord {
@@ -56,6 +63,8 @@ impl SessionRecord {
             model_hint: None,
             reasoning_effort: None,
             grants: Vec::new(),
+            capabilities: crate::model::SessionCapabilities::default(),
+            access_requests: Vec::new(),
         }
     }
 

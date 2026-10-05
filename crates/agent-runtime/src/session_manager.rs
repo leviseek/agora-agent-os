@@ -1185,3 +1185,233 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
         self.deps.run_tokens.clone()
     }
 }
+
+/// Answers "what did this session narrow?" from the session record itself.
+///
+/// Straight from the store, with no cache on purpose: a cached copy of an authorization decision
+/// that goes stale in the widening direction is worse than a key lookup on a path that runs once
+/// per capability call.
+pub struct StoreSessionCapabilities {
+    store: Arc<dyn Store>,
+}
+
+impl StoreSessionCapabilities {
+    pub fn new(store: Arc<dyn Store>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl agentos_capability_runtime::policy::SessionCapabilitySource for StoreSessionCapabilities {
+    async fn for_session(
+        &self,
+        session: &SessionId,
+    ) -> Option<agentos_core::model::SessionCapabilities> {
+        let collection: Collection<SessionRecord> = Collection::new(collections::SESSIONS);
+        match collection.load(self.store.as_ref(), session.as_str()).await {
+            Ok(Some(record)) if !record.capabilities.is_unrestricted() => Some(record.capabilities),
+            // A store that cannot answer is not a reason to widen: no narrowing is returned, and
+            // the node's own policy still applies to every call.
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// session capabilities and access requests
+// ---------------------------------------------------------------------------------------------
+
+impl SessionManager {
+    /// Replace a session's capability narrowing.
+    ///
+    /// The names are checked against what the runtime actually has before they are stored: an
+    /// allow list naming a capability nobody registered is a typo that would silently take the
+    /// whole session down to nothing, and a deny list naming one is a spell that does nothing.
+    pub async fn set_capabilities(
+        &self,
+        session: &SessionId,
+        capabilities: agentos_core::model::SessionCapabilities,
+        known: &[String],
+        by: &agentos_core::model::Principal,
+    ) -> Result<SessionRecord> {
+        let mut record = self
+            .get(session)
+            .await?
+            .ok_or_else(|| RuntimeError::not_found(format!("session {session} does not exist")))?;
+        let mut unknown: Vec<String> = Vec::new();
+        for name in capabilities
+            .allow
+            .iter()
+            .flatten()
+            .chain(capabilities.deny.iter())
+            .chain(capabilities.approval_required.iter())
+        {
+            // A trailing wildcard names a family, so it is checked as a prefix against what exists.
+            let covered = match name.strip_suffix('*') {
+                Some(prefix) => known.iter().any(|capability| capability.starts_with(prefix)),
+                None => known.iter().any(|capability| capability == name),
+            };
+            if !covered {
+                unknown.push(name.clone());
+            }
+        }
+        if !unknown.is_empty() {
+            return Err(RuntimeError::invalid_input(format!(
+                "this runtime has no capability called {}; it has: {}",
+                unknown.join(", "),
+                known.join(", ")
+            ))
+            .with_detail("unknown", unknown.join(", ")));
+        }
+        record.capabilities = capabilities;
+        record.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionCapabilitiesChanged, "session capabilities changed")
+                    .session(session.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "allow": record.capabilities.allow,
+                        "deny": record.capabilities.deny,
+                        "approval_required": record.capabilities.approval_required,
+                        "by": by.as_ref().to_string(),
+                    })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    /// Somebody asks for access to a conversation that is not theirs.
+    ///
+    /// The same person asking twice replaces their pending request rather than filling the owner's
+    /// screen with duplicates: what changed is what they are asking for, not that they are asking.
+    pub async fn request_access(
+        &self,
+        session: &SessionId,
+        principal: &agentos_core::model::Principal,
+        role: agentos_core::model::SessionRole,
+        note: Option<String>,
+    ) -> Result<agentos_core::model::SessionAccessRequest> {
+        let mut record = self
+            .get(session)
+            .await?
+            .ok_or_else(|| RuntimeError::not_found(format!("session {session} does not exist")))?;
+        if let Some(existing) = agentos_core::model::role_of(&record, principal) {
+            return Err(RuntimeError::conflict(format!(
+                "you already hold {} on this session",
+                existing.as_str()
+            )));
+        }
+        let me = principal.as_ref();
+        record
+            .access_requests
+            .retain(|request| {
+                !(request.principal.matches(&me)
+                    && request.state == agentos_core::model::AccessRequestState::Pending)
+            });
+        let request = agentos_core::model::SessionAccessRequest {
+            id: format!("req_{}", agentos_core::now_ms()),
+            principal: me.clone(),
+            role,
+            note,
+            created_at: now_ms(),
+            state: agentos_core::model::AccessRequestState::Pending,
+            decided_by: None,
+            decided_at: None,
+            granted_role: None,
+        };
+        record.access_requests.push(request.clone());
+        record.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionAccessRequested, "session access requested")
+                    .session(session.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "request_id": request.id,
+                        "user_id": request.principal.user_id,
+                        "node_id": request.principal.node_id,
+                        "role": request.role.as_str(),
+                    })),
+            )
+            .await?;
+        Ok(request)
+    }
+
+    /// The owner decides a request. Approving hands out the role in the same breath.
+    pub async fn decide_access_request(
+        &self,
+        session: &SessionId,
+        request_id: &str,
+        approve: bool,
+        role: Option<agentos_core::model::SessionRole>,
+        by: &agentos_core::model::Principal,
+    ) -> Result<(agentos_core::model::SessionRecord, agentos_core::model::SessionAccessRequest)> {
+        let mut record = self
+            .get(session)
+            .await?
+            .ok_or_else(|| RuntimeError::not_found(format!("session {session} does not exist")))?;
+        let index = record
+            .access_requests
+            .iter()
+            .position(|request| request.id == request_id)
+            .ok_or_else(|| RuntimeError::not_found(format!("request {request_id} does not exist")))?;
+        let pending = record.access_requests[index].clone();
+        if pending.state != agentos_core::model::AccessRequestState::Pending {
+            return Err(RuntimeError::conflict(format!(
+                "request {request_id} was already {}",
+                pending.state.as_str()
+            )));
+        }
+        let granted = role.unwrap_or(pending.role);
+        record.access_requests[index].state = if approve {
+            agentos_core::model::AccessRequestState::Approved
+        } else {
+            agentos_core::model::AccessRequestState::Rejected
+        };
+        record.access_requests[index].decided_by = Some(by.as_ref().to_string());
+        record.access_requests[index].decided_at = Some(now_ms());
+        if approve {
+            record.access_requests[index].granted_role = Some(granted);
+        }
+        let decided = record.access_requests[index].clone();
+        record.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        if approve {
+            // Through the same door as a hand-written grant, so an approval is indistinguishable
+            // from one in what it produces.
+            let grant = agentos_core::model::SessionGrant::new(
+                decided.principal.user_id.clone(),
+                decided.principal.node_id.clone(),
+                granted,
+            );
+            record = self.grant(session, grant, by).await?;
+        }
+        self.bus
+            .publish(
+                NewEvent::new(
+                    EventKind::SessionAccessDecided,
+                    if approve { "session access approved" } else { "session access rejected" },
+                )
+                .session(session.clone())
+                .node(self.node_id.clone())
+                .payload(serde_json::json!({
+                    "request_id": decided.id,
+                    "user_id": decided.principal.user_id,
+                    "approved": approve,
+                    "role": decided.granted_role,
+                    "decided_by": decided.decided_by,
+                })),
+            )
+            .await?;
+        Ok((record, decided))
+    }
+}

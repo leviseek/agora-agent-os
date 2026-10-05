@@ -11,8 +11,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from 'react';
 import { AgentOsClient, ApiError, toApiError } from './api';
 import type {
+  AccessRequestsResponse,
   ArchiveDetail,
   ArchiveEntry,
+  SessionCapabilitiesResponse,
   EventRecord,
   HealthResponse,
   LoginResponse,
@@ -279,6 +281,13 @@ export interface AppStoreValue {
   openSession: (id: string) => Promise<void>;
   /** Write a closed conversation into an archive package. */
   archiveSession: (id: string) => Promise<void>;
+  /** What a session narrowed about capabilities, and what the runtime offers. */
+  loadCapabilities: (id: string) => Promise<SessionCapabilitiesResponse | null>;
+  saveCapabilities: (id: string, allow: string[] | null) => Promise<boolean>;
+  /** Access requests: ask, list, decide. */
+  loadAccessRequests: (id: string) => Promise<AccessRequestsResponse | null>;
+  requestAccess: (id: string, role: string, note?: string) => Promise<boolean>;
+  decideAccess: (id: string, requestId: string, approve: boolean, role?: string) => Promise<boolean>;
   /** The archive root's packages, newest first. Fetched when the archive view asks for them. */
   archives: ArchiveEntry[];
   archivesRoot: string;
@@ -897,6 +906,86 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const loadCapabilities = useCallback(
+    async (id: string): Promise<SessionCapabilitiesResponse | null> => {
+      try {
+        return await clientRef.current.sessionCapabilities(id);
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return null;
+      }
+    },
+    [],
+  );
+
+  const saveCapabilities = useCallback(
+    async (id: string, allow: string[] | null): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.setSessionCapabilities(id, { allow });
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  const loadAccessRequests = useCallback(
+    async (id: string): Promise<AccessRequestsResponse | null> => {
+      try {
+        return await clientRef.current.accessRequests(id);
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return null;
+      }
+    },
+    [],
+  );
+
+  const requestAccess = useCallback(
+    async (id: string, role: string, note?: string): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.requestAccess(id, role, note);
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  const decideAccess = useCallback(
+    async (id: string, requestId: string, approve: boolean, role?: string): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.decideAccess(id, requestId, approve, role);
+        // An approval changes who may do what, so the list and the detail both move.
+        await refreshSessions();
+        if (selectedRef.current === id) {
+          await refreshDetail(id);
+        }
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshDetail, refreshSessions],
+  );
+
   const sendGoal = useCallback(
     async (
       text: string,
@@ -1120,6 +1209,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       getArchive,
       restoreArchive,
       deleteArchive,
+      loadCapabilities,
+      saveCapabilities,
+      loadAccessRequests,
+      requestAccess,
+      decideAccess,
       sendGoal,
       uploadAttachments,
       composerDrafts,
@@ -1189,6 +1283,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       getArchive,
       restoreArchive,
       deleteArchive,
+      loadCapabilities,
+      saveCapabilities,
+      loadAccessRequests,
+      requestAccess,
+      decideAccess,
       sendGoal,
       uploadAttachments,
       composerDrafts,

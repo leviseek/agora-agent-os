@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ApiErrorBanner, Badge, CopyableText, EmptyState, Loading, Mono, Panel } from '../components';
+import { AccessRequests, CapabilitiesEditor, RequestAccessForm } from './SessionAccess';
 import type { Tone } from '../components';
 import { formatDateTime } from '../format';
 import { useI18n } from '../i18n';
@@ -59,6 +60,9 @@ export function SessionsView() {
   const setDraftTitle = (next: string | null): void =>
     updateViewDraft('sessions', { renamingId: next === null ? null : selectedSessionId, renameText: next ?? '' });
   const [creating, setCreating] = useState(false);
+  // Which session somebody is asking for access to. Local state is right here: the form is short,
+  // and losing it on a tab switch is the same as never having typed it.
+  const [askingFor, setAskingFor] = useState<string | null>(null);
 
   useEffect(() => {
     if (connection === 'online') void refreshSessions();
@@ -264,6 +268,19 @@ export function SessionsView() {
                         {t('sessions.archive')}
                       </button>
                     ) : null}
+                    {(session.my_role ?? null) === null ? (
+                      <button
+                        type="button"
+                        className="btn btn-small"
+                        title={t('access.askHint')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setAskingFor(session.id);
+                        }}
+                      >
+                        {t('access.ask')}
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               ))}
@@ -271,6 +288,14 @@ export function SessionsView() {
           </table>
         )}
       </Panel>
+
+      {askingFor !== null ? (
+        // Outside the detail panel on purpose: the people who need to ask are the ones who cannot
+        // read the session, and for them there is no detail to put a form in.
+        <Panel title={t('access.ask')} subtitle={t('access.askHint')}>
+          <RequestAccessForm sessionId={askingFor} onDone={() => setAskingFor(null)} />
+        </Panel>
+      ) : null}
 
       <Panel title={t('sessions.selectedTitle')} subtitle={t('sessions.selectedHint')}>
         {detail === null ? (
@@ -331,6 +356,13 @@ export function SessionsView() {
                 capabilities: (detail.you?.can ?? []).join(', '),
               })}
             </p>
+            <CapabilitiesEditor
+              sessionId={detail.session.id}
+              canEdit={myRole === 'owner' || (detail.you?.can ?? []).includes('grant')}
+            />
+            <Panel title={t('access.requestsTitle')} subtitle={t('access.requestsHint')}>
+              <AccessRequests sessionId={detail.session.id} />
+            </Panel>
             {detail.runtime === null ? (
               <p className="muted">{t('sessions.noRuntime')}</p>
             ) : (

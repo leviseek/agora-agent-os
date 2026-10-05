@@ -458,6 +458,212 @@ pub async fn delete_archive(
     state.kernel.sessions.delete_archive(&id).await?;
     Ok(Json(json!({ "deleted": true, "archive_id": id })))
 }
+// ---------------------------------------------------------------------------------------------
+// session capabilities and access requests
+// ---------------------------------------------------------------------------------------------
+
+/// What this session may use, next to what the runtime offers.
+///
+/// The three lists answer three different questions and are kept apart on purpose: `runtime` is
+/// what this node has registered, `session` is the narrowing its owner wrote, and `effective` is
+/// what a call would actually meet.
+pub async fn session_capabilities(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let record = state
+        .kernel
+        .sessions
+        .get(&session)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
+    let registered: Vec<String> = state
+        .kernel
+        .registry
+        .list()
+        .into_iter()
+        .map(|descriptor| descriptor.name)
+        .collect();
+    let narrowing = record.capabilities.clone();
+    let effective: Vec<String> = registered
+        .iter()
+        .filter(|name| narrowing.permits(name).is_ok())
+        .cloned()
+        .collect();
+    Ok(Json(json!({
+        "session_id": id,
+        "runtime": registered,
+        "session": narrowing,
+        "effective": effective,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CapabilitiesRequest {
+    /// null clears the allow list (back to "whatever the runtime allows").
+    #[serde(default, deserialize_with = "double_option")]
+    pub allow: Option<Option<Vec<String>>>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+    #[serde(default)]
+    pub approval_required: Vec<String>,
+}
+
+/// Distinguishes "absent" from "null": absent keeps the current list, null clears it.
+fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// Narrow what a session may use. Only the owner (or an admin) gets here: the gateway checked.
+pub async fn set_session_capabilities(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    Json(body): Json<CapabilitiesRequest>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let current = state
+        .kernel
+        .sessions
+        .get(&session)
+        .await?
+        .map(|record| record.capabilities)
+        .unwrap_or_default();
+    let next = agentos_core::model::SessionCapabilities {
+        allow: match body.allow {
+            Some(value) => value,
+            None => current.allow,
+        },
+        deny: body.deny,
+        approval_required: body.approval_required,
+    };
+    let known: Vec<String> = state
+        .kernel
+        .registry
+        .list()
+        .into_iter()
+        .map(|descriptor| descriptor.name)
+        .collect();
+    let record = state
+        .kernel
+        .sessions
+        .set_capabilities(&session, next, &known, &me)
+        .await?;
+    Ok(Json(json!({ "session": record })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccessRequestBody {
+    /// owner, editor, participant or viewer.
+    pub role: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Ask the owner for access. Open to anyone the gateway authenticated: asking is the point.
+pub async fn request_session_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    Json(body): Json<AccessRequestBody>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let role = agentos_core::model::SessionRole::parse(&body.role).ok_or_else(|| {
+        ApiError(RuntimeError::invalid_input(format!(
+            "unknown role {:?}: use owner, editor, participant or viewer",
+            body.role
+        )))
+    })?;
+    if role == agentos_core::model::SessionRole::Owner {
+        // Ownership is not handed out by asking for it. Transfer is a decision, not a request.
+        return Err(ApiError(RuntimeError::invalid_input(
+            "ownership is not granted on request: ask for editor, participant or viewer",
+        )));
+    }
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let request = state
+        .kernel
+        .sessions
+        .request_access(&session, &me, role, body.note)
+        .await?;
+    Ok(Json(json!({ "request": request })))
+}
+
+/// The pending requests for a session. The owner sees all of them; anyone else sees their own.
+pub async fn list_session_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let record = state
+        .kernel
+        .sessions
+        .get(&session)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let mine = agentos_core::model::role_of(&record, &me);
+    let may_decide = me.is_admin()
+        || mine
+            .map(|role| agentos_core::model::role_allows(role, agentos_core::model::SessionAction::Grant))
+            .unwrap_or(false);
+    // A requester sees their own request and nothing else: the list of who else wants in is the
+    // owner's business.
+    let requests: Vec<&agentos_core::model::SessionAccessRequest> = if may_decide {
+        record.access_requests.iter().collect()
+    } else {
+        record
+            .access_requests
+            .iter()
+            .filter(|request| request.principal.matches(&me.as_ref()))
+            .collect()
+    };
+    Ok(Json(json!({
+        "session_id": id,
+        "may_decide": may_decide,
+        "requests": requests,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DecisionBody {
+    pub approve: bool,
+    /// What to hand out, when it differs from what was asked for.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// Approve or reject a request. Approval hands out the role in the same step.
+pub async fn decide_session_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path((id, request_id)): Path<(String, String)>,
+    Json(body): Json<DecisionBody>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let role = match body.role.as_deref() {
+        Some(raw) => Some(agentos_core::model::SessionRole::parse(raw).ok_or_else(|| {
+            ApiError(RuntimeError::invalid_input(format!(
+                "unknown role {raw:?}: use owner, editor, participant or viewer"
+            )))
+        })?),
+        None => None,
+    };
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let (record, decided) = state
+        .kernel
+        .sessions
+        .decide_access_request(&session, &request_id, body.approve, role, &me)
+        .await?;
+    Ok(Json(json!({ "request": decided, "session": record })))
+}
 /// Who the gateway thinks this caller is.
 ///
 /// The console shows it, and it is the fastest way to tell a wrong token from a missing permission.

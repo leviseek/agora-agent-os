@@ -426,6 +426,40 @@ export interface SessionAccess {
   can: string[];
 }
 
+/** What a session may use, and what the runtime offers. */
+export interface SessionCapabilitiesResponse {
+  session_id: string;
+  runtime: string[];
+  session: SessionCapabilities;
+  effective: string[];
+}
+
+export interface SessionCapabilities {
+  /** null means "whatever the runtime allows". */
+  allow: string[] | null;
+  deny: string[];
+  approval_required: string[];
+}
+
+export interface AccessRequest {
+  id: string;
+  principal: { user_id: string; node_id?: string | null };
+  role: string;
+  note?: string | null;
+  created_at: number;
+  state: 'pending' | 'approved' | 'rejected';
+  decided_by?: string | null;
+  decided_at?: number | null;
+  granted_role?: string | null;
+}
+
+export interface AccessRequestsResponse {
+  session_id: string;
+  /** True when the caller may answer them. */
+  may_decide: boolean;
+  requests: AccessRequest[];
+}
+
 /** What an archive package says about itself. */
 export interface ArchiveManifest {
   format_version: number;
@@ -767,13 +801,21 @@ export class AgentOsClient {
     return (isSecure ? 'wss://' : 'ws://') + host + normalised + query;
   }
 
-  private async request<T>(path: string, init: RequestInit & { json?: unknown }): Promise<T> {
+  /**
+   * One request path, and only one way to send a body.
+   *
+   * `body` is deliberately absent from the init type: passing a hand-serialised body skipped the
+   * `Content-Type: application/json` header this method sets, and the runtime answered 415 to every
+   * console action that used it - archiving, capability changes, access requests. The type now
+   * rejects that shape, so the next person writing a call cannot make the same mistake twice.
+   */
+  private async request<T>(path: string, init: Omit<RequestInit, 'body'> & { json?: unknown }): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set('Accept', 'application/json');
     if (this.token !== null && this.token.length > 0) {
       headers.set('Authorization', 'Bearer ' + this.token);
     }
-    let body: BodyInit | null | undefined = init.body;
+    let body: BodyInit | undefined;
     if (init.json !== undefined) {
       headers.set('Content-Type', 'application/json');
       body = JSON.stringify(init.json);
@@ -906,7 +948,7 @@ export class AgentOsClient {
   openSession(id: string): Promise<{ opened: boolean; session: SessionRecord }> {
     return this.request<{ opened: boolean; session: SessionRecord }>(
       '/v1/sessions/' + encodeURIComponent(id) + '/open',
-      { method: 'POST', body: '{}' },
+      { method: 'POST', json: {} },
     );
   }
 
@@ -918,10 +960,53 @@ export class AgentOsClient {
   archiveSession(id: string): Promise<{ archived: boolean; archive_id: string; path: string; bytes: number; manifest: ArchiveManifest }> {
     return this.request('/v1/sessions/' + encodeURIComponent(id) + '/archive', {
       method: 'POST',
-      body: '{}',
+      json: {},
     });
   }
 
+  /** What this session may use: the runtime's set, the session's narrowing, and the intersection. */
+  sessionCapabilities(id: string): Promise<SessionCapabilitiesResponse> {
+    return this.request<SessionCapabilitiesResponse>(
+      '/v1/sessions/' + encodeURIComponent(id) + '/capabilities',
+      { method: 'GET' },
+    );
+  }
+
+  setSessionCapabilities(
+    id: string,
+    body: { allow: string[] | null; deny?: string[]; approval_required?: string[] },
+  ): Promise<{ session: SessionRecord }> {
+    return this.request('/v1/sessions/' + encodeURIComponent(id) + '/capabilities', {
+      method: 'PUT',
+      json: body,
+    });
+  }
+
+  accessRequests(id: string): Promise<AccessRequestsResponse> {
+    return this.request<AccessRequestsResponse>(
+      '/v1/sessions/' + encodeURIComponent(id) + '/access-requests',
+      { method: 'GET' },
+    );
+  }
+
+  requestAccess(id: string, role: string, note?: string): Promise<{ request: AccessRequest }> {
+    return this.request('/v1/sessions/' + encodeURIComponent(id) + '/access-requests', {
+      method: 'POST',
+      json: note === undefined ? { role } : { role, note },
+    });
+  }
+
+  decideAccess(
+    id: string,
+    requestId: string,
+    approve: boolean,
+    role?: string,
+  ): Promise<{ request: AccessRequest; session: SessionRecord }> {
+    return this.request(
+      '/v1/sessions/' + encodeURIComponent(id) + '/access-requests/' + encodeURIComponent(requestId) + '/decide',
+      { method: 'POST', json: role === undefined ? { approve } : { approve, role } },
+    );
+  }
   listArchives(): Promise<ArchivesResponse> {
     return this.request<ArchivesResponse>('/v1/archives', { method: 'GET' });
   }
@@ -933,7 +1018,7 @@ export class AgentOsClient {
   restoreArchive(id: string, title?: string): Promise<{ restored: boolean; session: SessionRecord }> {
     return this.request('/v1/archives/' + encodeURIComponent(id) + '/restore', {
       method: 'POST',
-      body: JSON.stringify(title === undefined ? {} : { title }),
+      json: title === undefined ? {} : { title },
     });
   }
 

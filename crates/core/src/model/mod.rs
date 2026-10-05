@@ -25,7 +25,8 @@ pub use agent::{
     PlanStepKind, ReasoningEffort, StepKind, TokenUsage,
 };
 pub use access::{
-    decide, role_allows, role_of, Denial, Principal, PrincipalRef, SessionAction, SessionGrant,
+    decide, role_allows, role_of, session_capability_matches, AccessRequestState, Denial, Principal,
+    PrincipalRef, SessionAccessRequest, SessionAction, SessionCapabilities, SessionGrant,
     SessionRole,
 };
 pub use artifact::{ArtifactKind, ArtifactRecord};

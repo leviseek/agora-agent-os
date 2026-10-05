@@ -165,7 +165,12 @@ impl Kernel {
                 approvals.clone(),
                 config.policy.approval_timeout_ms,
                 config.policy.max_pending_approvals,
-            ),
+            )
+            // What each session narrowed about capabilities. The mesh consults it after the node's
+            // policy, so a session can only ever take permissions away.
+            .with_session_capabilities(Arc::new(
+                agentos_agent_runtime::session_manager::StoreSessionCapabilities::new(store.clone()),
+            )),
         );
 
         // --- wasm sandbox ----------------------------------------------------------

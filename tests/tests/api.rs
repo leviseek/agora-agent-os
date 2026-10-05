@@ -2245,3 +2245,284 @@ async fn a_damaged_package_is_refused_rather_than_half_restored() {
     assert_eq!(list["sessions"].as_array().unwrap().len(), 0, "{list}");
     std::fs::remove_dir_all(&root).ok();
 }
+
+// ---------------------------------------------------------------------------------------------
+// session capabilities and access requests
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_can_only_narrow_what_the_runtime_allows() {
+    let h = Harness::start_with_principals().await;
+    let (_, created) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "narrowed" }))
+        .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // What does the runtime have, and what does the session narrow? Both, kept apart.
+    let (status, body) = h
+        .get_as(Some("alice-token"), &format!("/v1/sessions/{id}/capabilities"))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let runtime: Vec<String> = body["runtime"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert!(runtime.iter().any(|name| name == "calculator"), "{body}");
+    assert_eq!(body["session"]["allow"], Value::Null, "nothing narrowed yet: {body}");
+
+    // A name nobody has is refused, with the list of what exists: a typo in an allow list would
+    // otherwise quietly reduce the session to nothing.
+    let (status, body) = h
+        .send_as(
+            reqwest::Method::PUT,
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/capabilities"),
+            Some(json!({ "allow": ["calculator", "nonexistent-capability"] })),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("nonexistent-capability"), "{message}");
+    assert!(message.contains("calculator"), "the refusal lists what does exist: {message}");
+
+    // A real narrowing sticks, and the effective set is the intersection.
+    let (status, body) = h
+        .send_as(
+            reqwest::Method::PUT,
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/capabilities"),
+            Some(json!({ "allow": ["calculator"] })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, body) = h
+        .get_as(Some("alice-token"), &format!("/v1/sessions/{id}/capabilities"))
+        .await;
+    let effective: Vec<String> = body["effective"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(effective, vec!["calculator"], "only the granted one survives: {body}");
+
+    // Bob, made a participant, cannot widen it back: the gateway checks the same authority as a
+    // grant, and he has none.
+    let (status, _) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/access"),
+            json!({ "user_id": "bob", "node_id": "node-b", "role": "participant" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = h
+        .send_as(
+            reqwest::Method::PUT,
+            Some("bob-token"),
+            &format!("/v1/sessions/{id}/capabilities"),
+            Some(json!({ "allow": [], "deny": [], "approval_required": [] })),
+        )
+        .await;
+    assert_eq!(status, 403, "a participant cannot lift the narrowing: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_session_narrowing_is_enforced_at_the_capability_call() {
+    let h = Harness::start_with_principals().await;
+    let (_, created) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "enforced" }))
+        .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // The calculator works before the narrowing.
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/capabilities/calculator/invoke"),
+            json!({ "input": { "expression": "6*7" }, "session_id": id }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["output"]["result"], 42.0);
+
+    // Narrow the session to the clock alone.
+    let (status, _) = h
+        .send_as(
+            reqwest::Method::PUT,
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/capabilities"),
+            Some(json!({ "allow": ["clock"] })),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // The same call now meets the session's answer, not the node's.
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/capabilities/calculator/invoke"),
+            json!({ "input": { "expression": "6*7" }, "session_id": id }),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("not granted to this session"), "{message}");
+
+    // And the capability the session kept still works.
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/capabilities/clock/invoke"),
+            json!({ "input": {}, "session_id": id }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    // A deny list is the other direction, and a wildcard covers a family.
+    let (status, _) = h
+        .send_as(
+            reqwest::Method::PUT,
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/capabilities"),
+            Some(json!({ "allow": null, "deny": ["calc*", "filesystem-*"] })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/capabilities/calculator/invoke"),
+            json!({ "input": { "expression": "1+1" }, "session_id": id }),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("denied for this session"), "{message}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_is_asked_for_and_the_answer_hands_out_the_role() {
+    let h = Harness::start_with_principals().await;
+    let (_, created) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "shared on request" }))
+        .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Bob cannot read it, so he asks - which anybody authenticated may do.
+    let (status, _) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{id}")).await;
+    assert_eq!(status, 403);
+    let (status, body) = h
+        .post_as(
+            Some("bob-token"),
+            &format!("/v1/sessions/{id}/access-requests"),
+            json!({ "role": "participant", "note": "I need to read the table" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let request_id = body["request"]["id"].as_str().unwrap().to_string();
+    assert_eq!(body["request"]["state"], "pending");
+
+    // Asking for ownership is refused: that is a decision, not a request.
+    let (status, body) = h
+        .post_as(
+            Some("bob-token"),
+            &format!("/v1/sessions/{id}/access-requests"),
+            json!({ "role": "owner" }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+
+    // The owner sees it; the requester sees their own and nobody else's list.
+    let (status, body) = h
+        .get_as(Some("alice-token"), &format!("/v1/sessions/{id}/access-requests"))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["may_decide"], true);
+    assert_eq!(body["requests"].as_array().unwrap().len(), 1, "{body}");
+    let (_, body) = h
+        .get_as(Some("bob-token"), &format!("/v1/sessions/{id}/access-requests"))
+        .await;
+    assert_eq!(body["may_decide"], false);
+    assert_eq!(body["requests"].as_array().unwrap().len(), 1, "{body}");
+
+    // Nobody but the owner decides: a stranger cannot approve their own request.
+    let (status, _) = h
+        .post_as(
+            Some("bob-token"),
+            &format!("/v1/sessions/{id}/access-requests/{request_id}/decide"),
+            json!({ "approve": true }),
+        )
+        .await;
+    assert_eq!(status, 403);
+
+    // Approved, and the role really exists afterwards.
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/access-requests/{request_id}/decide"),
+            json!({ "approve": true }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["request"]["state"], "approved");
+    assert_eq!(body["request"]["granted_role"], "participant");
+    assert_eq!(body["request"]["decided_by"], "alice@node-a");
+    let (status, body) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{id}")).await;
+    assert_eq!(status, 200, "the approval handed out the role: {body}");
+    assert_eq!(body["you"]["session_role"], "participant");
+
+    // Asking again when you already hold a role is a conflict, not a second request.
+    let (status, body) = h
+        .post_as(
+            Some("bob-token"),
+            &format!("/v1/sessions/{id}/access-requests"),
+            json!({ "role": "editor" }),
+        )
+        .await;
+    assert_eq!(status, 409, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("participant"), "{message}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejected_request_leaves_no_role_behind() {
+    let h = Harness::start_with_principals().await;
+    let (_, created) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "rejected" }))
+        .await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let (_, body) = h
+        .post_as(
+            Some("bob-token"),
+            &format!("/v1/sessions/{id}/access-requests"),
+            json!({ "role": "editor" }),
+        )
+        .await;
+    let request_id = body["request"]["id"].as_str().unwrap().to_string();
+
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/access-requests/{request_id}/decide"),
+            json!({ "approve": false }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["request"]["state"], "rejected");
+    assert!(body["request"]["granted_role"].is_null(), "{body}");
+    let (status, _) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{id}")).await;
+    assert_eq!(status, 403, "a rejection grants nothing");
+
+    // Deciding twice is a conflict: a request is answered once.
+    let (status, _) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/access-requests/{request_id}/decide"),
+            json!({ "approve": true }),
+        )
+        .await;
+    assert_eq!(status, 409);
+}

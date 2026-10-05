@@ -43,6 +43,12 @@ pub enum EventKind {
     SessionArchiveDeleted,
     /// A conversation came back from a package, as a new session.
     SessionRestored,
+    /// The owner narrowed (or widened back) what capabilities this session may use.
+    SessionCapabilitiesChanged,
+    /// Somebody asked for access to a conversation that is not theirs.
+    SessionAccessRequested,
+    /// The owner answered a request.
+    SessionAccessDecided,
     SessionMessageQueued,
     SessionMessageHandled,
     ActorSpawned,
@@ -113,6 +119,9 @@ impl EventKind {
             EventKind::SessionArchived => "session_archived",
             EventKind::SessionArchiveDeleted => "session_archive_deleted",
             EventKind::SessionRestored => "session_restored",
+            EventKind::SessionCapabilitiesChanged => "session_capabilities_changed",
+            EventKind::SessionAccessRequested => "session_access_requested",
+            EventKind::SessionAccessDecided => "session_access_decided",
             EventKind::SessionMessageQueued => "session_message_queued",
             EventKind::SessionMessageHandled => "session_message_handled",
             EventKind::ActorSpawned => "actor_spawned",

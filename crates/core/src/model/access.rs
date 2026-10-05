@@ -216,6 +216,105 @@ impl Denial {
     }
 }
 
+/// What a session's owner narrowed about capabilities.
+///
+/// The rule this type exists to enforce: a session can only ever **narrow** what the runtime
+/// allows. `allow: Some(list)` means "only these", never "also these" - the global policy stays
+/// the ceiling, and nothing here can lift it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SessionCapabilities {
+    /// None means "whatever the runtime allows". Some(list) is a whitelist for this session only.
+    pub allow: Option<Vec<String>>,
+    /// Never these, whatever the runtime says.
+    pub deny: Vec<String>,
+    /// These need an operator decision in this session, even where the runtime would allow them.
+    pub approval_required: Vec<String>,
+}
+
+impl Default for SessionCapabilities {
+    fn default() -> Self {
+        Self { allow: None, deny: Vec::new(), approval_required: Vec::new() }
+    }
+}
+
+impl SessionCapabilities {
+    /// Is this the do-nothing policy? Lets a caller skip a store read on the hot path.
+    pub fn is_unrestricted(&self) -> bool {
+        self.allow.is_none() && self.deny.is_empty() && self.approval_required.is_empty()
+    }
+
+    /// Does this session's own policy allow the name? It says nothing about the global ceiling:
+    /// that is the policy engine's business, and keeping the two apart is what stops a session
+    /// grant from becoming a bypass.
+    pub fn permits(&self, name: &str) -> std::result::Result<(), String> {
+        if session_capability_matches(&self.deny, name) {
+            return Err(format!("{name} is denied for this session by its owner"));
+        }
+        if let Some(allow) = &self.allow {
+            if !session_capability_matches(allow, name) {
+                return Err(format!("{name} is not granted to this session"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Does a session-level list entry cover this capability name?
+///
+/// The same rule as the runtime's own lists, and deliberately the same shape: an entry is exact or
+/// a trailing `*` prefix. Two spellings of one idea are one refactor away from disagreeing.
+pub fn session_capability_matches(entries: &[String], name: &str) -> bool {
+    entries.iter().any(|entry| match entry.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => entry == name,
+    })
+}
+
+/// What somebody asked for, and what happened to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessRequestState {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl AccessRequestState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// A request for access to somebody else's conversation.
+///
+/// Kept on the session record rather than in a global queue: what is being decided is a
+/// relationship between one person and one conversation, and a record that holds both cannot
+/// drift out of step with itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAccessRequest {
+    pub id: String,
+    /// Who is asking.
+    pub principal: PrincipalRef,
+    /// What they asked to be.
+    pub role: SessionRole,
+    #[serde(default)]
+    pub note: Option<String>,
+    pub created_at: Timestamp,
+    pub state: AccessRequestState,
+    /// Who decided, and when. Absent while it is pending.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    #[serde(default)]
+    pub decided_at: Option<Timestamp>,
+    /// What they were actually given: an owner may hand out something other than what was asked.
+    #[serde(default)]
+    pub granted_role: Option<SessionRole>,
+}
 /// The role a principal holds on a session, if any.
 pub fn role_of(record: &SessionRecord, principal: &Principal) -> Option<SessionRole> {
     let me = principal.as_ref();

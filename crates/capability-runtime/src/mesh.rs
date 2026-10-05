@@ -9,7 +9,7 @@
 
 use crate::approvals::{ApprovalBroker, ApprovalRequest};
 use crate::capability::{CallerContext, CapabilityContext, InvocationResult};
-use crate::policy::{CapabilityPolicy, PolicyRequest};
+use crate::policy::{apply_session_narrowing, CapabilityPolicy, PolicyRequest, SessionCapabilitySource};
 use crate::registry::CapabilityRegistry;
 use crate::workspace::Workspace;
 use agentos_core::error::{Result, RuntimeError};
@@ -46,6 +46,9 @@ pub struct CapabilityMesh {
     approvals: Option<Arc<ApprovalBroker>>,
     approval_timeout_ms: u64,
     max_pending_approvals: usize,
+    /// What each session narrowed about capabilities. Consulted after the policy gate, and able only
+    /// to take away: a session is a narrowing of the node, never a licence of its own.
+    session_capabilities: Arc<dyn SessionCapabilitySource>,
 }
 
 impl CapabilityMesh {
@@ -68,6 +71,7 @@ impl CapabilityMesh {
             approvals: None,
             approval_timeout_ms: crate::approvals::DEFAULT_APPROVAL_TIMEOUT_MS,
             max_pending_approvals: 64,
+            session_capabilities: Arc::new(crate::policy::NoSessionNarrowing),
         }
     }
 
@@ -82,6 +86,15 @@ impl CapabilityMesh {
         self.approvals = Some(approvals);
         self.approval_timeout_ms = timeout_ms.max(1_000);
         self.max_pending_approvals = max_pending.max(1);
+        self
+    }
+
+    /// Install the source that answers "what did this session narrow?".
+    pub fn with_session_capabilities(
+        mut self,
+        source: Arc<dyn SessionCapabilitySource>,
+    ) -> Self {
+        self.session_capabilities = source;
         self
     }
 
@@ -220,6 +233,15 @@ impl CapabilityMesh {
         // dead code, so a flagged denial is parked instead, and the permission an approval grants
         // is what the descriptor declares - a human said yes, which is the strongest answer the
         // runtime has.
+        // The session's own narrowing, applied to what the node decided. Last, and only downward:
+        // the node's policy is the ceiling, and a session grant that could lift it would make the
+        // ceiling advisory.
+        let decision = match self.session_capabilities.for_session(&caller.session_id).await {
+            Some(narrowing) if !narrowing.is_unrestricted() => {
+                apply_session_narrowing(decision, &narrowing, name)
+            }
+            _ => decision,
+        };
         let mut granted = decision.granted.clone();
         if !decision.allowed && !decision.requires_approval {
             metrics().inc(metric_names::POLICY_DENIED, 1);
