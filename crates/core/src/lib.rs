@@ -28,3 +28,28 @@ pub use time::{now_ms, Timestamp};
 
 /// Version of the Agent OS domain contract. Bump on breaking domain changes.
 pub const DOMAIN_VERSION: &str = "0.1.0";
+
+/// Behaviours this build of the runtime has, so a client can tell whether the thing it is talking
+/// to is new enough for it. Add a name here when a behaviour lands; never remove one, because an
+/// older runtime is exactly what a caller needs to recognise.
+pub const FEATURES: &[&str] = &[
+    "session.durable-recovery",
+    "session.rebuild-without-directory",
+    "session.closed-is-readable",
+    "events.delta-streaming",
+    "events.unique-sequence",
+    "session.model-choice",
+    "session.reasoning-effort",
+    "models.placeholder-is-fallback",
+    "conversation.placeholder-filtered",
+    "approvals.list",
+    "diagnostics.bundle",
+];
+
+/// The sentence the built-in placeholder provider answers with.
+///
+/// It lives here because two crates need to agree on it: the placeholder writes it, and the
+/// conversation filter recognises it. A real model that reads this sentence in its history starts
+/// reproducing it - so faithfully that the copy is indistinguishable from the placeholder's own
+/// answer, which is why the filter cannot rely on who answered a turn.
+pub const PLACEHOLDER_ANSWER_MARKER: &str = "No capability was required, so this is the final answer";

@@ -154,6 +154,19 @@ function describeExit(code, signal) {
   return meaning === undefined ? 'code ' + code : 'code ' + code + ' (' + hex + ': ' + meaning + ')';
 }
 
+/**
+ * A short identity for the build about to be produced: the commit plus the time, and whether the
+ * working tree had uncommitted changes. Uncommitted matters: a fix that is written but not
+ * committed is exactly what "it is still broken" usually turns out to be.
+ */
+function describeBuild() {
+  const head = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
+  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' });
+  const commit = head.status === 0 ? head.stdout.trim() : 'nogit';
+  const suffix = dirty.status === 0 && dirty.stdout.trim().length > 0 ? '+dirty' : '';
+  return commit + suffix + '-' + new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+}
+
 function spawnChild(name, command, commandArgs, options) {
   console.log('[' + name + '] ' + path.basename(command) + ' ' + commandArgs.join(' '));
   const child = spawn(command, commandArgs, {
@@ -313,6 +326,9 @@ function ensureRuntimeBinary(binary, { dryRun = false } = {}) {
   const result = spawnSync(isWindows ? 'cargo.exe' : 'cargo', ['build', '-p', 'agentos-server'], {
     cwd: repoRoot,
     stdio: 'inherit',
+    // Stamped into the binary and reported by /v1/meta, so "which build is running?" is a fact
+    // rather than an inference from file timestamps.
+    env: { ...process.env, AGENTOS_BUILD_ID: describeBuild() },
   });
   if (result.status !== 0) {
     console.log(

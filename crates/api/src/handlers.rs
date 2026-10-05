@@ -55,7 +55,35 @@ pub async fn meta(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
             "session_queue_capacity": cfg.limits.session_queue_capacity,
         },
         "workspace_root": cfg.policy.workspace_root.display().to_string(),
+        // What this binary is, so "am I running the fixed build?" is answerable without guessing.
+        "build": build_info(),
     })))
+}
+
+/// The running binary's identity and the behaviours it is known to have.
+///
+/// A console that keeps calling a route an older runtime does not serve, or a fix that is written
+/// but not built, both look like "it is broken again" from the outside. Reporting the build makes
+/// that question answerable from one request.
+fn build_info() -> Value {
+    let exe = std::env::current_exe().ok();
+    let (path, built_at) = match &exe {
+        Some(path) => {
+            let built_at = std::fs::metadata(path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_millis() as u64);
+            (Some(path.display().to_string()), built_at)
+        }
+        None => (None, None),
+    };
+    json!({
+        "id": option_env!("AGENTOS_BUILD_ID").unwrap_or("unset"),
+        "exe": path,
+        "built_at": built_at,
+        "features": agentos_core::FEATURES,
+    })
 }
 
 #[derive(Debug, Deserialize)]
