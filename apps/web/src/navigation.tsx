@@ -20,6 +20,7 @@ export type ViewKey =
   | 'graph'
   | 'capabilities'
   | 'approvals'
+  | 'archives'
   | 'topology'
   | 'events'
   | 'settings';
@@ -38,6 +39,7 @@ export const VIEWS: ViewDefinition[] = [
   { key: 'graph', labelKey: 'nav.graph', hintKey: 'nav.graph.hint' },
   { key: 'capabilities', labelKey: 'nav.capabilities', hintKey: 'nav.capabilities.hint' },
   { key: 'approvals', labelKey: 'nav.approvals', hintKey: 'nav.approvals.hint' },
+  { key: 'archives', labelKey: 'nav.archives', hintKey: 'nav.archives.hint' },
   { key: 'topology', labelKey: 'nav.topology', hintKey: 'nav.topology.hint' },
   { key: 'events', labelKey: 'nav.events', hintKey: 'nav.events.hint' },
   { key: 'settings', labelKey: 'nav.settings', hintKey: 'nav.settings.hint' },

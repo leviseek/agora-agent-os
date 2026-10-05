@@ -14,9 +14,11 @@ use agentos_actor_runtime::migration::{MigrationCoordinator, TransferTarget};
 use agentos_actor_runtime::runtime::ActorRuntime;
 use agentos_actor_runtime::ActorTransfer;
 use agentos_core::error::{Result, RuntimeError};
+use crate::archive::ArchivedBundle;
 use agentos_core::model::{
     AgentRun, ActorRecord, Checkpoint, CheckpointMeta, EventFilter, EventKind, EventRecord,
     MessageRole, MigrationReport, NewEvent, SessionMessage as TranscriptMessage, SessionRecord,
+    TaskGraphRecord,
 };
 
 use agentos_core::state::{ActorState, SessionState, StateMachine};
@@ -384,6 +386,237 @@ impl SessionManager {
             )
             .await?;
         Ok(record)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // archiving: out of the hot store, into one package
+    // ---------------------------------------------------------------------------------------
+
+    /// Write a conversation into an archive package and mark its record archived.
+    ///
+    /// Order matters here. The actor is stopped first (a package written while a run is in flight
+    /// would be missing that run), the package is written and verified by its own write path, and
+    /// only then does the record become `archived`. A failure anywhere before that last step leaves
+    /// a closed session and a stray package, which is recoverable; the reverse - archived with no
+    /// package - would be a conversation that is gone.
+    pub async fn archive(&self, session: &SessionId) -> Result<ArchivedBundle> {
+        if !self.deps.archive_enabled {
+            return Err(RuntimeError::policy_denied(
+                "archiving is switched off on this runtime (storage.archive_enabled)",
+            ));
+        }
+        let Some(record) = self.get(session).await? else {
+            return Err(RuntimeError::not_found(format!("session {session} does not exist")));
+        };
+        if record.state == SessionState::Archived {
+            return Err(RuntimeError::conflict(format!(
+                "session {session} is already archived; restore it instead"
+            )));
+        }
+        if record.state == SessionState::Failed {
+            return Err(RuntimeError::conflict(format!(
+                "session {session} failed: there is no conversation to archive"
+            )));
+        }
+
+        // Stop whatever is running: a package cannot contain a run that is still being written.
+        if !record.state.is_terminal() {
+            self.close(session).await?;
+        }
+
+        // The exact conversation when an actor still holds it, the rebuilt one otherwise. An
+        // archive should carry what was actually said when that is available, and the runs are
+        // always available.
+        let state = match self.actors.lookup_session(session) {
+            Some(handle) => match self.actors.checkpoint(&handle.id).await {
+                Ok(checkpoint) => serde_json::from_value::<SessionActorState>(checkpoint.state.clone())
+                    .unwrap_or_else(|_| SessionActorState::new(record.clone())),
+                Err(_) => self
+                    .rebuild_state(session)
+                    .await?
+                    .unwrap_or_else(|| SessionActorState::new(record.clone())),
+            },
+            None => self
+                .rebuild_state(session)
+                .await?
+                .unwrap_or_else(|| SessionActorState::new(record.clone())),
+        };
+        let bundle = crate::archive::write_package(
+            &self.deps.archive_dir,
+            &record,
+            &state.runs,
+            &state.transcript,
+            &state.graphs,
+            self.deps.artifacts.as_ref(),
+            &self.node_id.as_str(),
+        )
+        .await?;
+
+        let mut updated = record.clone();
+        updated.state = if updated.state == SessionState::Closed {
+            updated
+                .state
+                .transition(SessionState::Archived)
+                .unwrap_or(SessionState::Archived)
+        } else {
+            SessionState::Archived
+        };
+        updated.updated_at = now_ms();
+        self.session_collection()
+            .save(self.store.as_ref(), updated.id.as_str(), &updated)
+            .await?;
+        // The directory entry is gone already (close deregisters); this is belt and braces for the
+        // case where the record arrived here in a terminal state without one.
+        let _ = self.directory.unregister(session).await;
+
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionArchived, "session archived")
+                    .session(session.clone())
+                    .actor(updated.actor_id.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "archive_id": bundle.id,
+                        "path": bundle.path,
+                        "bytes": bundle.bytes,
+                        "runs": bundle.manifest.runs,
+                        "messages": bundle.manifest.messages,
+                        "artifacts": bundle.manifest.artifacts,
+                    })),
+            )
+            .await?;
+        Ok(bundle)
+    }
+
+    /// Every package under the archive root, newest first.
+    pub async fn list_archives(&self) -> Result<Vec<crate::archive::ArchiveEntry>> {
+        crate::archive::list_packages(&self.deps.archive_dir).await
+    }
+
+    pub async fn find_archive(&self, id: &str) -> Result<crate::archive::ArchiveEntry> {
+        crate::archive::find_package(&self.deps.archive_dir, id).await
+    }
+
+    /// What a package holds, without restoring it: the manifest, and the first and last turns so a
+    /// person can recognise the conversation before bringing it back.
+    pub async fn preview_archive(&self, id: &str) -> Result<serde_json::Value> {
+        let entry = self.find_archive(id).await?;
+        let package = crate::archive::read_package(std::path::Path::new(&entry.path)).await?;
+        Ok(serde_json::json!({
+            "id": entry.id,
+            "path": entry.path,
+            "bytes": entry.bytes,
+            "manifest": entry.manifest,
+            // The first few turns, so a person can recognise the conversation before restoring it.
+            "preview": package.preview(6),
+        }))
+    }
+
+    /// Delete a package. Only the file: the tombstone record keeps saying the conversation exists
+    /// somewhere, which is the honest state of affairs.
+    pub async fn delete_archive(&self, id: &str) -> Result<()> {
+        let entry = self.find_archive(id).await?;
+        tokio::fs::remove_file(&entry.path)
+            .await
+            .map_err(|error| RuntimeError::unavailable(format!("could not delete {}: {error}", entry.path)))?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionArchiveDeleted, "archive deleted")
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({ "archive_id": id, "path": entry.path })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Bring an archived conversation back, as a new session.
+    ///
+    /// A new id by default, and that default is the whole design: restoring over the original id
+    /// would silently merge a conversation restored from an old package with whatever the live
+    /// session has become since. A restore produces a conversation that continues from the package,
+    /// and the archived one stays archived.
+    pub async fn restore_archive(
+        &self,
+        id: &str,
+        title: Option<String>,
+        owner: Option<agentos_core::model::PrincipalRef>,
+    ) -> Result<SessionRecord> {
+        let entry = self.find_archive(id).await?;
+        let package = crate::archive::read_package(std::path::Path::new(&entry.path)).await?;
+        let crate::archive::PackageContents { record, runs, graphs, artifacts, .. } = package;
+
+        let mut restored = SessionRecord::new(
+            record.user_id.clone(),
+            title.unwrap_or_else(|| entry.manifest.restored_title()),
+        );
+        // The owner travels with the conversation unless the caller claims it.
+        restored.owner = owner.or(record.owner.clone()).or(restored.owner);
+        restored.model_hint = record.model_hint.clone();
+        restored.reasoning_effort = record.reasoning_effort;
+        restored.metadata = record.metadata.clone();
+        restored.state = SessionState::Active;
+
+        // Artifacts first: the runs refer to them, and an id in a run has to point at bytes that
+        // are already there.
+        let mut remapped: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (artifact, bytes) in &artifacts {
+            let stored = self
+                .deps
+                .artifacts
+                .put(
+                    restored.id.clone(),
+                    &artifact.name,
+                    artifact.kind,
+                    &artifact.content_type,
+                    bytes,
+                )
+                .await?;
+            remapped.insert(artifact.id.as_str().to_string(), stored.id.as_str().to_string());
+        }
+
+        self.session_collection()
+            .save(self.store.as_ref(), restored.id.as_str(), &restored)
+            .await?;
+
+        let run_collection: Collection<AgentRun> = Collection::new(collections::RUNS);
+        for run in &runs {
+            let mut run = run.clone();
+            run.session_id = restored.id.clone();
+            run.id = agentos_core::AgentId::new();
+            for attachment in &mut run.attachments {
+                if let Some(new_id) = remapped.get(&attachment.artifact_id) {
+                    attachment.artifact_id = new_id.clone();
+                }
+            }
+            run_collection
+                .save(self.store.as_ref(), run.id.as_str(), &run)
+                .await?;
+        }
+        let graph_collection: Collection<TaskGraphRecord> = Collection::new(collections::GRAPHS);
+        for graph in &graphs {
+            let mut graph = graph.clone();
+            graph.id = agentos_core::TaskId::new();
+            graph.session_id = restored.id.clone();
+            graph_collection
+                .save(self.store.as_ref(), graph.id.as_str(), &graph)
+                .await?;
+        }
+
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::SessionRestored, "session restored from an archive")
+                    .session(restored.id.clone())
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "archive_id": id,
+                        "source_session": entry.manifest.session_id,
+                        "title": restored.title,
+                        "runs": runs.len(),
+                        "artifacts": artifacts.len(),
+                    })),
+            )
+            .await?;
+        Ok(restored)
     }
     /// Hot path: resolve the actor for a session, consulting the control plane only on a miss.
     pub async fn actor_for(&self, session: &SessionId) -> Result<ActorHandle> {

@@ -11,6 +11,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from 'react';
 import { AgentOsClient, ApiError, toApiError } from './api';
 import type {
+  ArchiveDetail,
+  ArchiveEntry,
   EventRecord,
   HealthResponse,
   LoginResponse,
@@ -275,6 +277,18 @@ export interface AppStoreValue {
   closeSession: (id: string) => Promise<void>;
   /** Open a closed session again. */
   openSession: (id: string) => Promise<void>;
+  /** Write a closed conversation into an archive package. */
+  archiveSession: (id: string) => Promise<void>;
+  /** The archive root's packages, newest first. Fetched when the archive view asks for them. */
+  archives: ArchiveEntry[];
+  archivesRoot: string;
+  archivesEnabled: boolean;
+  archivesLoading: boolean;
+  archivesError: ApiError | null;
+  refreshArchives: () => Promise<void>;
+  getArchive: (id: string) => Promise<ArchiveDetail>;
+  restoreArchive: (id: string, title?: string) => Promise<string | null>;
+  deleteArchive: (id: string) => Promise<void>;
   sendGoal: (
     text: string,
     wait: boolean,
@@ -374,6 +388,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [archives, setArchives] = useState<ArchiveEntry[]>([]);
+  const [archivesRoot, setArchivesRoot] = useState('');
+  const [archivesEnabled, setArchivesEnabled] = useState(true);
+  const [archivesLoading, setArchivesLoading] = useState(false);
+  const [archivesError, setArchivesError] = useState<ApiError | null>(null);
   const [detailError, setDetailError] = useState<ApiError | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -798,6 +817,86 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [setSessionOpen],
   );
 
+  const refreshArchives = useCallback(async (): Promise<void> => {
+    setArchivesLoading(true);
+    setArchivesError(null);
+    try {
+      const response = await clientRef.current.listArchives();
+      setArchives(response.archives);
+      setArchivesRoot(response.root);
+      setArchivesEnabled(response.enabled);
+    } catch (cause) {
+      // A runtime without the route (an older build) answers 404: an empty archive, said plainly,
+      // rather than an error banner on a page that is simply not supported there.
+      setArchivesError(toApiError(cause));
+      setArchives([]);
+    } finally {
+      setArchivesLoading(false);
+    }
+  }, []);
+
+  const archiveSession = useCallback(
+    async (id: string): Promise<void> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.archiveSession(id);
+        await refreshSessions();
+        await refreshArchives();
+        if (selectedRef.current === id) {
+          await refreshDetail(id);
+        }
+      } catch (cause) {
+        setActionError(toApiError(cause));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshArchives, refreshDetail, refreshSessions],
+  );
+
+  const restoreArchive = useCallback(
+    async (id: string, title?: string): Promise<string | null> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        const result = await clientRef.current.restoreArchive(id, title);
+        await refreshSessions();
+        await refreshArchives();
+        setSelectedSessionId(result.session.id);
+        await refreshDetail(result.session.id);
+        return result.session.id;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshArchives, refreshDetail, refreshSessions],
+  );
+
+  const deleteArchive = useCallback(
+    async (id: string): Promise<void> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.deleteArchive(id);
+        await refreshArchives();
+      } catch (cause) {
+        setActionError(toApiError(cause));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshArchives],
+  );
+
+  const getArchive = useCallback(
+    async (id: string): Promise<ArchiveDetail> => clientRef.current.getArchive(id),
+    [],
+  );
+
   const sendGoal = useCallback(
     async (
       text: string,
@@ -1011,6 +1110,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       refreshDetail,
       closeSession,
       openSession,
+      archiveSession,
+      archives,
+      archivesRoot,
+      archivesEnabled,
+      archivesLoading,
+      archivesError,
+      refreshArchives,
+      getArchive,
+      restoreArchive,
+      deleteArchive,
       sendGoal,
       uploadAttachments,
       composerDrafts,
@@ -1070,6 +1179,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       refreshDetail,
       closeSession,
       openSession,
+      archiveSession,
+      archives,
+      archivesRoot,
+      archivesEnabled,
+      archivesLoading,
+      archivesError,
+      refreshArchives,
+      getArchive,
+      restoreArchive,
+      deleteArchive,
       sendGoal,
       uploadAttachments,
       composerDrafts,

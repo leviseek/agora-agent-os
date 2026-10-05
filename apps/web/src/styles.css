@@ -1318,6 +1318,27 @@ textarea:focus {
   opacity: 0.75;
 }
 
+/* ------------------------------------------------------------------ archive preview */
+
+.preview-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.preview-list li {
+  line-height: 1.45;
+}
+
+.preview-user {
+  border-left: 2px solid var(--border-accent);
+  padding-left: 8px;
+  list-style: none;
+  margin-left: -18px;
+}
+
 /* ------------------------------------------------------------------ turn attachments */
 
 /* The files a goal carried, inside that goal's bubble. Wrapped, because a goal can carry several and

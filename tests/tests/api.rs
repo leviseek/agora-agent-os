@@ -2031,3 +2031,174 @@ async fn whoami_answers_who_the_gateway_thinks_you_are() {
     let (_, body) = h.get_as(Some("root-token"), "/v1/auth/whoami").await;
     assert_eq!(body["admin"], true);
 }
+
+// ---------------------------------------------------------------------------------------------
+// archiving
+// ---------------------------------------------------------------------------------------------
+
+/// A harness whose archive root the test can look at.
+impl Harness {
+    async fn start_with_archives(env_name: &str, archive_dir: std::path::PathBuf) -> Self {
+        let dir = std::env::temp_dir().join(format!("agentos-api-arch-{}", agentos_core::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = RuntimeConfig::default();
+        config.storage.backend = StoreBackend::Memory;
+        config.storage.data_dir = dir.join("data");
+        config.storage.archive_dir = archive_dir;
+        config.policy.workspace_root = dir.join("workspace");
+        config.observability.log_level = "error".into();
+        config.api.auth_token_env = env_name.to_string();
+        std::env::remove_var(env_name);
+        let kernel = Kernel::bootstrap(config).await.unwrap();
+        let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+        Self { base: format!("http://{addr}"), _kernel: kernel, shutdown, client: reqwest::Client::new() }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn archiving_writes_a_package_and_restoring_brings_it_back() {
+    let root = std::env::temp_dir().join(format!("agentos-archives-{}", agentos_core::now_ms()));
+    let h = Harness::start_with_archives("AGENTOS_TEST_ARCHIVE_TOKEN", root.clone()).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "archived talk" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+
+    // A conversation worth archiving: two turns, one of them with an attachment.
+    let (status, _) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "what is 6*7?", "wait": true }))
+        .await;
+    assert_eq!(status, 200);
+    let (status, uploaded) = h
+        .upload(
+            &format!("/v1/sessions/{id}/attachments"),
+            "notes.txt",
+            "text/plain",
+            b"the answer is 42\n",
+        )
+        .await;
+    assert_eq!(status, 200, "{uploaded}");
+    let artifact_id = uploaded["artifact_id"].as_str().unwrap().to_string();
+    let (status, _) = h
+        .post(
+            &format!("/v1/sessions/{id}/messages"),
+            json!({ "text": "and the notes?", "wait": true, "attachments": [artifact_id] }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // Archive it.
+    let (status, body) = h.post(&format!("/v1/sessions/{id}/archive"), json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    let archive_id = body["archive_id"].as_str().unwrap().to_string();
+    assert!(body["bytes"].as_u64().unwrap() > 0, "the package has bytes: {body}");
+    assert_eq!(body["manifest"]["messages"].as_u64().unwrap() >= 2, true, "{body}");
+    assert_eq!(body["manifest"]["artifacts"], 1, "the attachment travelled: {body}");
+    let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
+    assert!(path.exists(), "the package is on disk at {path:?}");
+
+    // The record is now a tombstone: archived, and no longer taking goals.
+    let (_, detail) = h.get(&format!("/v1/sessions/{id}")).await;
+    assert_eq!(detail["session"]["state"], "archived", "{detail}");
+    let (status, body) = h
+        .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "anyone there?", "wait": true }))
+        .await;
+    assert_eq!(status, 409, "an archived session takes no goals: {body}");
+    // And it cannot be reopened: that is what "archived" means.
+    let (status, _) = h.post(&format!("/v1/sessions/{id}/open"), json!({})).await;
+    assert_eq!(status, 409);
+
+    // It shows up in the archive listing, with a readable manifest.
+    let (status, body) = h.get("/v1/archives").await;
+    assert_eq!(status, 200, "{body}");
+    let listed = body["archives"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{body}");
+    assert_eq!(listed[0]["id"], archive_id);
+    assert_eq!(listed[0]["manifest"]["title"], "archived talk");
+
+    // The preview shows what was said, without restoring anything.
+    let (status, body) = h.get(&format!("/v1/archives/{archive_id}")).await;
+    assert_eq!(status, 200, "{body}");
+    let preview = body["preview"].as_array().unwrap();
+    assert!(!preview.is_empty(), "a preview has turns: {body}");
+    assert!(preview.iter().any(|m| m["role"] == "user"), "{body}");
+
+    // Restore: a NEW session that continues the conversation.
+    let (status, body) = h.post(&format!("/v1/archives/{archive_id}/restore"), json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    let restored_id = body["session"]["id"].as_str().unwrap().to_string();
+    assert_ne!(restored_id, id, "a restore never overwrites the original");
+    assert_eq!(body["session"]["title"], "archived talk (restored)");
+
+    // The restored conversation has the turns, and can be talked to again.
+    let (_, detail) = h.get(&format!("/v1/sessions/{restored_id}")).await;
+    let runs = detail["runtime"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2, "both runs came back: {detail}");
+    let (status, body) = h
+        .post(&format!("/v1/sessions/{restored_id}/messages"), json!({ "text": "still there?", "wait": true }))
+        .await;
+    assert_eq!(status, 200, "a restored session takes goals: {body}");
+    let (_, transcript) = h
+        .get(&format!("/v1/sessions/{restored_id}/transcript?limit=50"))
+        .await;
+    let asked = transcript["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .count();
+    assert_eq!(asked, 3, "two restored turns plus the new one: {transcript}");
+
+    // The original session is still archived, and the package still lists.
+    let (_, body) = h.get("/v1/archives").await;
+    assert_eq!(body["archives"].as_array().unwrap().len(), 1);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_damaged_package_is_refused_rather_than_half_restored() {
+    let root = std::env::temp_dir().join(format!("agentos-archives-bad-{}", agentos_core::now_ms()));
+    let h = Harness::start_with_archives("AGENTOS_TEST_ARCHIVE_BAD_TOKEN", root.clone()).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "damaged" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    h.post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "hello", "wait": true })).await;
+    let (_, body) = h.post(&format!("/v1/sessions/{id}/archive"), json!({})).await;
+    let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
+
+    // Corrupt the package the way a full disk or a careless edit would: rewrite one file inside it.
+    let bytes = std::fs::read(&path).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut rewritten: Vec<u8> = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut rewritten));
+        let options = zip::write::FileOptions::<'_, ()>::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+            drop(entry);
+            if name == "runs.jsonl" {
+                // A tampered run. The checksum in the manifest no longer matches.
+                data = b"{\"goal\":\"something else\"}\n".to_vec();
+            }
+            writer.start_file(name, options).unwrap();
+            std::io::Write::write_all(&mut writer, &data).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    std::fs::write(&path, &rewritten).unwrap();
+
+    let (status, body) = h
+        .post(&format!("/v1/archives/{}/restore", body["archive_id"].as_str().unwrap()), json!({}))
+        .await;
+    assert_eq!(status, 400, "a damaged package is refused: {body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("checksum") || message.contains("damaged"),
+        "the refusal says why: {message}"
+    );
+    // Nothing was restored: the store has the archived session and no other.
+    let (_, list) = h.get("/v1/sessions").await;
+    assert_eq!(list["sessions"].as_array().unwrap().len(), 1, "{list}");
+    std::fs::remove_dir_all(&root).ok();
+}

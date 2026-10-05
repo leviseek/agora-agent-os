@@ -37,6 +37,12 @@ pub enum EventKind {
     SessionAccessGranted,
     /// The owner took it back.
     SessionAccessRevoked,
+    /// The conversation was written into an archive package and its record became a tombstone.
+    SessionArchived,
+    /// An archive package was deleted. The record keeps saying the conversation exists elsewhere.
+    SessionArchiveDeleted,
+    /// A conversation came back from a package, as a new session.
+    SessionRestored,
     SessionMessageQueued,
     SessionMessageHandled,
     ActorSpawned,
@@ -104,6 +110,9 @@ impl EventKind {
             EventKind::SessionOpened => "session_opened",
             EventKind::SessionAccessGranted => "session_access_granted",
             EventKind::SessionAccessRevoked => "session_access_revoked",
+            EventKind::SessionArchived => "session_archived",
+            EventKind::SessionArchiveDeleted => "session_archive_deleted",
+            EventKind::SessionRestored => "session_restored",
             EventKind::SessionMessageQueued => "session_message_queued",
             EventKind::SessionMessageHandled => "session_message_handled",
             EventKind::ActorSpawned => "actor_spawned",

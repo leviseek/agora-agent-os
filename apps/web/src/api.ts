@@ -102,6 +102,8 @@ export type SessionState =
   | 'suspended'
   | 'closing'
   | 'closed'
+  // Out of the hot store, in a package of its own: readable, restorable, not openable.
+  | 'archived'
   | 'failed';
 
 export type ActorState =
@@ -422,6 +424,44 @@ export interface SessionAccess {
   /** owner, editor, participant, viewer - or null when they have no role at all. */
   session_role: string | null;
   can: string[];
+}
+
+/** What an archive package says about itself. */
+export interface ArchiveManifest {
+  format_version: number;
+  session_id: string;
+  title: string;
+  owner?: { user_id: string; node_id?: string | null } | null;
+  node_id: string;
+  created_at: number;
+  archived_at: number;
+  runs: number;
+  messages: number;
+  artifacts: number;
+  files: Record<string, string>;
+}
+
+export interface ArchiveEntry {
+  /** The name the API addresses this package by. */
+  id: string;
+  path: string;
+  bytes: number;
+  manifest: ArchiveManifest;
+}
+
+export interface ArchivesResponse {
+  root: string;
+  enabled: boolean;
+  archives: ArchiveEntry[];
+}
+
+/** One package with the first turns of what was said inside it. */
+export interface ArchiveDetail {
+  id: string;
+  path: string;
+  bytes: number;
+  manifest: ArchiveManifest;
+  preview: { role: string; parts: { type: string; text?: string; name?: string }[]; created_at: number }[];
 }
 
 /** Who the gateway thinks the caller is, for the whole console. */
@@ -872,6 +912,33 @@ export class AgentOsClient {
 
   whoami(): Promise<Whoami> {
     return this.request<Whoami>('/v1/auth/whoami', { method: 'GET' });
+  }
+
+  /** Write a conversation into an archive package. Closes it on the way if it is still open. */
+  archiveSession(id: string): Promise<{ archived: boolean; archive_id: string; path: string; bytes: number; manifest: ArchiveManifest }> {
+    return this.request('/v1/sessions/' + encodeURIComponent(id) + '/archive', {
+      method: 'POST',
+      body: '{}',
+    });
+  }
+
+  listArchives(): Promise<ArchivesResponse> {
+    return this.request<ArchivesResponse>('/v1/archives', { method: 'GET' });
+  }
+
+  getArchive(id: string): Promise<ArchiveDetail> {
+    return this.request<ArchiveDetail>('/v1/archives/' + encodeURIComponent(id), { method: 'GET' });
+  }
+
+  restoreArchive(id: string, title?: string): Promise<{ restored: boolean; session: SessionRecord }> {
+    return this.request('/v1/archives/' + encodeURIComponent(id) + '/restore', {
+      method: 'POST',
+      body: JSON.stringify(title === undefined ? {} : { title }),
+    });
+  }
+
+  deleteArchive(id: string): Promise<{ deleted: boolean; archive_id: string }> {
+    return this.request('/v1/archives/' + encodeURIComponent(id), { method: 'DELETE' });
   }
 
   sessionStatus(id: string): Promise<SessionRuntime> {

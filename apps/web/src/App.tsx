@@ -12,6 +12,7 @@ import { ChatView } from './views/ChatView';
 import { AgentStateView } from './views/AgentStateView';
 import { TaskGraphView } from './views/TaskGraphView';
 import { ApprovalsView } from './views/ApprovalsView';
+import { ArchivesView } from './views/ArchivesView';
 import { CapabilitiesView } from './views/CapabilitiesView';
 import { TopologyView } from './views/TopologyView';
 import { EventsView } from './views/EventsView';
@@ -153,6 +154,8 @@ function renderView(view: string) {
       return <TaskGraphView />;
     case 'capabilities':
       return <CapabilitiesView />;
+    case 'archives':
+      return <ArchivesView />;
     case 'approvals':
       return <ApprovalsView />;
     case 'topology':

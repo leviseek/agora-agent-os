@@ -71,6 +71,14 @@ pub fn router(state: ApiState) -> Router {
             "/v1/sessions/{id}/access",
             post(handlers::grant_access).delete(handlers::revoke_access),
         )
+        // Archiving: a conversation out of the hot store and into one package.
+        .route("/v1/sessions/{id}/archive", post(handlers::archive_session))
+        .route("/v1/archives", get(handlers::list_archives))
+        .route(
+            "/v1/archives/{id}",
+            get(handlers::get_archive).delete(handlers::delete_archive),
+        )
+        .route("/v1/archives/{id}/restore", post(handlers::restore_archive))
         .route("/v1/sessions/{id}/transcript", get(handlers::session_transcript))
         .route("/v1/diagnostics", get(handlers::diagnostics))
         .route("/v1/approvals", get(handlers::list_approvals))

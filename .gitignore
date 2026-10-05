@@ -13,3 +13,7 @@
 # The markdown/diagram harness is scaffolding: written, run and deleted, never committed.
 apps/web/mdcheck
 apps/web/mdcheck-dist
+
+# The default archive root (storage.archive_dir). Archived conversations are the user's data and
+# belong on disk, not in the repository.
+/archives

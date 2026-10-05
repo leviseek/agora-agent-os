@@ -268,6 +268,17 @@ pub struct StorageConfig {
     pub data_dir: PathBuf,
     /// How many events to keep hot in the in-memory ring before compaction.
     pub event_log_retention: usize,
+    /// Where archived conversations are written.
+    ///
+    /// A conversation is archived into one self-contained package here and its record is marked
+    /// `archived`, so the hot store stops growing with conversations nobody is having any more.
+    /// The default is beside the data directory rather than inside it: an archive is a thing you
+    /// copy somewhere else, and a backup of the data directory should not have to carry every
+    /// archive with it. `AGENTOS_ARCHIVE_DIR` overrides it.
+    pub archive_dir: PathBuf,
+    /// Whether archiving is allowed at all. A deployment that keeps everything hot can switch it
+    /// off; the routes then say so instead of half-working.
+    pub archive_enabled: bool,
 }
 
 /// Every field falls back to its default when a configuration file omits it, so a file written
@@ -510,6 +521,14 @@ impl Default for StorageConfig {
             backend: StoreBackend::File,
             data_dir: PathBuf::from("./data"),
             event_log_retention: 20_000,
+            // The environment wins, so a deployment can move the archive root without editing a
+            // configuration file it does not own.
+            archive_dir: std::env::var("AGENTOS_ARCHIVE_DIR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("./archives")),
+            archive_enabled: true,
         }
     }
 }

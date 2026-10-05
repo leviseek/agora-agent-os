@@ -356,6 +356,108 @@ pub async fn revoke_access(
     Ok(Json(json!({ "session": record })))
 }
 
+// ---------------------------------------------------------------------------------------------
+// archiving
+// ---------------------------------------------------------------------------------------------
+
+/// Write a conversation into an archive package. Closing happens on the way if it is still open.
+pub async fn archive_session(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    let bundle = state.kernel.sessions.archive(&session).await?;
+    Ok(Json(json!({
+        "archived": true,
+        "archive_id": bundle.id,
+        "path": bundle.path,
+        "bytes": bundle.bytes,
+        "manifest": bundle.manifest,
+    })))
+}
+
+/// Every package under this node's archive root.
+pub async fn list_archives(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
+    let archives = state.kernel.sessions.list_archives().await?;
+    Ok(Json(json!({
+        "root": state.config.storage.archive_dir.display().to_string(),
+        "enabled": state.config.storage.archive_enabled,
+        "archives": archives,
+    })))
+}
+
+/// One package: its manifest, and the first turns of what was said.
+pub async fn get_archive(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    Ok(Json(state.kernel.sessions.preview_archive(&id).await?))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RestoreArchiveRequest {
+    /// The name for the restored conversation. Defaults to the archived title plus "(restored)".
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Bring a conversation back from a package, as a new session.
+///
+/// A new session on purpose: restoring over the original id would merge a conversation from an old
+/// package with whatever the live session has become since.
+pub async fn restore_archive(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    body: Option<Json<RestoreArchiveRequest>>,
+) -> ApiResult<Json<Value>> {
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let entry = state.kernel.sessions.find_archive(&id).await?;
+    // Who may bring a conversation back: an admin, or the person who owned it. The package is on
+    // this node's disk, so the check is about the conversation, not about reachability.
+    let owner = entry.manifest.owner.clone();
+    if !me.is_admin() {
+        let is_owner = owner
+            .as_ref()
+            .map(|owner| owner.matches(&me.as_ref()))
+            .unwrap_or(false);
+        if !is_owner {
+            return Err(ApiError(
+                RuntimeError::policy_denied(format!(
+                    "archive {id} belongs to {}: ask them to restore it",
+                    owner.map(|owner| owner.to_string()).unwrap_or_else(|| "nobody".into())
+                ))
+                .with_detail("archive_id", id.clone()),
+            ));
+        }
+    }
+    let title = body.and_then(|Json(body)| body.title);
+    let record = state.kernel.sessions.restore_archive(&id, title, None).await?;
+    Ok(Json(json!({ "restored": true, "session": record, "from_archive": id })))
+}
+
+/// Delete a package. Only the file: the record keeps saying the conversation exists elsewhere.
+pub async fn delete_archive(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let entry = state.kernel.sessions.find_archive(&id).await?;
+    if !me.is_admin() {
+        let is_owner = entry
+            .manifest
+            .owner
+            .as_ref()
+            .map(|owner| owner.matches(&me.as_ref()))
+            .unwrap_or(false);
+        if !is_owner {
+            return Err(ApiError(
+                RuntimeError::policy_denied(format!("archive {id} is not yours to delete"))
+                    .with_detail("archive_id", id.clone()),
+            ));
+        }
+    }
+    state.kernel.sessions.delete_archive(&id).await?;
+    Ok(Json(json!({ "deleted": true, "archive_id": id })))
+}
 /// Who the gateway thinks this caller is.
 ///
 /// The console shows it, and it is the fastest way to tell a wrong token from a missing permission.

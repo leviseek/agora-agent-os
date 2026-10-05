@@ -120,6 +120,10 @@ pub struct SessionDeps {
     /// Live cancellation tokens per session. Deliberately OUTSIDE the actor mailbox: cancelling a
     /// run must not queue behind the run that is being cancelled.
     pub run_tokens: Arc<RwLock<std::collections::HashMap<SessionId, CancellationToken>>>,
+    /// Where an archived conversation is written (PolicyConfig has nothing to do with it; this is
+    /// storage), and whether archiving is allowed at all.
+    pub archive_dir: std::path::PathBuf,
+    pub archive_enabled: bool,
 }
 
 /// Serializable actor state. Everything here survives a checkpoint, a restart and a migration.

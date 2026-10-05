@@ -266,6 +266,8 @@ impl Kernel {
             compaction_enabled: config.policy.compaction_enabled,
             compaction_min_messages: config.policy.compaction_min_messages,
             run_tokens: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            archive_dir: config.storage.archive_dir.clone(),
+            archive_enabled: config.storage.archive_enabled,
         });
 
         let scheduler = deps.scheduler.clone();

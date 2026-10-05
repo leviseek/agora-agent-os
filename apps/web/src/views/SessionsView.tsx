@@ -38,6 +38,7 @@ export function SessionsView() {
     selectSession,
     closeSession,
     openSession,
+    archiveSession,
     connection,
     detail,
     busy,
@@ -238,6 +239,23 @@ export function SessionsView() {
                         }}
                       >
                         {t('sessions.close')}
+                      </button>
+                    )}
+                    {session.state === 'closed' || session.state === 'archived' ? null : (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-small"
+                        // Archiving closes the session on the way, so it is offered while it is still
+                        // open and disappears once it is closed (archive it from the closed row, or
+                        // reopen it first).
+                        disabled={busy || !rowAllows(session, 'archive')}
+                        title={t('sessions.archiveHint')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void archiveSession(session.id);
+                        }}
+                      >
+                        {t('sessions.archive')}
                       </button>
                     )}
                   </td>

@@ -14,6 +14,7 @@ pub mod agent_loop;
 pub mod compaction;
 pub mod context;
 pub mod deltas;
+pub mod archive;
 pub mod documents;
 pub mod images;
 pub mod export;

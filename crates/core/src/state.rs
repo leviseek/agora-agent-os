@@ -105,9 +105,10 @@ state_machine! {
     /// Lifecycle of a user session (the externally visible conversation unit).
     SessionState {
         variants: [ Creating = "creating", Active = "active", Idle = "idle",
-                    Suspended = "suspended", Closing = "closing", Closed = "closed", Failed = "failed" ],
+                    Suspended = "suspended", Closing = "closing", Closed = "closed",
+                    Archived = "archived", Failed = "failed" ],
         initial: Creating,
-        terminal: [ Closed, Failed ],
+        terminal: [ Closed, Archived, Failed ],
         transitions: [
             Creating => Active, Creating => Failed,
             Active => Idle, Active => Suspended, Active => Closing, Active => Failed,
@@ -118,6 +119,10 @@ state_machine! {
             // it is not a delete, and treating it as one made "close" the end of a conversation that
             // the record, the runs and the transcript had all kept.
             Closed => Active,
+            // Archiving is the step after closing: the package has been written and the living record
+            // is now a tombstone. There is no way back from here except a restore, which is the point:
+            // "archived" means "not in the hot store any more".
+            Closed => Archived,
         ]
     }
 }
