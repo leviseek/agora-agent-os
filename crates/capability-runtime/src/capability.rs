@@ -4,7 +4,7 @@ use crate::workspace::Workspace;
 use agentos_core::error::Result;
 use agentos_core::model::{CapabilityDescriptor, CapabilityPermission};
 use agentos_core::telemetry::Correlation;
-use agentos_core::{ActorId, CapabilityId, SessionId, TaskId};
+use agentos_core::{ActorId, CapabilityId, SessionId, TaskId, WorkspaceId};
 use agentos_storage::artifact::ArtifactStore;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -16,6 +16,11 @@ pub struct CallerContext {
     pub session_id: SessionId,
     pub actor_id: Option<ActorId>,
     pub task_id: Option<TaskId>,
+    /// The workspace this session belongs to.
+    ///
+    /// The jail a capability may touch is derived from this and never from a path the model wrote: a
+    /// path is input, a workspace is identity, and only the second decides what is reachable.
+    pub workspace: Option<WorkspaceId>,
     pub correlation: Correlation,
     pub cancellation: CancellationToken,
 }
@@ -27,6 +32,7 @@ impl CallerContext {
             session_id,
             actor_id: None,
             task_id: None,
+            workspace: None,
             cancellation: CancellationToken::new(),
         }
     }
@@ -38,6 +44,11 @@ impl CallerContext {
 
     pub fn with_actor(mut self, actor: ActorId) -> Self {
         self.actor_id = Some(actor);
+        self
+    }
+
+    pub fn with_workspace(mut self, workspace: Option<WorkspaceId>) -> Self {
+        self.workspace = workspace;
         self
     }
 }

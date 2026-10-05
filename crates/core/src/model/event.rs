@@ -29,6 +29,19 @@ impl EventSeverity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    /// A workspace was created. Sessions and their files belong to one; see docs/decisions.md D20.
+    WorkspaceCreated,
+    /// A workspace was renamed. The directory name is the id, so nothing moved.
+    WorkspaceRenamed,
+    /// The owner handed someone a role on a workspace: in force in every session of it.
+    WorkspaceAccessGranted,
+    /// The owner took it back.
+    WorkspaceAccessRevoked,
+    /// Somebody asked for access to a workspace that is not theirs.
+    WorkspaceAccessRequested,
+    /// The owner answered a request for a workspace.
+    WorkspaceAccessDecided,
+    WorkspaceArchived,
     SessionCreated,
     SessionClosed,
     /// A closed session was opened again: the record is active and an actor holds the conversation.
@@ -111,6 +124,13 @@ pub enum EventKind {
 impl EventKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            EventKind::WorkspaceCreated => "workspace_created",
+            EventKind::WorkspaceRenamed => "workspace_renamed",
+            EventKind::WorkspaceAccessGranted => "workspace_access_granted",
+            EventKind::WorkspaceAccessRevoked => "workspace_access_revoked",
+            EventKind::WorkspaceAccessRequested => "workspace_access_requested",
+            EventKind::WorkspaceAccessDecided => "workspace_access_decided",
+            EventKind::WorkspaceArchived => "workspace_archived",
             EventKind::SessionCreated => "session_created",
             EventKind::SessionClosed => "session_closed",
             EventKind::SessionOpened => "session_opened",

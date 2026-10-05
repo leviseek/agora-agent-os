@@ -22,7 +22,7 @@ pub mod time;
 pub use error::{ErrorKind, Result, RuntimeError};
 pub use ids::{
     ActorId, AgentId, ArtifactId, CapabilityId, CheckpointId, CorrelationId, EventId, MemoryId,
-    MessageId, ModelId, NodeId, RequestId, SessionId, TaskId, TraceId, WorkerId,
+    MessageId, ModelId, NodeId, RequestId, SessionId, TaskId, TraceId, WorkerId, WorkspaceId,
 };
 pub use config::vision_of_model;
 pub use time::{now_ms, Timestamp};
@@ -50,6 +50,9 @@ pub const FEATURES: &[&str] = &[
     "attachments.upload",
     "attachments.text-documents",
     "observations.without-tool-protocol",
+    // A workspace owns sessions and their files; see docs/decisions.md D20.
+    "workspace.entity",
+    "workspace.directory-isolation",
 ];
 
 /// The sentence the built-in placeholder provider answers with.

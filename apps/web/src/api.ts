@@ -318,6 +318,8 @@ export interface SessionSummary {
   created_at: Timestamp;
   updated_at: Timestamp;
   message_count: number;
+  /** The workspace this session belongs to; null only for records written before workspaces existed. */
+  workspace_id?: string | null;
   /** Who owns it: a person, and optionally the node they are on. */
   owner?: { user_id: string; node_id?: string | null } | null;
   /** The caller's own role on this session, or null when they have none. */

@@ -27,4 +27,6 @@ pub use mesh::{CapabilityMesh, MeshConfig};
 pub use policy::{AllowAllPolicy, CapabilityPolicy, PolicyDecision, PolicyRequest};
 pub use registry::{CapabilityRegistry, DiscoveryQuery, RegisteredCapability};
 pub use transport::{CapabilityTransport, LocalTransport};
-pub use workspace::Workspace;
+pub use workspace::{
+    FixedWorkspaceResolver, Workspace, WorkspaceEntry, WorkspaceRegistry, WorkspaceResolver,
+};

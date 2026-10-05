@@ -17,13 +17,13 @@ use agentos_core::error::{Result, RuntimeError};
 use crate::archive::ArchivedBundle;
 use agentos_core::model::{
     AgentRun, ActorRecord, Checkpoint, CheckpointMeta, EventFilter, EventKind, EventRecord,
-    MessageRole, MigrationReport, NewEvent, SessionMessage as TranscriptMessage, SessionRecord,
-    TaskGraphRecord,
+    MessageRole, MigrationReport, NewEvent, Principal, PrincipalRef, SessionGrant, SessionMessage as TranscriptMessage,
+    SessionRecord, SessionRole, TaskGraphRecord, WorkspaceRecord,
 };
 
 use agentos_core::state::{ActorState, SessionState, StateMachine};
 use agentos_core::telemetry::Correlation;
-use agentos_core::{now_ms, ActorId, SessionId};
+use agentos_core::{now_ms, ActorId, SessionId, WorkspaceId};
 use agentos_control_plane::directory::{ActorDirectory, DirectoryEntry};
 use agentos_control_plane::placement::{PlacementService, PlacementStrategy};
 use agentos_event_bus::EventBus;
@@ -45,6 +45,10 @@ pub struct SessionSummary {
     pub created_at: u64,
     pub updated_at: u64,
     pub message_count: u64,
+    /// The workspace this session belongs to. None only for records written before workspaces
+    /// existed; a console groups by this, so it has to travel with the summary.
+    #[serde(default)]
+    pub workspace_id: Option<WorkspaceId>,
     /// Who owns this conversation, so a list can say whose it is - and so another node's operator can
     /// see what they would be asking for access to.
     #[serde(default)]
@@ -62,6 +66,7 @@ impl From<&SessionRecord> for SessionSummary {
             created_at: r.created_at,
             updated_at: r.updated_at,
             message_count: r.message_count,
+            workspace_id: r.workspace_id.clone(),
             owner: r.owner.clone(),
         }
     }
@@ -157,9 +162,51 @@ impl SessionManager {
         title: &str,
         owner: Option<agentos_core::model::PrincipalRef>,
     ) -> Result<SessionRecord> {
+        self.create_session_scoped(None, user_id, title, owner).await
+    }
+
+    /// Create a session inside a workspace.
+    ///
+    /// Ownership follows the workspace rather than the caller's stated user: a workspace's sessions
+    /// belong to whoever owns the workspace, which is what makes sharing the workspace enough to
+    /// share everything inside it. A caller who is not the owner still gets the session - whether
+    /// they may create one at all is the gateway's decision - but the record does not pretend they
+    /// own it, because a session whose owner and workspace disagree is a record that cannot say who
+    /// decides.
+    pub async fn create_session_in(
+        &self,
+        workspace: &WorkspaceId,
+        user_id: &str,
+        title: &str,
+        owner: Option<agentos_core::model::PrincipalRef>,
+    ) -> Result<SessionRecord> {
+        self.create_session_scoped(Some(workspace), user_id, title, owner).await
+    }
+
+    async fn create_session_scoped(
+        &self,
+        workspace: Option<&WorkspaceId>,
+        user_id: &str,
+        title: &str,
+        owner: Option<agentos_core::model::PrincipalRef>,
+    ) -> Result<SessionRecord> {
+        // A session must belong to a workspace that exists: writing the id of a workspace nobody
+        // created would produce a session whose jail is a directory with no owner, which is worse
+        // than a refusal.
+        let workspace_record = match workspace {
+            Some(id) => Some(self.get_workspace(id).await?.ok_or_else(|| {
+                RuntimeError::not_found(format!("workspace {id} does not exist"))
+                    .with_detail("workspace_id", id.as_str())
+            })?),
+            None => None,
+        };
         let mut record = SessionRecord::new(user_id, title);
         if let Some(owner) = owner {
             record.owner = Some(owner);
+        }
+        if let Some(workspace_record) = &workspace_record {
+            record.workspace_id = Some(workspace_record.id.clone());
+            record.owner = Some(workspace_record.owner.clone());
         }
         // Name this node: a record that says only "alice" is a different principal from "alice on
         // laptop", and the record should say which one it means.
@@ -213,6 +260,7 @@ impl SessionManager {
                         "user_id": user_id,
                         "title": title,
                         "placement": decision.reason,
+                        "workspace_id": record.workspace_id.as_ref().map(|id| id.as_str()),
                     })),
             )
             .await?;
@@ -220,6 +268,162 @@ impl SessionManager {
         Ok(record)
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // workspaces
+    // ---------------------------------------------------------------------------------------------
+
+    fn workspace_collection(&self) -> Collection<WorkspaceRecord> {
+        Collection::new(collections::WORKSPACES)
+    }
+
+    /// Create a workspace. Ownership is the creator's, on this node unless they named another.
+    pub async fn create_workspace(&self, name: &str, owner: &Principal) -> Result<WorkspaceRecord> {
+        let owner_ref = PrincipalRef::new(
+            owner.user_id.clone(),
+            owner.node_id.clone().or_else(|| Some(self.node_id.clone())),
+        );
+        let record = WorkspaceRecord::new(owner_ref, name.trim());
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::WorkspaceCreated, "workspace created")
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "workspace_id": record.id.as_str(),
+                        "name": record.name,
+                        "owner": record.owner_label(),
+                    })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    pub async fn get_workspace(&self, id: &WorkspaceId) -> Result<Option<WorkspaceRecord>> {
+        self.workspace_collection().load(self.store.as_ref(), id.as_str()).await
+    }
+
+    /// Newest first, so a console opens on what somebody was last working in.
+    pub async fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
+        let mut records = self.workspace_collection().list(self.store.as_ref(), 10_000).await?;
+        records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(records)
+    }
+
+    pub async fn rename_workspace(&self, id: &WorkspaceId, name: &str) -> Result<WorkspaceRecord> {
+        let Some(mut record) = self.get_workspace(id).await? else {
+            return Err(RuntimeError::not_found(format!("workspace {id} does not exist")));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RuntimeError::invalid_input("a workspace name must not be empty"));
+        }
+        record.name = name.to_string();
+        record.updated_at = now_ms();
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::WorkspaceRenamed, "workspace renamed")
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "workspace_id": record.id.as_str(),
+                        "name": record.name,
+                    })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    /// Hand out a role on a workspace. Only its owner (or an admin) may do this, and the gateway
+    /// checks that before calling here.
+    pub async fn grant_workspace(
+        &self,
+        id: &WorkspaceId,
+        mut grant: SessionGrant,
+        granted_by: &Principal,
+    ) -> Result<WorkspaceRecord> {
+        let Some(mut record) = self.get_workspace(id).await? else {
+            return Err(RuntimeError::not_found(format!("workspace {id} does not exist")));
+        };
+        if record.owner.matches(&grant.as_ref()) && grant.role != SessionRole::Owner {
+            return Err(RuntimeError::invalid_input(format!(
+                "{} owns this workspace: they hold every right already",
+                record.owner
+            )));
+        }
+        grant.granted_by = Some(granted_by.as_ref().to_string());
+        grant.granted_at = Some(now_ms());
+        record.grants.retain(|existing| !existing.as_ref().matches(&grant.as_ref()));
+        record.grants.push(grant.clone());
+        record.updated_at = now_ms();
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::WorkspaceAccessGranted, "workspace access granted")
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "workspace_id": record.id.as_str(),
+                        "principal": grant.as_ref().to_string(),
+                        "role": grant.role.as_str(),
+                        "granted_by": grant.granted_by,
+                    })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    /// Take a role away again.
+    pub async fn revoke_workspace(&self, id: &WorkspaceId, who: &PrincipalRef) -> Result<WorkspaceRecord> {
+        let Some(mut record) = self.get_workspace(id).await? else {
+            return Err(RuntimeError::not_found(format!("workspace {id} does not exist")));
+        };
+        record.grants.retain(|grant| !grant.as_ref().matches(who));
+        record.updated_at = now_ms();
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::WorkspaceAccessRevoked, "workspace access revoked")
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "workspace_id": record.id.as_str(),
+                        "principal": who.to_string(),
+                    })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    /// The workspace a session belongs to, if it has one. Legacy records do not.
+    pub async fn workspace_of(&self, session: &SessionRecord) -> Result<Option<WorkspaceRecord>> {
+        match &session.workspace_id {
+            Some(id) => self.get_workspace(id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// The role a principal holds on a session, read through its workspace.
+    ///
+    /// The one place the gateway and the session manager agree on what someone may do; keeping it
+    /// here means a route cannot invent its own reading of the permission table.
+    pub async fn role_on(
+        &self,
+        session: &SessionRecord,
+        principal: &Principal,
+    ) -> Result<Option<SessionRole>> {
+        let workspace = self.workspace_of(session).await?;
+        Ok(agentos_core::model::effective_role(
+            session,
+            workspace.as_ref(),
+            principal,
+        ))
+    }
 
     /// Open a session again: the other half of close.
     ///

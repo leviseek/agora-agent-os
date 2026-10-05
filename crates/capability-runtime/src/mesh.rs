@@ -11,7 +11,7 @@ use crate::approvals::{ApprovalBroker, ApprovalRequest};
 use crate::capability::{CallerContext, CapabilityContext, InvocationResult};
 use crate::policy::{apply_session_narrowing, CapabilityPolicy, PolicyRequest, SessionCapabilitySource};
 use crate::registry::CapabilityRegistry;
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceResolver;
 use agentos_core::error::{Result, RuntimeError};
 use agentos_core::model::{CapabilityDescriptor, EventKind, NewEvent, VersionReq};
 use agentos_core::telemetry::{metric_names, metrics};
@@ -38,7 +38,10 @@ pub struct CapabilityMesh {
     policy: Arc<dyn CapabilityPolicy>,
     bus: Arc<dyn EventBus>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
-    workspace: Arc<Workspace>,
+    /// Which directory a call may touch, resolved from the caller's workspace on every invocation.
+    /// One node hosts many workspaces, so a single jail would be one workspace's files reachable
+    /// from every other.
+    workspaces: Arc<dyn WorkspaceResolver>,
     cfg: MeshConfig,
     node_id: String,
     /// Where a call that needs a human decision parks. Absent in deployments that never ask for
@@ -56,7 +59,7 @@ impl CapabilityMesh {
         registry: Arc<CapabilityRegistry>,
         policy: Arc<dyn CapabilityPolicy>,
         bus: Arc<dyn EventBus>,
-        workspace: Arc<Workspace>,
+        workspaces: Arc<dyn WorkspaceResolver>,
         cfg: MeshConfig,
         node_id: impl Into<String>,
     ) -> Self {
@@ -65,7 +68,7 @@ impl CapabilityMesh {
             policy,
             bus,
             artifacts: None,
-            workspace,
+            workspaces,
             cfg,
             node_id: node_id.into(),
             approvals: None,
@@ -219,6 +222,9 @@ impl CapabilityMesh {
         };
         let registered = self.registry.lookup(name, &req)?;
         let descriptor = registered.descriptor_with_load();
+        // Resolve the caller's jail before anything else: policy, the capability context and the
+        // audit all describe the same directory, and they must not be able to disagree about it.
+        let workspace = self.workspaces.resolve(caller.workspace.as_ref())?;
 
         // --- policy gate -------------------------------------------------------------
         let decision = self.policy.evaluate(&PolicyRequest {
@@ -226,7 +232,7 @@ impl CapabilityMesh {
             session_id: caller.session_id.clone(),
             actor_id: caller.actor_id.clone(),
             input_bytes: serde_json::to_vec(&input).map(|v| v.len()).unwrap_or(0),
-            workspace_root: self.workspace.root().to_path_buf(),
+            workspace_root: workspace.root().to_path_buf(),
         })?;
         // A call that needs approval arrives here as "denied, but with a flag": the policy engine
         // says no because it cannot say yes on its own. Denying it outright would make the flag
@@ -278,7 +284,7 @@ impl CapabilityMesh {
             capability_id: descriptor.id.clone(),
             caller: caller.clone(),
             permission: granted,
-            workspace: self.workspace.clone(),
+            workspace: workspace.clone(),
             artifacts: self.artifacts.clone(),
             timeout_ms: if descriptor.timeout_ms == 0 { self.cfg.default_timeout_ms } else { descriptor.timeout_ms },
         };

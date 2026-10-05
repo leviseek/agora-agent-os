@@ -16,6 +16,7 @@ pub mod message;
 pub mod session;
 pub mod task;
 pub mod worker;
+pub mod workspace;
 
 pub use actor::{
     ActorRecord, ActorSnapshotMeta, Checkpoint, CheckpointMeta, CloneRequest, MigrationReport,
@@ -25,9 +26,9 @@ pub use agent::{
     PlanStepKind, ReasoningEffort, StepKind, TokenUsage,
 };
 pub use access::{
-    decide, role_allows, role_of, session_capability_matches, AccessRequestState, Denial, Principal,
-    PrincipalRef, SessionAccessRequest, SessionAction, SessionCapabilities, SessionGrant,
-    SessionRole,
+    decide, decide_in, effective_role, role_allows, role_of, session_capability_matches,
+    AccessRequestState, Denial, Principal, PrincipalRef, SessionAccessRequest, SessionAction,
+    SessionCapabilities, SessionGrant, SessionRole,
 };
 pub use artifact::{ArtifactKind, ArtifactRecord};
 pub use capability::{
@@ -37,5 +38,6 @@ pub use event::{EventFilter, EventKind, EventRecord, EventSeverity, NewEvent};
 pub use memory::{MemoryKind, MemoryQuery, MemoryRecord};
 pub use message::{ContentPart, MessageRole, SessionMessage};
 pub use session::SessionRecord;
+pub use workspace::{workspace_role, WorkspaceRecord};
 pub use task::{TaskGraphRecord, TaskKind, TaskNode, TaskPayload, TaskRecord};
 pub use worker::{WorkerCapacity, WorkerLoad, WorkerRecord};

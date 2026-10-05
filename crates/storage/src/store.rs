@@ -39,6 +39,7 @@ pub trait Store: Send + Sync + 'static {
 
 /// Well-known collection and log names, so typos cannot silently create a new namespace.
 pub mod collections {
+    pub const WORKSPACES: &str = "workspaces";
     pub const SESSIONS: &str = "sessions";
     pub const ACTORS: &str = "actors";
     pub const AGENTS: &str = "agents";

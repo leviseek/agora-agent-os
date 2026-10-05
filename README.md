@@ -267,6 +267,7 @@ anywhere in the codebase (`crates/core/src/state.rs`).
 
 | entity | id | states |
 |---|---|---|
+| Workspace | `ws_*` | active, archived |
 | Session | `ses_*` | creating, active, idle, suspended, closing, closed, failed |
 | Actor | `act_*` | spawning, active, idle, draining, migrating, stopped, failed |
 | Agent run | `agt_*` | goal, planning, thinking, acting, observing, finalizing, succeeded, failed, cancelled |
@@ -329,7 +330,7 @@ carries its key, and the key is read at call time.
 | `AGENTOS_NODE_NAME`, `AGENTOS_NODE_ID` | node identity in the mesh |
 | `AGENTOS_HTTP_ADDR`, `AGENTOS_GRPC_ADDR`, `AGENTOS_WS_PATH` | listen addresses |
 | `AGENTOS_DATA_DIR`, `AGENTOS_STORE_BACKEND` (`memory`/`file`/`redb`) | storage |
-| `AGENTOS_WORKSPACE_ROOT` | the only directory filesystem capabilities may touch |
+| `AGENTOS_WORKSPACE_ROOT` | the only directory filesystem capabilities may touch. Each workspace gets a directory inside it (`<root>/<ws_id>/`), and a session's jail follows its workspace; a session with no workspace keeps the root, which is where its files already are (see `docs/decisions.md` D20) |
 | `AGENTOS_AUTH_TOKEN` | gateway bearer token (unset = open, for local development) |
 | `AGENTOS_PRINCIPALS` | who this node accepts, as a JSON array: `[{"user_id":"alice","token_env":"ALICE_TOKEN"}]`. A named principal is how a second person joins; with a table configured, identity comes only from the token and a declared name is ignored |
 | `AGENTOS_ASSERTED_IDENTITY` | what `X-Agora-User` means on a node with **no** token and no principal table: `off` (ignore it; every request is the operator), `optional` (default: honour it when present, otherwise the operator) or `required` (refuse a request that declares nothing). It is a name, not a password - a node that needs real authentication wants `AGENTOS_PRINCIPALS` |
@@ -366,6 +367,9 @@ absolute paths are rejected before any IO happens (`Workspace`).
   memory and instance limits, epoch-based timeouts, permission-gated host functions, JSON ABI.
 * Control plane: actor directory with a local cache and hit/miss metrics, worker registry with
   leases, least-pressure placement, policy engine, rebalance suggestions.
+* Workspaces: a session belongs to one, access is decided on the workspace and inherited by every
+  session in it, and each workspace is a directory (`<workspace_root>/<ws_id>/`) that its sessions'
+  filesystem capabilities are jailed to. See `docs/decisions.md` D20.
 * Data plane: `Store` (memory/file/redb), event bus with durable replay, content-addressed
   artifact store, memory store, session router.
 
@@ -541,7 +545,7 @@ embedding field for a vector store.
 |---|---|
 | `docs/architecture.md` | layers, request path, concurrency, failure model |
 | `docs/migration.md` | checkpoint/restore/replay, clone, recovery, transfer seam |
-| `docs/decisions.md` | 14 engineering decisions with rejected alternatives |
+| `docs/decisions.md` | 20 engineering decisions with rejected alternatives |
 | `docs/api.md` | HTTP, WebSocket, gRPC and CLI reference |
 | `capabilities/README.md` | capability model, wasm ABI, how to add your own |
 | `apps/server/README.md` | control server and TypeScript orchestration |

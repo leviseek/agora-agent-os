@@ -231,3 +231,39 @@ directory; discovery shares knowledge, not state.
 
 **后续。** 真正的账号体系（注册 / 登录 / 凭据）不在此决定内：它落在一个新节点入口上，与自报共存——
 有凭证时自报仍旧被忽略，这条边界不因账号体系引入而改变。
+
+## D20 — 工作区是归属、共享与目录隔离的单位
+
+**决策。** 引入一等实体 **工作区**（`WorkspaceRecord`，id `ws_*`）。会话属于工作区而不是直接属于人：
+`SessionRecord.workspace_id`、`create_session_in(workspace, ...)`，且会话记录的 `owner` 与工作区的
+`owner` 保持一致（谁拥有工作区，谁就拥有其中所有会话）。权限判定改为**经工作区解析**：
+`effective_role(record, workspace, principal)` —— 会话有工作区时，角色取工作区（`workspace_role`），
+会话自身的 grants 不再参与；没有工作区的旧记录沿用原来的会话级 owner/grants 读法，所以升级不会让已有
+会话答错。目录隔离：一个节点一个根（`policy.workspace_root`），每个工作区一个目录
+`<root>/<ws_id>/`，由 `WorkspaceRegistry` 按 `CallerContext.workspace` 在**每次能力调用**时解析成
+`Workspace` jail；mesh、策略门、审计看到的是同一个目录，不可能各说一套。目录名用 **id 不是名字**，
+改名不移动文件，两个工作区也不会因重名撞目录。
+
+**为何。** 「共享一份完整工作能力」如果不能一次决定，就会退化成"每个会话都点一遍授权"，而漏掉的那个
+会话就是共享边界的漏洞。把归属与授权抬到工作区，共享是一个决定，隔离是一个目录：会话归属、成员、能力收窄
+都挂在工作区上，文件系统也按同一单位切开，权限与目录边界重合，审计才说得清"他能碰什么"。
+
+**拒绝了什么。** 把 `workspace_root` 直接当每个工作区的目录（会用一个根承载所有工作区，等于没有隔离）；
+把会话 grant 继续当主授权（两个授权来源必然漂移——工作区删了成员，会话还在放行）；`Some(id)` 之外再用
+可读 slug 当目录名（改名即搬文件，且可能指向旁人的目录）。也没有做「旧会话自动收编进默认工作区」：那会在
+升级时批量改写记录并改变文件可见位置，风险大于收益，留作显式迁移（见下）。
+
+**代价 / 已知过渡态（必须明说）。**
+1. **没有工作区的旧会话**（`workspace_id = None`）仍把节点根 `policy.workspace_root` 当作 jail，因此理论上
+   能顺着 `ws_*/…` 读到某个工作区目录内的文件。这是升级期的一处洞，只在「会话早于工作区」时存在；
+   网关一旦总是分配工作区（第 3 阶段）就只剩历史记录，随后用显式迁移补齐。
+2. **gRPC 远程能力调用**（`KernelCapabilityHandler`）的线上契约还没有 `workspace_id` 字段，因此该路径
+   `workspace = None`，落到同一个根。第 3 阶段给 proto 加字段后收口；目前它是唯一不受工作区约束的入口。
+3. **能力收窄仍在会话级**（`SessionCapabilities` 按 session 存）。工作区级的能力收窄（"共享完整工作能力"的
+   另一半）随网关阶段一起搬到工作区，本阶段不动，避免半接线的字段。
+
+**验证。** 单测：`workspace_role` 的拥有/授权/节点限定/最佳授权取胜、目录名只认 id；
+`WorkspaceRegistry` 的 A/B 各自 jail、相对路径越界被拒。端到端（`tests/tests/acceptance.rs`）：
+`a_workspace_owns_its_sessions_and_shares_them_with_one_decision`（一条工作区授权 = 其内所有会话生效，
+含之后新建的会话）、`one_workspace_cannot_reach_another_workspace_files`（同一路径在 B 里 `not_found`，
+`../` 越界 `policy_denied`）。

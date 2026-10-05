@@ -41,7 +41,7 @@ use agentos_model_router::{ChatMessage, ModelRequest, ModelTask};
 use agentos_event_bus::EventBus;
 use agentos_model_router::ModelRouter;
 use agentos_capability_runtime::mesh::CapabilityMesh;
-use agentos_capability_runtime::workspace::Workspace;
+use agentos_capability_runtime::workspace::{Workspace, WorkspaceResolver};
 use agentos_storage::artifact::ArtifactStore;
 use agentos_storage::store::{collections, Collection, Store};
 use agentos_task_scheduler::scheduler::Scheduler;
@@ -101,7 +101,9 @@ pub struct SessionDeps {
     pub memory: Arc<dyn MemoryStore>,
     pub artifacts: Arc<dyn ArtifactStore>,
     pub checkpoints: Arc<dyn CheckpointStore>,
-    pub workspace: Arc<Workspace>,
+    /// Where this session's files live. Resolved per call from the session's workspace, because one
+    /// node serves sessions from many workspaces and the jail must follow the session, not the node.
+    pub workspaces: Arc<dyn WorkspaceResolver>,
     pub spec: AgentSpec,
     pub node_id: String,
     pub run_timeout_ms: u64,
@@ -176,6 +178,14 @@ impl SessionActor {
     pub fn new(deps: Arc<SessionDeps>, state: SessionActorState) -> Self {
         let session_id = state.session.id.clone();
         Self { deps, state, session_id }
+    }
+
+    /// The directory this session may touch. Derived from the record's workspace every time, so a
+    /// session can never be pointed at a jail its record does not name.
+    fn jail(&self) -> Result<Arc<Workspace>> {
+        self.deps
+            .workspaces
+            .resolve(self.state.session.workspace_id.as_ref())
     }
 
     pub fn state_ref(&self) -> &SessionActorState {
@@ -400,8 +410,9 @@ impl SessionActor {
         // Attachments are resolved before the run starts, so a bad path or an id nobody stored
         // fails the goal immediately instead of mid-run. Images come from the workspace or an
         // upload; text files come from an upload, and the two are told apart by content.
+        let attach_jail = self.jail()?;
         let attached = crate::images::attach_images(
-            &self.deps.workspace,
+            &attach_jail,
             &self.deps.artifacts,
             &self.session_id,
             &images,
@@ -588,8 +599,9 @@ impl SessionActor {
 
         // Project instructions, read fresh at the start of every run so editing AGENTS.md takes
         // effect on the next goal rather than the next restart.
+        let jail = self.jail()?;
         let workspace_context =
-            load_workspace_context(&self.deps.workspace, &self.deps.context_files, self.deps.context_files_chars);
+            load_workspace_context(&jail, &self.deps.context_files, self.deps.context_files_chars);
         if let Some(loaded) = &workspace_context {
             self.deps
                 .bus
@@ -624,6 +636,7 @@ impl SessionActor {
             self.deps.node_id.clone(),
         );
         let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone())
+            .with_workspace(self.state.session.workspace_id.clone())
             .with_deltas(deltas.sink())
             .with_spec(spec);
         let outcome = match tokio::time::timeout(

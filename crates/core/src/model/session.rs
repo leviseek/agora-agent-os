@@ -1,4 +1,4 @@
-use crate::ids::{ActorId, SessionId, WorkerId};
+use crate::ids::{ActorId, SessionId, WorkerId, WorkspaceId};
 use crate::state::SessionState;
 use crate::time::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,13 @@ pub struct SessionRecord {
     pub updated_at: Timestamp,
     pub closed_at: Option<Timestamp>,
     pub metadata: BTreeMap<String, String>,
+    /// The workspace this session belongs to.
+    ///
+    /// Optional only for records written before workspaces existed: a missing value reads as "no
+    /// workspace", and access then falls back to the session's own owner and grants. Every session
+    /// created since carries one, and that is the shape the permission model assumes.
+    #[serde(default)]
+    pub workspace_id: Option<WorkspaceId>,
     /// Provider this session prefers. None lets the router decide (its default and failover order).
     #[serde(default)]
     pub model_hint: Option<String>,
@@ -60,6 +67,7 @@ impl SessionRecord {
             updated_at: now,
             closed_at: None,
             metadata: BTreeMap::new(),
+            workspace_id: None,
             model_hint: None,
             reasoning_effort: None,
             grants: Vec::new(),

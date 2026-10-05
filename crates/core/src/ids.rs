@@ -101,6 +101,12 @@ define_id!(
     "ses"
 );
 define_id!(
+    /// A workspace: the unit of ownership, sharing and filesystem isolation. Sessions belong to
+    /// one, and a workspace's own directory is the only filesystem surface its sessions may touch.
+    WorkspaceId,
+    "ws"
+);
+define_id!(
     /// The unit of isolation and placement. An actor owns state and a serialized mailbox.
     ActorId,
     "act"

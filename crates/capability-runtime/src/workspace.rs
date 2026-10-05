@@ -8,7 +8,11 @@
 //! 4. reads and writes are additionally gated by the capability permission set.
 
 use agentos_core::error::{Result, RuntimeError};
+use agentos_core::WorkspaceId;
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -161,6 +165,84 @@ pub struct WorkspaceEntry {
     pub size: u64,
 }
 
+/// Turns "which workspace is this session in?" into "which directory may it touch?".
+///
+/// The mesh holds one of these rather than one jail, because one node hosts sessions from many
+/// workspaces and each must be jail-rooted in its own directory. `None` is a session with no
+/// workspace - a record written before workspaces existed - and keeps the node's root as its jail,
+/// which is exactly where its files already are. That keeps an upgrade from moving anybody's files;
+/// it is also the one case where a session can still see a sibling workspace's directory, and it
+/// disappears once every session has a workspace (see docs/decisions.md D20).
+pub trait WorkspaceResolver: Send + Sync + std::fmt::Debug {
+    fn resolve(&self, workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>>;
+}
+
+/// One fixed jail, for tests and for a runtime that has a single workspace.
+#[derive(Debug)]
+pub struct FixedWorkspaceResolver {
+    workspace: Arc<Workspace>,
+}
+
+impl FixedWorkspaceResolver {
+    pub fn new(workspace: Arc<Workspace>) -> Self {
+        Self { workspace }
+    }
+}
+
+impl WorkspaceResolver for FixedWorkspaceResolver {
+    fn resolve(&self, _workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>> {
+        Ok(self.workspace.clone())
+    }
+}
+
+/// The real thing: a node root, one directory per workspace, jails created on first use and kept.
+///
+/// The directory is the workspace id rather than its name, so renaming a workspace never moves a
+/// file and two workspaces can never collide on a name. Ids are unique per node, so the mapping is
+/// injective without a lock around it beyond the cache itself.
+#[derive(Debug)]
+pub struct WorkspaceRegistry {
+    root: PathBuf,
+    legacy: Arc<Workspace>,
+    jails: RwLock<HashMap<String, Arc<Workspace>>>,
+}
+
+impl WorkspaceRegistry {
+    pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+        let legacy = Arc::new(Workspace::new(root.as_ref())?);
+        Ok(Self {
+            root: legacy.root().to_path_buf(),
+            legacy,
+            jails: RwLock::new(HashMap::new()),
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The jail for a workspace id. Created on first use, cached afterwards: constructing a jail
+    /// canonicalises the path on disk, and doing that on every capability call would be an IO
+    /// operation per call for no gain.
+    pub fn jail_for(&self, workspace: &WorkspaceId) -> Result<Arc<Workspace>> {
+        if let Some(existing) = self.jails.read().get(workspace.as_str()) {
+            return Ok(existing.clone());
+        }
+        let jail = Arc::new(Workspace::new(self.root.join(workspace.as_str()))?);
+        self.jails.write().insert(workspace.as_str().to_string(), jail.clone());
+        Ok(jail)
+    }
+}
+
+impl WorkspaceResolver for WorkspaceRegistry {
+    fn resolve(&self, workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>> {
+        match workspace {
+            Some(id) => self.jail_for(id),
+            None => Ok(self.legacy.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +295,31 @@ mod tests {
         let (w, _d) = ws();
         w.write("big.txt", "0123456789", 1024).await.unwrap();
         assert!(w.read_to_string("big.txt", 4).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn each_workspace_gets_its_own_jail_under_the_root() {
+        let dir = std::env::temp_dir().join(format!("agentos-registry-{}", agentos_core::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = WorkspaceRegistry::new(&dir).unwrap();
+        let a = WorkspaceId::new();
+        let b = WorkspaceId::new();
+
+        let jail_a = registry.jail_for(&a).unwrap();
+        let jail_b = registry.jail_for(&b).unwrap();
+        assert!(jail_a.root().starts_with(std::fs::canonicalize(&dir).unwrap()));
+        assert_ne!(jail_a.root(), jail_b.root());
+        // The same id resolves to the same jail, so a cached path is the path a later call gets.
+        assert_eq!(registry.jail_for(&a).unwrap().root(), jail_a.root());
+
+        // This is the whole point: A writing a file does not make it visible to B, and a relative
+        // path out of A's jail is refused before any IO happens.
+        jail_a.write("only-a.txt", "alice", 1024).await.unwrap();
+        assert!(jail_b.read_to_string("only-a.txt", 1024).await.is_err());
+        assert!(jail_a.resolve("../only-a.txt").is_err());
+
+        // A session with no workspace keeps the node root, where its files already are.
+        let legacy = registry.resolve(None).unwrap();
+        assert_eq!(legacy.root(), std::fs::canonicalize(&dir).unwrap());
     }
 }

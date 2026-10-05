@@ -10,11 +10,11 @@
 //!   7. policy: workspace traversal denied, writes denied by default
 //!   8. failure and retry behaviour, including a capability that fails before succeeding
 
-use agentos_capability_runtime::capability::{Capability, CapabilityContext};
+use agentos_capability_runtime::capability::{CallerContext, Capability, CapabilityContext};
 use agentos_core::config::{RuntimeConfig, StoreBackend};
 use agentos_core::model::{
     CapabilityDescriptor, CapabilityKind, CapabilityPermission, CapabilityProvider, EventFilter,
-    EventKind, TaskKind, TaskPayload, TaskRecord, WorkerLoad,
+    EventKind, Principal, SessionGrant, SessionRole, TaskKind, TaskPayload, TaskRecord, WorkerLoad,
 };
 use agentos_core::state::CapabilityHealth;
 use agentos_core::{CapabilityId, SessionId, TaskId};
@@ -424,6 +424,7 @@ impl agentos_task_scheduler::scheduler::TaskRunner for GraphRunner {
                     session_id: self.session.clone(),
                     actor_id: None,
                     task_id: Some(node.id.clone()),
+                    workspace: None,
                     correlation: ctx.correlation.clone(),
                     cancellation: ctx.cancellation.clone(),
                 };
@@ -674,3 +675,113 @@ async fn acceptance_10_wasm_capability_runs_in_the_sandbox() {
 
 #[allow(dead_code)]
 fn unused(_: TaskId) {}
+
+// ---------------------------------------------------------------------------------------------
+// workspaces: ownership, sharing and directory isolation
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workspace_owns_its_sessions_and_shares_them_with_one_decision() {
+    let kernel = kernel().await;
+    let alice = Principal::new("alice", Some("node-x".into()), vec![]);
+    let bob = Principal::new("bob", None, vec![]);
+
+    let workspace = kernel.sessions.create_workspace("alice's project", &alice).await.unwrap();
+    let session = kernel
+        .sessions
+        .create_session_in(&workspace.id, "alice", "first conversation", None)
+        .await
+        .unwrap();
+
+    // The session belongs to the workspace, and its owner is the workspace's owner - not whoever
+    // happened to post the create request.
+    assert_eq!(session.workspace_id.as_ref(), Some(&workspace.id));
+    assert_eq!(session.owner_label(), workspace.owner_label());
+
+    assert_eq!(
+        kernel.sessions.role_on(&session, &alice).await.unwrap(),
+        Some(SessionRole::Owner)
+    );
+    assert_eq!(kernel.sessions.role_on(&session, &bob).await.unwrap(), None);
+
+    // One grant on the workspace, and bob is that role in every session of it. This is the whole
+    // point of moving access up a level: sharing a working unit is one decision.
+    kernel
+        .sessions
+        .grant_workspace(
+            &workspace.id,
+            SessionGrant::new("bob", None, SessionRole::Participant),
+            &alice,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        kernel.sessions.role_on(&session, &bob).await.unwrap(),
+        Some(SessionRole::Participant)
+    );
+
+    // A role on the workspace is a role in every session of it, including one created afterwards.
+    let second = kernel
+        .sessions
+        .create_session_in(&workspace.id, "alice", "second conversation", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        kernel.sessions.role_on(&second, &bob).await.unwrap(),
+        Some(SessionRole::Participant)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_workspace_cannot_reach_another_workspace_files() {
+    let kernel = kernel().await;
+    let alice = Principal::new("alice", Some("node-x".into()), vec![]);
+    let ws_a = kernel.sessions.create_workspace("A", &alice).await.unwrap();
+    let ws_b = kernel.sessions.create_workspace("B", &alice).await.unwrap();
+    let session_a = kernel.sessions.create_session_in(&ws_a.id, "alice", "a", None).await.unwrap();
+    let session_b = kernel.sessions.create_session_in(&ws_b.id, "alice", "b", None).await.unwrap();
+
+    // A file that exists in A's directory and nowhere else.
+    let dir_a = kernel.policy.workspace_root().join(ws_a.id.as_str());
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::write(dir_a.join("only-a.txt"), "alice's file").unwrap();
+
+    let read = kernel
+        .mesh
+        .invoke(
+            "filesystem-read",
+            None,
+            json!({ "path": "only-a.txt" }),
+            CallerContext::new(session_a.id.clone()).with_workspace(Some(ws_a.id.clone())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.output["content"], "alice's file");
+
+    // The same path, from a session in B, is not found: the jail came from the caller's workspace,
+    // so there is no path the model can write that reaches a sibling workspace.
+    let refused = kernel
+        .mesh
+        .invoke(
+            "filesystem-read",
+            None,
+            json!({ "path": "only-a.txt" }),
+            CallerContext::new(session_b.id.clone()).with_workspace(Some(ws_b.id.clone())),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind, agentos_core::ErrorKind::NotFound, "{refused}");
+
+    // And B cannot climb out with a relative path either.
+    let escape = kernel
+        .mesh
+        .invoke(
+            "filesystem-read",
+            None,
+            json!({ "path": format!("../{}/only-a.txt", ws_a.id.as_str()) }),
+            CallerContext::new(session_b.id.clone()).with_workspace(Some(ws_b.id.clone())),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(escape.kind, agentos_core::ErrorKind::PolicyDenied, "{escape}");
+}

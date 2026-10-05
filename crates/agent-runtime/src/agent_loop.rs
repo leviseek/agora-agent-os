@@ -259,6 +259,9 @@ pub struct FinalAnswer {
 pub struct AgentLoop {
     deps: Arc<SessionDeps>,
     session_id: agentos_core::SessionId,
+    /// The workspace the session belongs to, carried to every capability call this run makes: the
+    /// jail is derived from it, so a run cannot reach outside the workspace it was started in.
+    workspace: Option<agentos_core::WorkspaceId>,
     correlation: Correlation,
     cancellation: CancellationToken,
     /// The spec this run actually uses: the kernel default, with the session's model and thinking
@@ -279,7 +282,13 @@ impl AgentLoop {
         cancellation: CancellationToken,
     ) -> Self {
         let spec = deps.spec.clone();
-        Self { deps, session_id, correlation, cancellation, deltas: None, spec }
+        Self { deps, session_id, workspace: None, correlation, cancellation, deltas: None, spec }
+    }
+
+    /// Fix the workspace for this run. Set from the session record; not settable from a goal.
+    pub fn with_workspace(mut self, workspace: Option<agentos_core::WorkspaceId>) -> Self {
+        self.workspace = workspace;
+        self
     }
 
     /// Use this spec for the run (session settings and per-goal overrides).
@@ -416,6 +425,7 @@ impl AgentLoop {
             let runner = Arc::new(PlanTaskRunner {
                 deps: self.deps.clone(),
                 session_id: run.session_id.clone(),
+                workspace: self.workspace.clone(),
                 agent_id: run.id.clone(),
                 cancellation: self.cancellation.clone(),
                 correlation: self.correlation.clone(),
@@ -1036,6 +1046,9 @@ fn parse_plan(goal: &str, value: &serde_json::Value) -> Option<Plan> {
 pub struct PlanTaskRunner {
     deps: Arc<SessionDeps>,
     session_id: agentos_core::SessionId,
+    /// Carried through to every capability call, exactly as on the loop itself: the jail follows the
+    /// workspace, and a parallel step must not end up in a different one.
+    workspace: Option<agentos_core::WorkspaceId>,
     agent_id: agentos_core::AgentId,
     cancellation: CancellationToken,
     correlation: Correlation,
@@ -1065,6 +1078,7 @@ impl TaskRunner for PlanTaskRunner {
                     session_id: self.session_id.clone(),
                     actor_id: None,
                     task_id: Some(node.id.clone()),
+                    workspace: self.workspace.clone(),
                     correlation: self.correlation.clone(),
                     cancellation: self.cancellation.clone(),
                 };

@@ -333,12 +333,44 @@ pub fn role_of(record: &SessionRecord, principal: &Principal) -> Option<SessionR
         .min()
 }
 
+/// The role a principal holds on a session, read through its workspace.
+///
+/// This is the rule the workspace model is built on: access belongs to the workspace, not to the
+/// conversation. Someone with a role in a workspace holds that role in every session of it - which
+/// is what makes "share this working unit" one decision rather than one per conversation - and a
+/// session's own grants are no longer consulted once it has a workspace, because a per-session role
+/// that could outlive the workspace's decision is exactly the drift workspaces exist to remove.
+///
+/// A record with no workspace (written before workspaces existed) keeps the old reading, so an
+/// upgraded node still answers correctly about conversations it already had.
+pub fn effective_role(
+    record: &SessionRecord,
+    workspace: Option<&crate::model::WorkspaceRecord>,
+    principal: &Principal,
+) -> Option<SessionRole> {
+    match workspace {
+        Some(workspace) => crate::model::workspace_role(workspace, principal),
+        None => role_of(record, principal),
+    }
+}
+
 /// May this principal do this to this session?
 ///
 /// Admins pass everywhere - they are configured by the operator, they are the escape hatch - and
-/// everyone else is decided by the role they hold.
+/// everyone else is decided by the role they hold. Kept as the no-workspace reading; the gateway and
+/// the session manager use `decide_in` so that a session's workspace is taken into account.
 pub fn decide(
     record: &SessionRecord,
+    principal: &Principal,
+    action: SessionAction,
+) -> std::result::Result<(), Denial> {
+    decide_in(record, None, principal, action)
+}
+
+/// The same decision, told which workspace the session belongs to.
+pub fn decide_in(
+    record: &SessionRecord,
+    workspace: Option<&crate::model::WorkspaceRecord>,
     principal: &Principal,
     action: SessionAction,
 ) -> std::result::Result<(), Denial> {
@@ -350,18 +382,25 @@ pub fn decide(
         session_id: record.id.clone(),
         reason,
     };
-    match role_of(record, principal) {
+    match effective_role(record, workspace, principal) {
         Some(role) if role_allows(role, action) => Ok(()),
         Some(role) => Err(denial(format!(
             "you are {} on this session, and {} is not part of that",
             role.as_str(),
             action.as_str()
         ))),
-        None => Err(denial(match &record.owner {
-            Some(owner) => format!(
-                "you have no role on this session; it belongs to {owner} - ask them for access"
+        None => Err(denial(match workspace {
+            // Naming the workspace, and not just the session, is what tells a stranger where to ask.
+            Some(workspace) => format!(
+                "you have no role on this session; it belongs to workspace {} ({}) - ask its owner for access",
+                workspace.name, workspace.owner
             ),
-            None => "you have no role on this session".to_string(),
+            None => match &record.owner {
+                Some(owner) => format!(
+                    "you have no role on this session; it belongs to {owner} - ask them for access"
+                ),
+                None => "you have no role on this session".to_string(),
+            },
         })),
     }
 }

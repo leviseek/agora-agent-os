@@ -535,7 +535,13 @@ async fn task_cmd(kernel: Arc<Kernel>, cmd: TaskCmd, json_out: bool) -> Result<(
             }
             let graph = builder.build()?;
 
-            let runner = Arc::new(CliTaskRunner { kernel: kernel.clone(), session: session.clone() });
+            let runner = Arc::new(CliTaskRunner {
+                kernel: kernel.clone(),
+                session: session.clone(),
+                // The jail a capability may touch follows the session's workspace. A CLI-run task
+                // graph is no exception: it is the same run, only started from a different front end.
+                workspace: kernel.sessions.get(&session).await?.and_then(|record| record.workspace_id),
+            });
             let scheduler = agentos_task_scheduler::scheduler::Scheduler::new(
                 kernel.store.clone(),
                 kernel.bus.clone(),
@@ -591,6 +597,7 @@ async fn task_cmd(kernel: Arc<Kernel>, cmd: TaskCmd, json_out: bool) -> Result<(
 struct CliTaskRunner {
     kernel: Arc<Kernel>,
     session: SessionId,
+    workspace: Option<agentos_core::WorkspaceId>,
 }
 
 #[async_trait::async_trait]
@@ -606,6 +613,7 @@ impl agentos_task_scheduler::scheduler::TaskRunner for CliTaskRunner {
                     session_id: self.session.clone(),
                     actor_id: None,
                     task_id: Some(node.id.clone()),
+                    workspace: self.workspace.clone(),
                     correlation: ctx.correlation.clone(),
                     cancellation: ctx.cancellation.clone(),
                 };

@@ -19,7 +19,7 @@ use agentos_capability_runtime::builtins::{
 };
 use agentos_capability_runtime::mesh::{CapabilityMesh, MeshConfig};
 use agentos_capability_runtime::registry::CapabilityRegistry;
-use agentos_capability_runtime::workspace::Workspace;
+use agentos_capability_runtime::workspace::{WorkspaceRegistry, WorkspaceResolver};
 use agentos_core::config::RuntimeConfig;
 use agentos_core::error::{Result, RuntimeError};
 use agentos_core::model::{AgentSpec, EventKind, NewEvent, WorkerLoad, WorkerRecord};
@@ -143,7 +143,10 @@ impl Kernel {
         let bus: Arc<dyn EventBus> = local_bus;
 
         // --- policy + capabilities -------------------------------------------------
-        let workspace = Arc::new(Workspace::new(&config.policy.workspace_root)?);
+        // One root, one directory per workspace, resolved per call. A single jail here would be one
+        // workspace's files reachable from every other.
+        let workspaces = Arc::new(WorkspaceRegistry::new(&config.policy.workspace_root)?);
+        let workspace_resolver: Arc<dyn WorkspaceResolver> = workspaces.clone();
         let policy = Arc::new(PolicyEngine::new(config.policy.clone()));
         let registry = Arc::new(CapabilityRegistry::new());
         register_builtins(&registry)?;
@@ -163,7 +166,7 @@ impl Kernel {
                 registry.clone(),
                 policy.clone(),
                 bus.clone(),
-                workspace.clone(),
+                workspace_resolver.clone(),
                 MeshConfig {
                     default_timeout_ms: config.policy.capability_timeout_ms,
                     max_retries: config.policy.capability_retries,
@@ -261,7 +264,7 @@ impl Kernel {
             memory: memory.clone(),
             artifacts: artifacts.clone(),
             checkpoints: checkpoints.clone(),
-            workspace: workspace.clone(),
+            workspaces: workspace_resolver.clone(),
             spec: AgentSpec {
                 allowed_capabilities: vec![],
                 max_steps: config.policy.max_steps_per_run,
