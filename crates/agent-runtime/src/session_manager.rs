@@ -263,7 +263,6 @@ impl SessionManager {
         }
     }
 
-    
 /// The runtime view of a session that has no live actor, spelled exactly like the actor's own
 /// status so a client cannot tell the difference - except that `active_run` is always null.
 fn durable_status_json(session: &SessionId, state: &SessionActorState) -> serde_json::Value {
@@ -322,15 +321,15 @@ fn durable_transcript_json(
 }
 
 /// A checkpoint built from rebuilt state, for an actor that has to be brought back without one.
-    ///
-    /// Nothing is replayed: the state already contains every durable fact, so the event offset is
-    /// where the log currently ends.
-    async fn synthetic_checkpoint(
-        &self,
-        actor_id: &ActorId,
-        session: &SessionId,
-        state: &SessionActorState,
-    ) -> Result<Checkpoint> {
+///
+/// Nothing is replayed: the state already contains every durable fact, so the event offset is
+/// where the log currently ends.
+async fn synthetic_checkpoint(
+    &self,
+    actor_id: &ActorId,
+    session: &SessionId,
+    state: &SessionActorState,
+) -> Result<Checkpoint> {
         Ok(Checkpoint {
             meta: CheckpointMeta {
                 id: agentos_core::CheckpointId::new(),
@@ -349,7 +348,7 @@ fn durable_transcript_json(
     }
 
 /// Reconstruct a session actor from what is durable: its record and its runs.
-    async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActorState>> {
+async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActorState>> {
         let record = self
             .session_collection()
             .load(self.store.as_ref(), session.as_str())
