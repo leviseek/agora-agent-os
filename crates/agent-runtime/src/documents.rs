@@ -72,11 +72,18 @@ pub fn text_content_type(name: &str, bytes: &[u8]) -> String {
 pub enum UploadedKind {
     Image(&'static str),
     Text,
+    /// An .xlsx: a binary file whose *content* is a table, so it is read rather than refused.
+    Spreadsheet,
 }
 
 pub fn classify_upload(bytes: &[u8]) -> Option<UploadedKind> {
     if let Some(mime) = crate::images::sniff_mime(bytes) {
         return Some(UploadedKind::Image(mime));
+    }
+    // A zip header is checked before text: an .xlsx is a zip, and a spreadsheet is a table the model
+    // should read, not a binary blob to refuse.
+    if crate::xlsx::looks_like_zip(bytes) {
+        return Some(UploadedKind::Spreadsheet);
     }
     if looks_like_text(bytes) {
         return Some(UploadedKind::Text);
@@ -90,6 +97,20 @@ pub async fn store_document(
     session: &SessionId,
     name: &str,
     bytes: &[u8],
+) -> Result<ArtifactRecord> {
+    store_document_as(artifacts, session, name, bytes, text_content_type(name, bytes)).await
+}
+
+/// Store text whose type the caller already knows.
+///
+/// Used when the bytes are not what the name says: an .xlsx arrives as a zip and is stored as the CSV
+/// it was read into, so the name stays `book.xlsx` and the content type has to be `text/csv`.
+pub async fn store_document_as(
+    artifacts: &Arc<dyn ArtifactStore>,
+    session: &SessionId,
+    name: &str,
+    bytes: &[u8],
+    content_type: impl Into<String>,
 ) -> Result<ArtifactRecord> {
     if bytes.is_empty() {
         return Err(RuntimeError::invalid_input("the uploaded file is empty"));
@@ -106,7 +127,7 @@ pub async fn store_document(
              attachment may be CSV, TSV, Markdown, JSON or plain text."
         )));
     }
-    let content_type = text_content_type(name, bytes);
+    let content_type = content_type.into();
     artifacts
         .put(session.clone(), name, ArtifactKind::Text, &content_type, bytes)
         .await

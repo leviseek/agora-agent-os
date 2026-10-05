@@ -432,7 +432,10 @@ pub async fn upload_attachment(
     // the prompt.
     let kind = agentos_agent_runtime::documents::classify_upload(&body);
     let limit = match kind {
-        Some(agentos_agent_runtime::documents::UploadedKind::Text) => {
+        // A text file ends up in the prompt, and an .xlsx becomes text: both are capped at what a
+        // prompt can carry, not at what the artifact store can hold.
+        Some(agentos_agent_runtime::documents::UploadedKind::Text)
+        | Some(agentos_agent_runtime::documents::UploadedKind::Spreadsheet) => {
             state.config.policy.max_artifact_bytes.min(agentos_agent_runtime::documents::MAX_DOCUMENT_BYTES)
         }
         _ => state.config.policy.max_artifact_bytes,
@@ -466,11 +469,53 @@ pub async fn upload_attachment(
              model receives it."
         ))));
     };
-    if matches!(kind, agentos_agent_runtime::documents::UploadedKind::Text) {
-        // A text file is read into the prompt, which every model can do. No vision check applies.
-        let record =
-            agentos_agent_runtime::documents::store_document(&deps.artifacts, &session, &name, &body)
-                .await?;
+    // A spreadsheet is read into text first: the model gets rows, and what is stored is the table
+    // those rows make, so the artifact a client can fetch is the thing the model read.
+    let mut spreadsheet_note = serde_json::Value::Null;
+    let stored_body: Vec<u8> = if matches!(
+        kind,
+        agentos_agent_runtime::documents::UploadedKind::Spreadsheet
+    ) {
+        let workbook = agentos_agent_runtime::xlsx::workbook_from_bytes(&body)?.ok_or_else(|| {
+            ApiError(RuntimeError::invalid_input(format!(
+                "{name} is a zip archive but not a spreadsheet: no xl/workbook.xml inside it"
+            )))
+        })?;
+        spreadsheet_note = json!({
+            "sheets": workbook.sheets.iter().map(|sheet| sheet.name.clone()).collect::<Vec<_>>(),
+            "rows": workbook.sheets.iter().map(|sheet| sheet.rows.len()).sum::<usize>(),
+        });
+        workbook.csv.into_bytes()
+    } else {
+        body.to_vec()
+    };
+    if matches!(
+        kind,
+        agentos_agent_runtime::documents::UploadedKind::Text
+            | agentos_agent_runtime::documents::UploadedKind::Spreadsheet
+    ) {
+        // Text, or a table read out of a spreadsheet: read into the prompt, which every model can do.
+        // No vision check applies.
+        // An .xlsx is stored as the table it was read into, so its content type describes the
+        // bytes rather than the name.
+        let record = if spreadsheet_note.is_null() {
+            agentos_agent_runtime::documents::store_document(
+                &deps.artifacts,
+                &session,
+                &name,
+                &stored_body,
+            )
+            .await?
+        } else {
+            agentos_agent_runtime::documents::store_document_as(
+                &deps.artifacts,
+                &session,
+                &name,
+                &stored_body,
+                "text/csv",
+            )
+            .await?
+        };
         deps.bus
             .publish(
                 agentos_core::model::NewEvent::new(
@@ -492,7 +537,8 @@ pub async fn upload_attachment(
             "name": record.name,
             "content_type": record.content_type,
             "bytes": record.size,
-            "kind": "text",
+            "kind": if spreadsheet_note.is_null() { "text" } else { "spreadsheet" },
+            "spreadsheet": spreadsheet_note,
         })));
     }
     // An image. Refuse before storing, when nothing can look at it: the runtime would answer such a

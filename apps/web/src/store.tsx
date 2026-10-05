@@ -93,7 +93,7 @@ export const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp';
  * turns out to be binary.
  */
 export const DOCUMENT_TYPES =
-  '.csv,.tsv,.md,.markdown,.json,.txt,.log,.yaml,.yml,.toml,text/csv,text/markdown,application/json,text/plain';
+  '.csv,.tsv,.md,.markdown,.json,.txt,.log,.yaml,.yml,.toml,.xlsx,text/csv,text/markdown,application/json,text/plain';
 
 /** Everything the paperclip offers. */
 export const ATTACHMENT_TYPES = IMAGE_TYPES + ',' + DOCUMENT_TYPES;

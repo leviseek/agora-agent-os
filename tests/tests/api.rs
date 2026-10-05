@@ -1251,6 +1251,63 @@ async fn an_uploaded_image_becomes_an_attachment_the_goal_can_name() {
     h.shutdown.cancel();
 }
 
+/// An .xlsx is read into a table the model can use - the whole point of accepting a binary table.
+#[tokio::test]
+async fn an_uploaded_spreadsheet_becomes_a_table_the_goal_can_name() {
+    let h = Harness::start(None, 600).await;
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "book" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+
+    // A real .xlsx, written here: a zip with a workbook, a string table and one sheet.
+    let mut book = Vec::new();
+    {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut book));
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let mut add = |name: &str, body: &str| {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        };
+        add(
+            "xl/workbook.xml",
+            r#"<workbook><sheets><sheet name="销售" sheetId="1"/></sheets></workbook>"#,
+        );
+        add(
+            "xl/sharedStrings.xml",
+            r#"<sst><si><t>region</t></si><si><t>revenue</t></si><si><t>华东</t></si></sst>"#,
+        );
+        add(
+            "xl/worksheets/sheet1.xml",
+            r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>128000</v></c></row><row r="3"><c r="A3" t="s"><v>2</v></c><c r="B3"><v>143500</v></c></row></sheetData></worksheet>"#,
+        );
+        writer.finish().unwrap();
+    }
+
+    let (status, uploaded) = h
+        .upload(
+            &format!("/v1/sessions/{id}/attachments"),
+            "book.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            &book,
+        )
+        .await;
+    assert_eq!(status, 200, "{uploaded}");
+    assert_eq!(uploaded["kind"], "spreadsheet", "{uploaded}");
+    assert_eq!(uploaded["spreadsheet"]["sheets"][0], "销售", "{uploaded}");
+    assert_eq!(uploaded["spreadsheet"]["rows"], 3, "{uploaded}");
+    let artifact_id = uploaded["artifact_id"].as_str().unwrap().to_string();
+
+    // What is stored is the table the model reads, not the zip: a client can fetch the rows.
+    let (status, bytes, content_type) = h.get_bytes(&format!("/v1/artifacts/{artifact_id}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "text/csv");
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    assert!(text.starts_with("region,revenue"), "{text}");
+    assert!(text.contains("128000") && text.contains("143500"), "{text}");
+
+    h.shutdown.cancel();
+}
+
 /// A text file the user attaches is stored, recorded in the turn, and read into the model's prompt.
 ///
 /// This is the "table file" path: a browser can hand over a CSV it has, and the model should answer

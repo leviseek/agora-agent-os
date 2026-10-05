@@ -63,6 +63,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+# An .xlsx is a zip of XML parts, so reading one is a zip reader plus an XML reader. Both are pure
+# Rust and carry no build-time requirements.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
 
 [profile.dev]
 opt-level = 0
