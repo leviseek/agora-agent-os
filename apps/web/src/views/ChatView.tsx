@@ -13,26 +13,9 @@ function isPlaceholderProvider(provider: string): boolean {
   return PLACEHOLDER_PROVIDERS.has(provider) || provider.startsWith('agentos-mock');
 }
 import { useNav } from '../navigation';
-import { useApp } from '../store';
+import { EMPTY_DRAFT, IMAGE_TYPES, useApp } from '../store';
+import type { PendingAttachment } from '../store';
 import type { EventRecord, RunSummary } from '../api';
-
-/** What the runtime accepts. The decision is by content, but the picker should not offer more. */
-const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp';
-
-/**
- * One file on its way to the runtime.
- *
- * `uploading` exists so the composer never lies: a drop that has not landed yet must not look
- * ready, and a file the runtime refused has to say why instead of disappearing.
- */
-interface PendingAttachment {
-  key: string;
-  name: string;
-  status: 'uploading' | 'ready' | 'error';
-  previewUrl: string | null;
-  artifactId?: string;
-  error?: string;
-}
 
 let attachmentKey = 0;
 
@@ -91,20 +74,28 @@ export function ChatView() {
     modelOptions,
     configureSession,
     uploadAttachments,
+    composerDrafts,
+    updateComposerDraft,
+    settleAttachments,
   } = useApp();
   const { setView } = useNav();
   const session = useSessionEvents(selectedSessionId, 200);
 
-  const [goal, setGoal] = useState('');
-  // Workspace-relative image paths, comma separated. Attachments are read by the runtime through
-  // the workspace jail, so this box can only name files the runtime is allowed to read.
-  const [imagePaths, setImagePaths] = useState('');
-  // Files dropped, pasted or picked. They are uploaded straight away and named as artifact ids when
-  // the goal is sent: a browser cannot write into the runtime's workspace, which is why "type the
-  // path in" was never going to work for a screenshot.
-  const [pending, setPending] = useState<PendingAttachment[]>([]);
+  // The composer's unsent content lives in the store, keyed by session: this view unmounts when
+  // another tab is opened, and a draft held here was destroyed by that click.
+  const draftKey = selectedSessionId ?? '';
+  const draft = composerDrafts[draftKey] ?? EMPTY_DRAFT;
+  const goal = draft.goal;
+  const imagePaths = draft.imagePaths;
+  const pending = draft.pending;
+  const setGoal = (next: string): void => updateComposerDraft(draftKey, { goal: next });
+  const setImagePaths = (next: string): void => updateComposerDraft(draftKey, { imagePaths: next });
+  const setPending = (next: (current: PendingAttachment[]) => PendingAttachment[]): void =>
+    updateComposerDraft(draftKey, { pending: next(draft.pending) });
   const [dropping, setDropping] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sendingRef = useRef(false);
+
   // The session's stored choice, edited in place. Changing it PATCHes the session, so the next
   // goal (and every goal after) uses it; a one-off override is available through the API.
   const sessionModel = detail === null ? '' : detail.session.model_hint ?? '';
@@ -152,6 +143,9 @@ export function ChatView() {
   const sessionOnly = byAgent.get('__session__') ?? [];
   const activeRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
   const streaming = activeRun !== undefined && isRunning(activeRun.state);
+  // A goal must not leave while one of its images is still in flight: that is exactly how a request
+  // went out without the picture it was about.
+  const uploading = pending.some((item) => item.status === 'uploading');
   const selected = sessions.find((item) => item.id === selectedSessionId) ?? null;
 
   /**
@@ -165,6 +159,7 @@ export function ChatView() {
       const session = selectedSessionId;
       if (session === null || files.length === 0) return;
       const accepted = files.filter((file) => file.size > 0);
+      const stagedFor = session;
       const items: PendingAttachment[] = accepted.map((file) => ({
         key: 'att-' + ++attachmentKey,
         name: file.name.length > 0 ? file.name : 'pasted image',
@@ -173,22 +168,14 @@ export function ChatView() {
         previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
       }));
       if (items.length === 0) return;
-      setPending((current) => [...current, ...items]);
+      updateComposerDraft(stagedFor, { pending: [...(composerDrafts[stagedFor]?.pending ?? []), ...items] });
       const { uploaded, failed } = await uploadAttachments(session, accepted);
-      setPending((current) =>
-        current.map((item) => {
-          const index = items.findIndex((candidate) => candidate.key === item.key);
-          if (index < 0) return item;
-          const stored = uploaded[index];
-          if (stored !== undefined) {
-            return { ...item, status: 'ready', artifactId: stored.artifact_id, name: stored.name };
-          }
-          const refusal = failed[index] ?? { name: item.name, reason: 'upload failed' };
-          return { ...item, status: 'error', error: refusal.reason };
-        }),
-      );
+      // The queue of the session the file was dropped into, never the one on screen now: uploading
+      // takes a moment and the user may have moved on. Applying by key means a batch that finishes
+      // first cannot be overwritten by one that finishes later.
+      settleAttachments(stagedFor, items, uploaded, failed);
     },
-    [selectedSessionId, uploadAttachments],
+    [selectedSessionId, settleAttachments, uploadAttachments],
   );
 
   const removeAttachment = (key: string): void => {
@@ -200,12 +187,6 @@ export function ChatView() {
       return current.filter((candidate) => candidate.key !== key);
     });
   };
-
-  // Switching session drops what was staged: an uploaded image belongs to the session it was
-  // uploaded to, and sending it to another one would attach something the runtime never stored.
-  useEffect(() => {
-    setPending([]);
-  }, [selectedSessionId]);
 
   const onDrop = async (event: DragEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -227,6 +208,18 @@ export function ChatView() {
     event.preventDefault();
     const text = goal.trim();
     if (text.length === 0) return;
+    // One send per press. A second submit that arrives while the first is still in flight is the
+    // same goal sent twice - which is how the same message appeared in a transcript twice.
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      await submit(text);
+    } finally {
+      sendingRef.current = false;
+    }
+  };
+
+  const submit = async (text: string): Promise<void> => {
     setLastResult(null);
     const images = imagePaths
       .split(',')
@@ -235,20 +228,29 @@ export function ChatView() {
     const attachmentIds = pending
       .filter((item) => item.status === 'ready' && item.artifactId !== undefined)
       .map((item) => item.artifactId as string);
+    // Send the text that was just read, not a state update: the send is what the user pressed the
+    // button for, and a re-render is not a prerequisite for it.
     const response = await sendGoal(text, wait, images, attachmentIds);
-    if (images.length > 0) {
-      setImagePaths('');
-    }
+    // On a refusal the draft stays: the goal, the paths and the staged images are what the user
+    // wrote, and losing them to an error is how work disappears.
+    if (response === null) return;
     if (attachmentIds.length > 0) {
+      // Only what was actually sent leaves the queue; a failed upload stays visible with its reason.
       setPending((current) => {
-        for (const item of current) {
+        const dropped = current.filter(
+          (item) => item.status === 'ready' && item.artifactId !== undefined,
+        );
+        for (const item of dropped) {
           if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
         }
-        return current.filter((item) => item.status !== 'ready');
+        return current.filter((item) => !dropped.includes(item));
       });
+      updateComposerDraft(draftKey, { imagePaths: '' });
+    } else if (images.length > 0) {
+      updateComposerDraft(draftKey, { imagePaths: '' });
     }
-    if (response === null) return;
-    setGoal('');
+    // The goal is on its way, so the box empties; a failed upload and its reason stay visible.
+    updateComposerDraft(draftKey, { goal: '' });
     if ('accepted' in response) {
       setLastResult(t('chat.accepted'));
     } else {
@@ -514,6 +516,14 @@ export function ChatView() {
             rows={3}
             placeholder={t('chat.placeholder')}
             onChange={(event) => setGoal(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter sends, Shift+Enter is a newline: the chat convention, and it stops a goal
+              // from being submitted by a keypress nobody thought was a send.
+              if (event.key !== 'Enter' || event.shiftKey) return;
+              event.preventDefault();
+              if (uploading) return;
+              event.currentTarget.form?.requestSubmit();
+            }}
           />
           {pending.length > 0 ? (
             <div className="attachment-queue">
@@ -589,9 +599,17 @@ export function ChatView() {
               <button
                 type="submit"
                 className="btn"
-                disabled={busy || goal.trim().length === 0 || connection !== 'online'}
+                // Waiting for an upload is a wait, not a refusal: say so on the button instead of
+                // sending a goal whose image is not attached yet.
+                disabled={busy || uploading || goal.trim().length === 0 || connection !== 'online'}
               >
-                {busy ? t('shell.working') : wait ? t('chat.sendAndWait') : t('common.send')}
+                {uploading
+                  ? t('chat.uploadingCount', { n: pending.filter((item) => item.status === 'uploading').length })
+                  : busy
+                    ? t('shell.working')
+                    : wait
+                      ? t('chat.sendAndWait')
+                      : t('common.send')}
               </button>
               <button
                 type="button"

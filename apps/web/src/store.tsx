@@ -82,6 +82,64 @@ export interface UploadedAttachment {
   bytes: number;
 }
 
+/** What the runtime accepts. The decision is by content, but the picker should not offer more. */
+export const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp';
+
+/**
+ * One file on its way to the runtime.
+ *
+ * `uploading` exists so the composer never lies: a drop that has not landed yet must not look
+ * ready, and a file the runtime refused has to say why instead of disappearing.
+ */
+export interface PendingAttachment {
+  key: string;
+  name: string;
+  status: 'uploading' | 'ready' | 'error';
+  previewUrl: string | null;
+  artifactId?: string;
+  error?: string;
+}
+
+/**
+ * What the user has typed but not sent.
+ *
+ * It lives here, not in the chat view, because switching tabs unmounts the view: a draft held in
+ * component state was silently destroyed by a click on another tab, and the person who had just
+ * pasted a screenshot had to start again.
+ */
+export interface ComposerDraft {
+  goal: string;
+  imagePaths: string;
+  pending: PendingAttachment[];
+}
+
+export const EMPTY_DRAFT: ComposerDraft = { goal: '', imagePaths: '', pending: [] };
+
+/**
+ * Fold one upload batch's outcome into a draft's queue, by identity.
+ *
+ * Two drops can be in flight at once, and the one that finishes last must not overwrite what the
+ * other already learned: a refusal would turn back into "ready", and a stored image would be sent
+ * by id that the runtime has.
+ */
+export function settleAttachmentBatch(
+  current: PendingAttachment[],
+  batch: PendingAttachment[],
+  uploaded: UploadedAttachment[],
+  failed: { name: string; reason: string }[],
+): PendingAttachment[] {
+  return current.map((item) => {
+    const index = batch.findIndex((candidate) => candidate.key === item.key);
+    if (index < 0) return item;
+    const stored = uploaded[index];
+    if (stored !== undefined) {
+      return { ...item, status: 'ready', artifactId: stored.artifact_id, name: stored.name };
+    }
+    const refusal = failed[index] ?? { name: item.name, reason: 'upload failed' };
+    return { ...item, status: 'error', error: refusal.reason };
+  });
+}
+
 export interface AppStoreValue {
   baseUrl: string;
   token: string;
@@ -166,6 +224,17 @@ export interface AppStoreValue {
     sessionId: string,
     files: File[],
   ) => Promise<{ uploaded: UploadedAttachment[]; failed: { name: string; reason: string }[] }>;
+  /** The unsent goal, image paths and staged attachments, per session. Survives a tab switch. */
+  composerDrafts: Record<string, ComposerDraft>;
+  updateComposerDraft: (sessionId: string, patch: Partial<ComposerDraft>) => void;
+  /** Apply one upload batch's outcome to a session's queue, by attachment key. */
+  settleAttachments: (
+    sessionId: string,
+    batch: PendingAttachment[],
+    uploaded: UploadedAttachment[],
+    failed: { name: string; reason: string }[],
+  ) => void;
+  clearComposerDraft: (sessionId: string) => void;
   cancelRun: () => Promise<void>;
   clearEvents: () => void;
   clearActionError: () => void;
@@ -198,6 +267,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Live answer text per run, replaced by the stored answer when the run completes.
   const [streamed, setStreamed] = useState<Map<string, string>>(() => new Map());
   const [attachments, setAttachments] = useState<AttachedImage[]>([]);
+  // Unsent composer state, per session. Kept above the views so a tab switch cannot throw away
+  // what somebody was about to send.
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [approvalsUnsupported, setApprovalsUnsupported] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
@@ -689,6 +761,49 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const updateComposerDraft = useCallback(
+    (sessionId: string, patch: Partial<ComposerDraft>): void => {
+      if (sessionId.length === 0) return;
+      setComposerDrafts((current) => ({
+        ...current,
+        [sessionId]: { ...(current[sessionId] ?? EMPTY_DRAFT), ...patch },
+      }));
+    },
+    [],
+  );
+
+  const settleAttachments = useCallback(
+    (
+      sessionId: string,
+      batch: PendingAttachment[],
+      uploaded: UploadedAttachment[],
+      failed: { name: string; reason: string }[],
+    ): void => {
+      setComposerDrafts((current) => {
+        const draft = current[sessionId];
+        if (draft === undefined) return current;
+        return { ...current, [sessionId]: { ...draft, pending: settleAttachmentBatch(draft.pending, batch, uploaded, failed) } };
+      });
+    },
+    [],
+  );
+
+  const clearComposerDraft = useCallback((sessionId: string): void => {
+    setComposerDrafts((current) => {
+      const draft = current[sessionId];
+      // Preview URLs are object URLs; dropping the entry without revoking them leaks the blobs for
+      // the lifetime of the page.
+      if (draft !== undefined) {
+        for (const item of draft.pending) {
+          if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+        }
+      }
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
   const cancelRun = useCallback(async (): Promise<void> => {
     const id = selectedRef.current;
     setActionError(null);
@@ -774,6 +889,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       closeSession,
       sendGoal,
       uploadAttachments,
+      composerDrafts,
+      updateComposerDraft,
+      settleAttachments,
+      clearComposerDraft,
       cancelRun,
       clearEvents,
       clearActionError,
@@ -827,6 +946,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       closeSession,
       sendGoal,
       uploadAttachments,
+      composerDrafts,
+      updateComposerDraft,
+      settleAttachments,
+      clearComposerDraft,
       cancelRun,
       clearEvents,
       clearActionError,
