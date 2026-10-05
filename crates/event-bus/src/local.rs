@@ -26,6 +26,9 @@ pub struct LocalEventBus {
     last_seq: AtomicU64,
     node_id: String,
     published: AtomicU64,
+    /// Sequence for preview events, which never enter the log. Kept apart from the stored sequence
+    /// so that the stored sequence keeps meaning "position in the log".
+    preview_seq: AtomicU64,
     /// Serialises sequence assignment with the append that makes it real.
     ///
     /// Assigning a number and then appending are two steps, and two publishers that interleave
@@ -50,6 +53,7 @@ impl LocalEventBus {
             node_id: node_id.into(),
             published: AtomicU64::new(0),
             publish_lock: tokio::sync::Mutex::new(()),
+            preview_seq: AtomicU64::new(0),
         }
     }
 
@@ -76,6 +80,37 @@ impl LocalEventBus {
 
 #[async_trait]
 impl EventBus for LocalEventBus {
+    /// Fan out without writing anything down.
+    ///
+    /// The record still gets a sequence, but from its own counter: the stored sequence keeps meaning
+    /// "position in the log", and a preview must not pretend to be one.
+    async fn publish_ephemeral(&self, event: NewEvent) -> Result<EventRecord> {
+        let seq = self.preview_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let record = EventRecord {
+            id: EventId::new(),
+            seq,
+            kind: event.kind,
+            severity: event.severity,
+            ts: now_ms(),
+            message: event.message,
+            payload: event.payload,
+            node_id: Some(event.node_id.unwrap_or_else(|| self.node_id.clone())),
+            correlation_id: event.correlation_id,
+            session_id: event.session_id,
+            actor_id: event.actor_id,
+            agent_id: event.agent_id,
+            task_id: event.task_id,
+            capability_id: event.capability_id,
+            worker_id: event.worker_id,
+            artifact_id: event.artifact_id,
+        };
+        self.published.fetch_add(1, Ordering::Relaxed);
+        metrics().inc(metric_names::EVENTS_PUBLISHED, 1);
+        // A send error only means nobody is listening, which is a normal condition.
+        let _ = self.tx.send(record.clone());
+        Ok(record)
+    }
+
     async fn publish(&self, event: NewEvent) -> Result<EventRecord> {
         let _guard = self.publish_lock.lock().await;
         let seq = self.last_seq.load(Ordering::SeqCst) + 1;

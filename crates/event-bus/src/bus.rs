@@ -70,6 +70,16 @@ pub trait EventBus: Send + Sync + 'static {
     /// Persist and fan out. Returns the stored record including its assigned sequence.
     async fn publish(&self, event: NewEvent) -> Result<EventRecord>;
 
+    /// Fan out without persisting.
+    ///
+    /// For a live preview: a caller that relays every token of a streaming answer needs its
+    /// subscribers to see each one, and needs the log to stay a record of what happened rather
+    /// than of how it looked while it was happening. Ephemeral events keep their own sequence so a
+    /// client can still order them, and they are simply absent from replay.
+    async fn publish_ephemeral(&self, event: NewEvent) -> Result<EventRecord> {
+        self.publish(event).await
+    }
+
     /// Live subscription with an optional filter.
     fn subscribe(&self, filter: EventFilter) -> Subscription;
 

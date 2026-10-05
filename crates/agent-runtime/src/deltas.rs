@@ -1,110 +1,104 @@
-//! Streaming deltas: a best-effort preview of an answer that is still being written.
+//! Streaming deltas: a live preview of an answer that is still being written.
 //!
-//! Deltas are deliberately NOT part of the run. They are published on the event bus as they
-//! arrive, so a console can render them, but nothing in the run waits for that to happen: a slow
-//! subscriber slows nobody down, and a dropped delta costs a redraw, not an answer. The
-//! authoritative text is always the response the model call returns.
+//! Deltas are deliberately NOT part of the run. They are forwarded to the event bus as they
+//! arrive, so a console can render them, but nothing in the run waits for that: a slow subscriber
+//! slows nobody down, and a dropped delta costs a redraw, not an answer. The authoritative text is
+//! always the response the model call returns.
 //!
-//! They are batched on a timer rather than published one by one, because a language model emits
-//! hundreds of tiny chunks and turning each into an event would fill the event log with noise.
+//! Every chunk is forwarded on arrival - no timer, no batching. A timer is what made a streaming
+//! answer appear in lumps: the provider had already emitted several tokens while the publisher was
+//! waiting for its next tick. What keeps that from flooding the log is that previews are published
+//! as ephemeral events, which reach subscribers but are never written down.
 
 use agentos_core::model::{EventKind, NewEvent};
 use agentos_core::SessionId;
 use agentos_event_bus::EventBus;
-use parking_lot::Mutex;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Somewhere to send a delta. Synchronous on purpose: a model call must never await a subscriber.
 pub type DeltaSink = Arc<dyn Fn(String) + Send + Sync>;
 
-/// Publishes accumulated deltas for one run.
+/// Forwards one run's deltas to the bus, one event per chunk.
 pub struct DeltaPublisher {
     sink: DeltaSink,
-    buffer: Arc<Mutex<String>>,
     stop: CancellationToken,
-    ticker: JoinHandle<()>,
-    bus: Arc<dyn EventBus>,
-    session: SessionId,
-    run_id: String,
-    node: String,
+    task: JoinHandle<()>,
 }
 
 impl DeltaPublisher {
-    /// Start publishing for one run. `interval_ms` is how long deltas accumulate before a batch
-    /// goes out: short enough to look live, long enough not to flood the log.
+    /// Start forwarding for one run.
     pub fn start(
         bus: Arc<dyn EventBus>,
         session: SessionId,
         run_id: String,
         node: String,
-        interval_ms: u64,
     ) -> Self {
-        let buffer = Arc::new(Mutex::new(String::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let stop = CancellationToken::new();
-        let ticker = {
-            let buffer = buffer.clone();
+        let task = {
             let stop = stop.clone();
-            let bus = bus.clone();
-            let session = session.clone();
-            let run_id = run_id.clone();
-            let node = node.clone();
             tokio::spawn(async move {
+                let publish = |text: String| {
+                    let bus = bus.clone();
+                    let session = session.clone();
+                    let node = node.clone();
+                    let run_id = run_id.clone();
+                    async move {
+                        if text.is_empty() {
+                            return;
+                        }
+                        let _ = bus
+                            .publish_ephemeral(
+                                NewEvent::new(EventKind::AgentDelta, "model delta")
+                                    .session(session)
+                                    .node(node)
+                                    .payload(json!({ "run_id": run_id, "text": text })),
+                            )
+                            .await;
+                    }
+                };
                 loop {
                     tokio::select! {
-                        _ = stop.cancelled() => break,
-                        _ = tokio::time::sleep(Duration::from_millis(interval_ms.max(10))) => {}
-                    }
-                    let text = {
-                        let mut guard = buffer.lock();
-                        if guard.is_empty() {
-                            continue;
+                        biased;
+                        // Stopping is explicit. Waiting for the channel to close would wait forever:
+                        // the sink that feeds it is held by the loop for the whole run, so the
+                        // channel stays open and the run would never be allowed to finish.
+                        _ = stop.cancelled() => {
+                            while let Ok(text) = rx.try_recv() {
+                                publish(text).await;
+                            }
+                            break;
                         }
-                        std::mem::take(&mut *guard)
-                    };
-                    let _ = bus
-                        .publish(
-                            NewEvent::new(EventKind::AgentDelta, "model delta")
-                                .session(session.clone())
-                                .node(node.clone())
-                                .payload(json!({ "run_id": run_id, "text": text })),
-                        )
-                        .await;
+                        received = rx.recv() => match received {
+                            Some(text) => publish(text).await,
+                            None => break,
+                        },
+                    }
                 }
             })
         };
         let sink: DeltaSink = {
-            let buffer = buffer.clone();
-            Arc::new(move |text: String| buffer.lock().push_str(&text))
+            let tx = tx.clone();
+            Arc::new(move |text: String| {
+                // The receiver is dropped only when the publisher finishes, so a failed send means
+                // the run is over: dropping the preview is the correct response.
+                let _ = tx.send(text);
+            })
         };
-        Self { sink, buffer, stop, ticker, bus, session, run_id, node }
+        Self { sink, stop, task }
     }
 
     pub fn sink(&self) -> DeltaSink {
         self.sink.clone()
     }
 
-    /// Stop the ticker and publish whatever is left, so the last words are never lost.
+    /// Stop forwarding, after letting whatever is queued go out, so the last words are not lost.
     pub async fn finish(self) {
         self.stop.cancel();
-        let _ = self.ticker.await;
-        let text = {
-            let mut guard = self.buffer.lock();
-            std::mem::take(&mut *guard)
-        };
-        if !text.is_empty() {
-            let _ = self
-                .bus
-                .publish(
-                    NewEvent::new(EventKind::AgentDelta, "model delta")
-                        .session(self.session.clone())
-                        .node(self.node.clone())
-                        .payload(json!({ "run_id": self.run_id, "text": text })),
-                )
-                .await;
-        }
+        let _ = self.task.await;
     }
 }

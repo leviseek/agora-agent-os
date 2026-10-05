@@ -296,13 +296,13 @@ async fn websocket_streams_events_and_accepts_commands() {
     let (mut socket, _) = tokio_tungstenite::connect_async(ws_url).await.expect("ws connects");
 
     // 1. hello frame
-    let hello = next_json(&mut socket).await;
+    let hello = next_of_type(&mut socket, "hello").await;
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["domain_version"], agentos_core::DOMAIN_VERSION);
 
     // 2. command round trip
     socket.send(Message::Text(json!({"type":"ping"}).to_string().into())).await.unwrap();
-    let pong = next_json(&mut socket).await;
+    let pong = next_of_type(&mut socket, "pong").await;
     assert_eq!(pong["type"], "pong");
 
     // 3. create a session over HTTP, then stream its events over the socket
@@ -360,6 +360,24 @@ async fn next_json(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 ) -> Value {
     next_json_opt(socket).await.expect("a frame must arrive")
+}
+
+/// The next frame of a given type, skipping the events that may arrive first.
+///
+/// The socket carries both replies and the live event stream, so "the next frame is the reply" is
+/// only true on an idle machine. Asserting the second frame is the pong is how this test failed
+/// under load while passing on its own.
+async fn next_of_type(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    wanted: &str,
+) -> Value {
+    for _ in 0..20 {
+        let frame = next_json(socket).await;
+        if frame["type"] == wanted {
+            return frame;
+        }
+    }
+    panic!("no {wanted} frame arrived within 20 frames");
 }
 
 async fn next_json_opt(
@@ -1007,21 +1025,31 @@ async fn the_diagnostics_bundle_is_useful_and_does_not_leak() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// An attached image is verified by content, stored as an artifact, and only then trusted.
-/// A run publishes its answer as it is written, and the pieces add up to the answer.
+/// A run publishes its answer as it is written, to live subscribers only.
 #[tokio::test]
-async fn streamed_deltas_reach_the_event_stream() {
+async fn streamed_deltas_reach_live_subscribers() {
     let h = Harness::start(None, 600).await;
     let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "stream" })).await;
     let id = session["id"].as_str().unwrap().to_string();
+
+    // Watch the socket BEFORE posting, because the preview is live: it is not replayable.
+    let ws_url = h.base.replace("http://", "ws://") + "/v1/ws";
+    let (mut socket, _) = tokio_tungstenite::connect_async(ws_url).await.expect("ws connects");
+    let _hello = next_of_type(&mut socket, "hello").await;
+
     let (status, body) = h
         .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "what is 6*7?", "wait": true }))
         .await;
     assert_eq!(status, 200);
 
-    let (_, events) = h.get("/v1/events?limit=400&kinds=agent_delta").await;
-    let deltas = events["events"].as_array().unwrap();
-    assert!(!deltas.is_empty(), "the answer must stream: {events}");
+    // Drain whatever is still queued on the socket, then look at what arrived.
+    let mut deltas: Vec<Value> = Vec::new();
+    while let Some(frame) = next_json_opt(&mut socket).await {
+        if frame["type"] == "event" && frame["event"]["kind"] == "agent_delta" {
+            deltas.push(frame["event"].clone());
+        }
+    }
+    assert!(!deltas.is_empty(), "the answer must stream to live subscribers");
 
     let streamed: String = deltas
         .iter()
@@ -1034,7 +1062,7 @@ async fn streamed_deltas_reach_the_event_stream() {
     );
 
     // The preview is a prefix of the stored answer, never something else.
-    let answer = body["run"]["final_answer"].as_str().unwrap_or_default();
+    let answer = body["final_answer"].as_str().unwrap_or_default();
     if !answer.is_empty() {
         let trimmed = streamed.trim();
         assert!(
@@ -1043,15 +1071,13 @@ async fn streamed_deltas_reach_the_event_stream() {
         );
     }
 
-    // Batching means fewer events than words: the log is not a per-token transcript.
-    let answer_words = answer.split_whitespace().count();
-    if answer_words > 8 {
-        assert!(
-            deltas.len() < answer_words,
-            "{} delta events for {answer_words} words looks unbatched",
-            deltas.len()
-        );
-    }
+    // And the preview is not a log entry: replaying the durable events finds no deltas at all.
+    let (_, events) = h.get("/v1/events?limit=400&kinds=agent_delta").await;
+    assert_eq!(
+        events["events"].as_array().unwrap().len(),
+        0,
+        "a per-token preview must not be written to the log"
+    );
 
     h.shutdown.cancel();
 }
