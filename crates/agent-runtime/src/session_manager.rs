@@ -196,8 +196,35 @@ impl SessionManager {
         // Cache miss: ask the control plane.
         let entry = self.directory.lookup(session).await?;
         let Some(entry) = entry else {
-            return Err(RuntimeError::not_found(format!("session {session} does not exist"))
-                .with_detail("session_id", session.as_str()));
+            // No directory entry. Either the session does not exist at all, or it exists without a
+            // registered actor: one the user closed (closing deregisters it on purpose), or one
+            // whose entry never reached the store before a restart. The record decides which.
+            let Some(record) = self.get(session).await? else {
+                return Err(RuntimeError::not_found(format!("session {session} does not exist"))
+                    .with_detail("session_id", session.as_str()));
+            };
+            if record.state.is_terminal() {
+                return Err(RuntimeError::conflict(format!(
+                    "session {session} is {}: its history can be read, but it accepts no new goals",
+                    record.state.as_str()
+                ))
+                .with_detail("session_id", session.as_str())
+                .with_detail("state", record.state.as_str()));
+            }
+            // Open, but nothing is running here: rebuild it from its record and runs, so a restart
+            // does not turn a usable session into one that answers "does not exist".
+            let actor_id = record.actor_id.clone();
+            let Some(state) = self.rebuild_state(session).await? else {
+                return Err(RuntimeError::not_found(format!("session {session} does not exist"))
+                    .with_detail("session_id", session.as_str()));
+            };
+            let checkpoint = self.synthetic_checkpoint(&actor_id, session, &state).await?;
+            self.restore(checkpoint).await?;
+            return self.actors.lookup_session(session).ok_or_else(|| {
+                RuntimeError::unavailable(format!(
+                    "session {session} was rebuilt but its actor is not registered"
+                ))
+            });
         };
         if !entry.is_routable() {
             return Err(RuntimeError::unavailable(format!(
@@ -220,22 +247,7 @@ impl SessionManager {
                     )));
                 };
                 let runs = state.runs.len();
-                let checkpoint = Checkpoint {
-                    meta: CheckpointMeta {
-                        id: agentos_core::CheckpointId::new(),
-                        actor_id: entry.actor_id.clone(),
-                        session_id: session.clone(),
-                        generation: 0,
-                        applied_seq: 0,
-                        // Nothing to replay: the rebuilt state already contains every durable fact.
-                        event_offset: self.bus.last_seq().await.unwrap_or(0),
-                        bytes: 0,
-                        state_hash: String::new(),
-                        domain_version: agentos_core::DOMAIN_VERSION.to_string(),
-                        created_at: now_ms(),
-                    },
-                    state: serde_json::to_value(&state)?,
-                };
+                let checkpoint = self.synthetic_checkpoint(&entry.actor_id, session, &state).await?;
                 tracing::info!(
                     session = %session,
                     runs,
@@ -354,9 +366,34 @@ impl SessionManager {
         }
     }
 
+    /// The session's runtime view: what it is doing, and what it has done.
+    ///
+    /// A session with no actor is not an error. One the user closed has had its actor stopped and
+    /// deregistered on purpose, and its history is still durable - a console that lists it must be
+    /// able to open it, so this answers from the record and the runs instead of refusing.
     pub async fn status(&self, session: &SessionId) -> Result<serde_json::Value> {
-        let handle = self.actor_for(session).await?;
-        handle.send(SessionMessage::Status).await
+        match self.actor_for(session).await {
+            Ok(handle) => handle.send(SessionMessage::Status).await,
+            Err(error) => match self.durable_view(session).await? {
+                Some((state, _runs)) => Ok(Self::durable_status_json(session, &state)),
+                None => Err(error),
+            },
+        }
+    }
+
+    /// The session record, its runs and its rebuilt conversation, read straight from the store.
+    ///
+    /// Returns None when there is no record at all, which is the only case that is genuinely a
+    /// missing session.
+    async fn durable_view(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<(SessionActorState, Vec<AgentRun>)>> {
+        let Some(state) = self.rebuild_state(session).await? else {
+            return Ok(None);
+        };
+        let runs = state.runs.clone();
+        Ok(Some((state, runs)))
     }
 
     pub async fn last_run(&self, session: &SessionId) -> Result<serde_json::Value> {
@@ -368,8 +405,13 @@ impl SessionManager {
     /// the answer: the reply is appended to the transcript when the run finishes, and the run
     /// completion event carries only a summary.
     pub async fn transcript(&self, session: &SessionId, limit: Option<usize>) -> Result<serde_json::Value> {
-        let handle = self.actor_for(session).await?;
-        handle.send(SessionMessage::Transcript { limit }).await
+        match self.actor_for(session).await {
+            Ok(handle) => handle.send(SessionMessage::Transcript { limit }).await,
+            Err(error) => match self.durable_view(session).await? {
+                Some((state, _runs)) => Ok(Self::durable_transcript_json(&state, limit)),
+                None => Err(error),
+            },
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<SessionSummary>> {
