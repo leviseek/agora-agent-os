@@ -462,8 +462,29 @@ pub async fn upload_attachment(
             .map(|(name, vision)| format!("{name}={}", vision.as_str()))
             .collect::<Vec<_>>()
             .join(", ");
+        // Two refusals that look alike: a model that cannot see, and a model that can see and has
+        // no credential. Naming the variable is the whole value of the message - telling somebody
+        // to switch to the model they already configured reads as a broken feature.
+        let missing = state.config.vision_providers_without_a_key();
+        let hint = if missing.is_empty() {
+            "No enabled provider is declared able to see: mark one with vision: true, or use the default (deepseek with model deepseek-flash).".to_string()
+        } else {
+            format!(
+                "{} can see but has no credential: set {} and restart the runtime.",
+                missing
+                    .iter()
+                    .map(|(name, variable)| format!("{name} ({variable})"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                missing
+                    .iter()
+                    .map(|(_, variable)| variable.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         let message = format!(
-            "no configured model can be shown an image, so this upload would be answered by a model that cannot see it. Providers: {blind}. Set the deepseek model to one that accepts images (deepseek-flash), or configure OPENAI_API_KEY / DASHSCOPE_API_KEY."
+            "no configured model can be shown an image, so this upload would be answered by a model that cannot see it. Providers: {blind}. {hint}"
         );
         return Err(ApiError(RuntimeError::invalid_input(message)));
     }

@@ -95,6 +95,9 @@ export function ChatView() {
   const [dropping, setDropping] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sendingRef = useRef(false);
+  // The goal that has been sent but is not a run yet. A blocking POST can take as long as the
+  // model does, and a composer that empties itself with nothing to show looks like a hang.
+  const [sending, setSending] = useState<string | null>(null);
 
   // The session's stored choice, edited in place. Changing it PATCHes the session, so the next
   // goal (and every goal after) uses it; a one-off override is available through the API.
@@ -235,6 +238,7 @@ export function ChatView() {
 
   const submit = async (text: string): Promise<void> => {
     setLastResult(null);
+    setSending(text);
     const images = imagePaths
       .split(',')
       .map((path) => path.trim())
@@ -245,6 +249,7 @@ export function ChatView() {
     // Send the text that was just read, not a state update: the send is what the user pressed the
     // button for, and a re-render is not a prerequisite for it.
     const response = await sendGoal(text, wait, images, attachmentIds);
+    setSending(null);
     // On a refusal the draft stays: the goal, the paths and the staged images are what the user
     // wrote, and losing them to an error is how work disappears.
     if (response === null) return;
@@ -350,7 +355,24 @@ export function ChatView() {
         ) : null}
 
         <div className="transcript" ref={transcriptRef}>
-          {runs.length === 0 && sessionOnly.length === 0 ? (
+          {sending !== null ? (
+            // Said the moment the goal leaves: the waiting is the runtime's, and the user should be
+            // able to see that something is happening rather than guess.
+            <article className="run run-sending">
+              <div className="bubble bubble-user">
+                <span className="bubble-role">{t('chat.you')}</span>
+                <p>{sending}</p>
+              </div>
+              <div className="bubble bubble-agent bubble-pending">
+                <span className="bubble-role">
+                  {t('chat.agent')}
+                  <span className="streaming-dot" aria-hidden="true" />
+                </span>
+                <p className="muted">{t('chat.sending')}</p>
+              </div>
+            </article>
+          ) : null}
+          {runs.length === 0 && sessionOnly.length === 0 && sending === null ? (
             <EmptyState title={t('chat.empty')} hint={t('chat.emptyHint')} />
           ) : null}
 

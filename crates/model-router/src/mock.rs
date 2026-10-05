@@ -12,6 +12,56 @@ use agentos_core::error::Result;
 use async_trait::async_trait;
 use serde_json::json;
 
+/// The readable part of the step results the runtime hands the model.
+///
+/// The block is a system message with a header line and one JSON object per step. The header is
+/// instructions, not a result, and a JSON object printed raw is not an answer: what a person wants
+/// to read is the "content" a capability returned, so that is what is pulled out. It is a small
+/// parser on purpose - the shape is produced by one crate in this repository, and a full JSON walk
+/// would say the same thing in more lines.
+fn summarise_observations(block: &str) -> String {
+    let mut results: Vec<String> = Vec::new();
+    for line in block.lines() {
+        let line = line.trim();
+        if !line.starts_with("- ") {
+            continue;
+        }
+        let marker = "\"content\":";
+        let Some(at) = line.find(marker) else {
+            results.push(line.trim_start_matches("- ").to_string());
+            continue;
+        };
+        let rest = line[at + marker.len()..].trim_start();
+        let Some(quoted) = rest.strip_prefix('"') else {
+            results.push(rest.to_string());
+            continue;
+        };
+        let mut text = String::new();
+        let mut escaped = false;
+        for character in quoted.chars() {
+            if escaped {
+                text.push(match character {
+                    'n' => '\n',
+                    't' => '\t',
+                    other => other,
+                });
+                escaped = false;
+                continue;
+            }
+            match character {
+                '\\' => escaped = true,
+                '"' => break,
+                other => text.push(other),
+            }
+        }
+        results.push(text);
+    }
+    if results.is_empty() {
+        return block.lines().last().unwrap_or(block).trim().to_string();
+    }
+    results.join("\n")
+}
+
 pub struct MockProvider {
     model: String,
     /// Milliseconds between streamed chunks. Zero in production; a demo and test aid for watching
@@ -269,8 +319,12 @@ impl ModelProvider for MockProvider {
                 .find(|m| m.role == "user")
                 .map(|m| m.content.clone())
                 .unwrap_or_else(|| "the request".into());
+            // The step results only. The block the runtime sends is a system message with a header
+            // and one JSON object per step; echoing all of that back is how an answer to "21*2"
+            // read "Observation from capability: The runtime ran 2 step(s) ...".
             let answer = format!(
-                "Goal: {goal}\nObservation from capability: {observation}\nAnswer: derived from the observation above."
+                "Goal: {goal}\nResult: {}\n(answered by the built-in placeholder: no model is configured for this deployment)",
+                summarise_observations(&observation)
             );
             return Ok(ModelResponse {
                 content: answer,

@@ -890,6 +890,26 @@ impl RuntimeConfig {
         Ok(())
     }
 
+    /// The vision-capable providers that are only missing a credential: name and variable.
+    ///
+    /// This is the difference between two refusals that look alike and are not: "your model cannot
+    /// see" (change the model) and "your model can see and has no key" (set the variable). Telling
+    /// somebody to switch to the very model they already configured is how a fixable problem reads
+    /// as a broken product.
+    pub fn vision_providers_without_a_key(&self) -> Vec<(String, String)> {
+        self.models
+            .enabled_providers()
+            .filter(|provider| !provider.is_configured())
+            .filter(|provider| match provider.vision {
+                Some(true) => true,
+                // No explicit answer: ask the same model-name question the router asks.
+                None => vision_of_model(&provider.model) == "yes",
+                Some(false) => false,
+            })
+            .map(|provider| (provider.name.clone(), provider.api_key_env.clone()))
+            .collect()
+    }
+
     /// Provider summary safe to expose over HTTP / to the desktop UI: no secrets, ever.
     pub fn model_summary(&self) -> Vec<BTreeMap<String, serde_json::Value>> {
         self.models
