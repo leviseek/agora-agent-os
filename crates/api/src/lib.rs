@@ -90,6 +90,9 @@ pub fn router(state: ApiState) -> Router {
             "/v1/workspaces",
             get(handlers::list_workspaces).post(handlers::create_workspace),
         )
+        // Static before dynamic on purpose: axum matches a literal segment ahead of `{id}`, and this
+        // is the picker the console opens before it has an id to name.
+        .route("/v1/workspaces/browse", get(handlers::browse_workspaces))
         .route(
             "/v1/workspaces/{id}",
             get(handlers::get_workspace).patch(handlers::rename_workspace),

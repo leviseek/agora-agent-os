@@ -100,6 +100,52 @@ impl ActorFactory for SessionActorFactory {
     }
 }
 
+/// A path as a person should read it.
+///
+/// `canonicalize` returns a verbatim path on Windows (`\?\D:\...`), which is right for comparing
+/// and wrong for showing: the prefix is a filesystem detail, not part of where somebody's folder is.
+fn printable_path(path: &Path) -> String {
+    let text = path.to_string_lossy().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_string(),
+        },
+        None => text,
+    }
+}
+
+/// One folder in the workspace-root picker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDirectory {
+    pub name: String,
+    /// The path relative to the node's workspace root, with `/` separators - what a create request
+    /// takes back.
+    pub path: String,
+    /// Already the directory of a workspace: choosing it again is refused, so the picker says so
+    /// rather than letting somebody walk into a dead end.
+    pub taken: bool,
+    /// Which workspace, when the caller may see it. Absent for a workspace they have no role in and
+    /// for a folder nobody claimed.
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+}
+
+/// One level of the workspace-root picker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDirectoryListing {
+    /// The node's workspace root, absolute, so the console can say where it is looking.
+    pub root: String,
+    /// The path being listed, relative to the root (`""` is the root itself).
+    pub path: String,
+    /// The parent to go up to, or `None` at the root.
+    pub parent: Option<String>,
+    /// Whether this folder itself can be chosen. The root cannot: a workspace rooted at the root would
+    /// see every other workspace's files.
+    pub selectable: bool,
+    pub directories: Vec<WorkspaceDirectory>,
+}
+
 pub struct SessionManager {
     store: Arc<dyn Store>,
     bus: Arc<dyn EventBus>,
@@ -358,9 +404,36 @@ impl SessionManager {
     /// Turn a chosen directory into the path that must exist behind it.
     ///
     /// Creates it if it is not there (naming a folder is as good as making one), then refuses
-    /// anything that is not a strict descendant of the node root. The refusal is checked after
-    /// canonicalisation, so a symlink out of the root is caught too.
+    /// anything that is not a strict descendant of the node root.
     async fn resolve_workspace_directory(&self, directory: &str) -> Result<PathBuf> {
+        let root = self.workspace_root_canonical().await?;
+        let canonical = self.existing_directory(directory).await?;
+        if canonical == root {
+            return Err(RuntimeError::invalid_input(
+                "a workspace directory must be inside the workspace root, not the root itself",
+            )
+            .with_detail("directory", directory));
+        }
+        Ok(canonical)
+    }
+
+    /// The node's workspace root, canonicalised. Choosing a directory and browsing them have to be
+    /// checked against the same boundary, so it is resolved in one place.
+    async fn workspace_root_canonical(&self) -> Result<PathBuf> {
+        tokio::fs::canonicalize(&self.deps.workspace_root).await.map_err(|error| {
+            RuntimeError::unavailable(format!(
+                "workspace root {} is unusable: {error}",
+                self.deps.workspace_root.display()
+            ))
+        })
+    }
+
+    /// A directory that exists after this call, inside the workspace root (created if missing).
+    ///
+    /// Refusals are checked after canonicalisation, so a symlink out of the root is caught too. The
+    /// root itself is allowed here - it is a legal place to *look*; refusing it as a *workspace* is
+    /// `resolve_workspace_directory`'s job.
+    async fn existing_directory(&self, directory: &str) -> Result<PathBuf> {
         let requested = Path::new(directory);
         if requested
             .components()
@@ -371,12 +444,7 @@ impl SessionManager {
             ))
             .with_detail("field", "directory"));
         }
-        let root = tokio::fs::canonicalize(&self.deps.workspace_root).await.map_err(|error| {
-            RuntimeError::unavailable(format!(
-                "workspace root {} is unusable: {error}",
-                self.deps.workspace_root.display()
-            ))
-        })?;
+        let root = self.workspace_root_canonical().await?;
         let target = if requested.is_absolute() {
             requested.to_path_buf()
         } else {
@@ -394,12 +462,6 @@ impl SessionManager {
                 target.display()
             ))
         })?;
-        if canonical == root {
-            return Err(RuntimeError::invalid_input(
-                "a workspace directory must be inside the workspace root, not the root itself",
-            )
-            .with_detail("directory", directory));
-        }
         if !canonical.starts_with(&root) {
             return Err(RuntimeError::invalid_input(format!(
                 "a workspace directory must live under {}: {}",
@@ -409,6 +471,89 @@ impl SessionManager {
             .with_detail("directory", directory));
         }
         Ok(canonical)
+    }
+
+    /// The folders a person can pick a workspace from, one level at a time.
+    ///
+    /// Read-only and scoped to the node's own workspace root: a picker for the directories
+    /// workspaces live in, never a file browser for the machine. A folder already claimed by a
+    /// workspace is reported as taken, with the workspace's name only when the caller may see that
+    /// workspace - a picker must not become the way around the discovery index beside it.
+    pub async fn browse_workspace_root(
+        &self,
+        path: &str,
+        principal: &Principal,
+    ) -> Result<WorkspaceDirectoryListing> {
+        let root = self.workspace_root_canonical().await?;
+        let current = if path.trim().is_empty() {
+            root.clone()
+        } else {
+            self.existing_directory(path).await?
+        };
+        let relative = |target: &Path| -> String {
+            target
+                .strip_prefix(&root)
+                .map(|rest| rest.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default()
+        };
+
+        // Who claims which directory, resolved once for the whole listing.
+        let mut claimed: HashMap<String, Option<String>> = HashMap::new();
+        for workspace in self.list_workspaces().await? {
+            let named = PathBuf::from(workspace.directory_name());
+            let target = if named.is_absolute() { named } else { root.join(named) };
+            if let Ok(canonical) = tokio::fs::canonicalize(&target).await {
+                let visible = principal.is_admin()
+                    || agentos_core::model::workspace_role(&workspace, principal).is_some();
+                let label = if visible { Some(workspace.name.clone()) } else { None };
+                claimed.insert(canonical.to_string_lossy().to_string(), label);
+            }
+        }
+
+        let mut directories: Vec<WorkspaceDirectory> = Vec::new();
+        let mut reader = tokio::fs::read_dir(&current).await.map_err(|error| {
+            RuntimeError::invalid_input(format!("cannot read {}: {error}", current.display()))
+        })?;
+        while let Some(entry) = reader
+            .next_entry()
+            .await
+            .map_err(|error| RuntimeError::internal(format!("reading {}: {error}", current.display())))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|error| RuntimeError::internal(format!("reading {}: {error}", current.display())))?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Ok(canonical) = tokio::fs::canonicalize(entry.path()).await else {
+                continue;
+            };
+            // A symlink pointing outside the root is not a place a workspace may live.
+            if !canonical.starts_with(&root) {
+                continue;
+            }
+            let claimed_by = claimed.get(&canonical.to_string_lossy().to_string()).cloned();
+            directories.push(WorkspaceDirectory {
+                name: entry.file_name().to_string_lossy().to_string(),
+                path: relative(&canonical),
+                taken: claimed_by.is_some(),
+                workspace_name: claimed_by.flatten(),
+            });
+        }
+        directories.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(WorkspaceDirectoryListing {
+            root: printable_path(&root),
+            path: relative(&current),
+            parent: if current == root {
+                None
+            } else {
+                Some(relative(current.parent().unwrap_or(&root)))
+            },
+            selectable: current != root,
+            directories,
+        })
     }
 
     pub async fn get_workspace(&self, id: &WorkspaceId) -> Result<Option<WorkspaceRecord>> {

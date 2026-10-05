@@ -2887,6 +2887,21 @@ async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
         .await;
     assert_eq!(status, 403);
 
+    // The picker lists folders, not files, and says which are taken. A folder taken by a workspace
+    // bob has no role in is reported as taken *without* naming it: the picker must not become the way
+    // around the discovery index beside it.
+    let (status, listing) = h.get_as(Some("bob-token"), "/v1/workspaces/browse?path=projects").await;
+    assert_eq!(status, 200, "{listing}");
+    assert_eq!(listing["selectable"], true, "a subfolder can be chosen: {listing}");
+    let demo = listing["directories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "demo")
+        .unwrap_or_else(|| panic!("the folder exists: {listing}"));
+    assert_eq!(demo["taken"], true, "{listing}");
+    assert!(demo["workspace_name"].is_null(), "not named to a stranger: {listing}");
+
     // Alice works in it. The session belongs to the workspace, not to the route it was created on.
     let (status, session) = h
         .post_as(
@@ -2979,7 +2994,7 @@ async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
         .await;
     assert_eq!(status, 403, "the workspace's narrowing is enforced: {body}");
 
-    // Renaming is the owner's, and it does not move anything: the directory is the id.
+    // Renaming is the owner's, and it does not move anything: the directory stays put.
     let (status, renamed) = h
         .send_as(
             reqwest::Method::PATCH,
@@ -2991,4 +3006,23 @@ async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
     assert_eq!(status, 200, "{renamed}");
     assert_eq!(renamed["workspace"]["name"], "renamed");
     assert_eq!(renamed["workspace"]["id"], json!(ws));
+    assert_eq!(renamed["workspace"]["directory"], "projects/demo", "a rename moves nothing");
+
+    // The owner browsing the same folder sees who took it, because she may see that workspace; and
+    // the node root itself is never choosable - a workspace rooted there would see every other one.
+    let (_, root_listing) = h.get_as(Some("alice-token"), "/v1/workspaces/browse").await;
+    assert_eq!(root_listing["selectable"], false, "{root_listing}");
+    assert_eq!(root_listing["parent"], json!(null));
+    let (_, listing) = h.get_as(Some("alice-token"), "/v1/workspaces/browse?path=projects").await;
+    let demo = listing["directories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "demo")
+        .unwrap_or_else(|| panic!("the folder exists: {listing}"));
+    assert_eq!(demo["workspace_name"], "renamed", "{listing}");
+
+    // And a path that climbs out of the root is refused rather than browsed.
+    let (status, _) = h.get_as(Some("alice-token"), "/v1/workspaces/browse?path=../..").await;
+    assert_eq!(status, 400);
 }

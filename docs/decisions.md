@@ -336,3 +336,11 @@ directory; discovery shares knowledge, not state.
   acceptance `one_workspace_cannot_reach_another_workspace_files` 增加「同一目录 `Conflict`、`../outside` `InvalidInput`」；
   HTTP `a_workspace_is_created_shared_and_narrows_its_sessions_over_http` 增加「无目录 400、名称取自目录、同目录 409、越界 400」。
   既有两条写文件类测试（图像、AGENTS.md）改为从 `GET /v1/workspaces/{id}` 读回目录再落盘——顺带钉住 jail 跟的是所选目录。
+
+**后续（目录选择器，2026-10-05）。** 手动敲路径太麻烦，加一个 `GET /v1/workspaces/browse?path=<relative>`：
+只读、按层列出工作区根下的**文件夹**（不列文件），返回 `{root, path, parent, selectable, directories[]}`。
+控制台的创建表单加「浏览…」：进入/回退目录、`新建文件夹并选中`、`就用当前文件夹`，选中即回填目录、名称随之跟上。
+一条隐私规则写进实现与测试：**已被工作区占用的文件夹回来是 `taken`，只有调用者有角色时才带工作区名**——
+选择器不能变成绕开旁边那份可发现索引的通道。根本身 `selectable: false`（根是所有工作区），
+`..` 被拒，指向根外的符号链接在列举时跳过。另外根路径 Display 去掉 Windows 的 `\?\` 前缀（那是比较用的，
+不是给人读的）。浏览器回归脚本因此不再输入路径，而是走一遍选择器。

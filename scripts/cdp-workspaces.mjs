@@ -111,8 +111,10 @@ const waitFor = async (check, timeoutMs, intervalMs = 250) => {
 // A workspace is created by choosing its directory; the name defaults to the folder. The directory is
 // unique per run so a repeated run does not collide on "one directory, one workspace".
 const suffix = Date.now().toString().slice(-5);
-const workspaceDirectory = 'cdp/' + suffix;
-const workspaceName = suffix;
+const workspaceDirectory = 'cdp-' + suffix;
+// One folder level under the root, so the folder name *is* the directory name - and the name the
+// console fills in for it.
+const workspaceName = workspaceDirectory;
 
 await send('Page.navigate', { url: pageUrl });
 await sleep(1800);
@@ -127,10 +129,24 @@ await sleep(1500);
 
 await step('nav workspaces', () => clickByText('button', 'Workspaces'));
 await sleep(600);
-await step('directory form', () =>
-  setInput('input[placeholder="under the workspace root, e.g. games/sprite-rework"]', workspaceDirectory),
+// The directory is chosen, not typed: open the picker (which lists folders under the workspace root),
+// make a new folder in it, and let "create and choose it" fill the form.
+await step('open picker', () => clickByText('button', 'Browse...'));
+await sleep(800);
+const folderRows = await evaluate(
+  "(()=>{const rows=[...document.querySelectorAll('table tbody tr')];return rows.length})()",
 );
-await sleep(300);
+console.log('[picker lists folders] ' + folderRows);
+await step('new folder', () => setInput('input[placeholder="folder name"]', workspaceDirectory));
+await sleep(200);
+await step('create and choose it', () => clickByText('button', 'Create and choose it'));
+await sleep(500);
+
+const chosenDirectory = await evaluate(
+  "(()=>{const el=document.querySelector('input[placeholder=\"under the workspace root, e.g. games/sprite-rework\"]');return el?el.value:'<no directory field>'})()",
+);
+console.log('[picker filled the directory] ' + chosenDirectory);
+await sleep(200);
 const autoName = await evaluate(
   "(()=>{const el=document.querySelector('input[placeholder=\"defaults to the folder name\"]');return el?el.value:'<no name field>'})()",
 );
@@ -179,6 +195,7 @@ console.log(accessPage.slice(30, 70).join(' | '));
 const accessRendered = accessPage.some((line) => line.includes('Workspace or session'));
 
 const ok =
+  chosenDirectory === workspaceDirectory &&
   autoName === workspaceName &&
   workspacesPage.some((line) => line.includes(workspaceDirectory)) &&
   landed &&

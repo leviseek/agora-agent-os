@@ -86,6 +86,7 @@ actually changed, so a client that asked about a session is told where the chang
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | `/v1/workspaces` | - | `{workspaces:[{workspace, workspace_role, can, session_count}], total}` - every workspace, with the caller's own role |
+| GET | `/v1/workspaces/browse` | `?path=` | `{root, path, parent, selectable, directories:[{name, path, taken, workspace_name?}]}` - the folders under the workspace root, one level at a time, so choosing a directory is a click. Read-only and scoped to the root; a folder taken by a workspace the caller cannot see is `taken` without a name |
 | POST | `/v1/workspaces` | `{directory, name?}` | `{workspace}` owned by the caller. `directory` is required: a folder under the node's workspace root (or an absolute path inside it), created if missing, and **not** derived from the name. `name` defaults to the directory's last segment. One directory, one workspace (`409` otherwise); `..` and anything outside the root are refused (`400`) |
 | GET | `/v1/workspaces/{id}` | - | `{workspace, workspace_role, can, sessions:[SessionSummary]}`; `403` without a role |
 | PATCH | `/v1/workspaces/{id}` | `{name}` | `{workspace}` - rename; the directory is the id, so nothing moves |

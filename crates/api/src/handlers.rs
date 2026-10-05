@@ -575,6 +575,35 @@ pub async fn list_workspaces(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BrowseQuery {
+    /// The folder to list, relative to the node's workspace root. Empty or absent lists the root.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// The folders a workspace can be created in, one level at a time.
+///
+/// This is what makes choosing a directory a click instead of a typed path. It is read-only and
+/// scoped to the node's own workspace root: a picker for the directories workspaces live in, never a
+/// file browser for the machine. A folder already claimed by a workspace comes back `taken` (with the
+/// workspace's name only when the caller may see it), so the picker cannot be walked into a dead end
+/// and cannot become a way around the discovery index.
+pub async fn browse_workspaces(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Query(query): Query<BrowseQuery>,
+) -> ApiResult<Json<Value>> {
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let path = query.path.as_deref().unwrap_or("");
+    let listing = state
+        .kernel
+        .sessions
+        .browse_workspace_root(path, &me)
+        .await?;
+    Ok(Json(json!(listing)))
+}
+
 pub async fn create_workspace(
     State(state): State<ApiState>,
     principal: Option<Principal>,

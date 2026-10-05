@@ -25,6 +25,7 @@ import type {
   SessionDetail,
   SessionSummary,
   WorkspaceCapabilitiesResponse,
+  WorkspaceDirectoryListing,
   WorkspaceIndex,
   WorkspaceRecord,
   WorkspaceSummary,
@@ -239,6 +240,8 @@ export interface AppStoreValue {
   workspacesLoading: boolean;
   refreshWorkspaces: () => Promise<void>;
   createWorkspace: (directory: string, name: string) => Promise<string | null>;
+  /** List the folders a workspace could be created in, one level at a time. */
+  browseWorkspaceDirectories: (path?: string) => Promise<WorkspaceDirectoryListing | null>;
   renameWorkspace: (id: string, name: string) => Promise<boolean>;
   /**
    * The workspace this console is working in, or null for "all of them".
@@ -1057,6 +1060,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [refreshWorkspaces, selectWorkspace],
   );
 
+  const browseWorkspaceDirectories = useCallback(
+    async (path?: string): Promise<WorkspaceDirectoryListing | null> => {
+      try {
+        return await clientRef.current.browseWorkspaceDirectories(path);
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return null;
+      }
+    },
+    [],
+  );
+
   const renameWorkspace = useCallback(
     async (id: string, name: string): Promise<boolean> => {
       setBusy(true);
@@ -1456,6 +1471,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       workspacesLoading,
       refreshWorkspaces,
       createWorkspace,
+      browseWorkspaceDirectories,
       renameWorkspace,
       selectedWorkspaceId,
       selectWorkspace,
@@ -1552,6 +1568,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       workspacesLoading,
       refreshWorkspaces,
       createWorkspace,
+      browseWorkspaceDirectories,
       renameWorkspace,
       selectedWorkspaceId,
       selectWorkspace,

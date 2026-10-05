@@ -547,6 +547,27 @@ export interface WorkspacesResponse {
   total: number;
 }
 
+/** One folder in the workspace-root picker. */
+export interface WorkspaceDirectory {
+  name: string;
+  /** Relative to the node's workspace root - what a create request takes back. */
+  path: string;
+  /** Already a workspace's directory, so choosing it again would be refused. */
+  taken: boolean;
+  /** Which workspace, when the caller may see it. */
+  workspace_name?: string | null;
+}
+
+/** One level of the workspace-root picker. */
+export interface WorkspaceDirectoryListing {
+  root: string;
+  path: string;
+  parent?: string | null;
+  /** Whether this folder itself may be chosen. The root may not. */
+  selectable: boolean;
+  directories: WorkspaceDirectory[];
+}
+
 /** One entry in the discovery index: enough to find a workspace and ask about it. */
 export interface WorkspaceIndex {
   id: string;
@@ -1080,6 +1101,14 @@ export class AgentOsClient {
 
   listWorkspaces(): Promise<WorkspacesResponse> {
     return this.request<WorkspacesResponse>('/v1/workspaces', { method: 'GET' });
+  }
+
+  /** The folders under the workspace root, one level at a time, so choosing one is a click. */
+  browseWorkspaceDirectories(path?: string): Promise<WorkspaceDirectoryListing> {
+    return this.request<WorkspaceDirectoryListing>(
+      '/v1/workspaces/browse' + (path !== undefined && path.length > 0 ? this.query({ path }) : ''),
+      { method: 'GET' },
+    );
   }
 
   /** Create a workspace. The directory is required; the name defaults to the folder it points at. */

@@ -8,6 +8,7 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ApiErrorBanner, Badge, EmptyState, Loading, Panel } from '../components';
+import type { WorkspaceDirectoryListing } from '../api';
 import type { Tone } from '../components';
 import { formatDateTime } from '../format';
 import { useI18n } from '../i18n';
@@ -41,6 +42,7 @@ export function WorkspacesView() {
     workspacesLoading,
     refreshWorkspaces,
     createWorkspace,
+    browseWorkspaceDirectories,
     renameWorkspace,
     selectedWorkspaceId,
     selectWorkspace,
@@ -58,6 +60,9 @@ export function WorkspacesView() {
   // The name follows the folder until somebody types their own: the common case is one field, and a
   // name that kept overwriting a deliberate edit would be worse than a name that starts empty.
   const [nameTouched, setNameTouched] = useState(false);
+  // The folder picker: a level of directories at a time, so nobody types a path by hand.
+  const [picker, setPicker] = useState<WorkspaceDirectoryListing | null>(null);
+  const [newFolder, setNewFolder] = useState('');
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
   const [memberUser, setMemberUser] = useState('');
@@ -79,6 +84,18 @@ export function WorkspacesView() {
     const trimmed = path.trim().replace(/[/\\]+$/, '');
     const parts = trimmed.split(/[/\\]/);
     return parts[parts.length - 1] ?? trimmed;
+  };
+
+  const openPicker = async (path?: string): Promise<void> => {
+    setPicker(await browseWorkspaceDirectories(path));
+  };
+
+  /** Choosing from the picker fills the directory, and the name follows when it has not been edited. */
+  const chooseDirectory = (path: string): void => {
+    setDirectory(path);
+    if (!nameTouched) setName(folderName(path));
+    setPicker(null);
+    setNewFolder('');
   };
 
   const onCreate = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -148,16 +165,25 @@ export function WorkspacesView() {
         <form className="form-grid form-grid-inline" onSubmit={(event) => void onCreate(event)}>
           <label className="field">
             <span>{t('workspaces.directory')}</span>
-            <input
-              type="text"
-              value={directory}
-              placeholder={t('workspaces.directoryPlaceholder')}
-              onChange={(event) => {
-                setDirectory(event.target.value);
-                if (!nameTouched) setName(folderName(event.target.value));
-              }}
-              spellCheck={false}
-            />
+            <div className="field-inline">
+              <input
+                type="text"
+                value={directory}
+                placeholder={t('workspaces.directoryPlaceholder')}
+                onChange={(event) => {
+                  setDirectory(event.target.value);
+                  if (!nameTouched) setName(folderName(event.target.value));
+                }}
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="btn btn-ghost btn-small"
+                onClick={() => (picker === null ? void openPicker() : setPicker(null))}
+              >
+                {picker === null ? t('workspaces.browse') : t('common.cancel')}
+              </button>
+            </div>
           </label>
           <label className="field">
             <span>{t('workspaces.newName')}</span>
@@ -176,6 +202,95 @@ export function WorkspacesView() {
           </button>
         </form>
         <p className="muted small">{t('workspaces.newHint')}</p>
+
+        {picker === null ? null : (
+          <div className="stack-tight">
+            <div className="row-actions">
+              <span className="muted small mono">
+                {t('workspaces.pickerWhere', { root: picker.root, path: picker.path === '' ? '/' : picker.path })}
+              </span>
+              {picker.parent !== null && picker.parent !== undefined ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-small"
+                  onClick={() => void openPicker(picker.parent ?? '')}
+                >
+                  {t('workspaces.pickerUp')}
+                </button>
+              ) : null}
+              <button type="button" className="btn btn-ghost btn-small" onClick={() => void openPicker('')}>
+                {t('workspaces.pickerRoot')}
+              </button>
+            </div>
+            {picker.directories.length === 0 ? (
+              <p className="muted small">{t('workspaces.pickerEmpty')}</p>
+            ) : (
+              <table className="table table-nested">
+                <tbody>
+                  {picker.directories.map((entry) => (
+                    <tr key={entry.path}>
+                      <td>
+                        <button
+                          type="button"
+                          className="linkish"
+                          onClick={() => void openPicker(entry.path)}
+                          title={t('workspaces.pickerEnter')}
+                        >
+                          {entry.name}/
+                        </button>
+                        {entry.taken ? (
+                          <span className="muted small">
+                            {' '}
+                            {entry.workspace_name !== null && entry.workspace_name !== undefined
+                              ? t('workspaces.pickerTakenBy', { name: entry.workspace_name })
+                              : t('workspaces.pickerTaken')}
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="cell-actions">
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          disabled={entry.taken}
+                          onClick={() => chooseDirectory(entry.path)}
+                        >
+                          {t('workspaces.pickerChoose')}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div className="form-grid form-grid-inline">
+              <label className="field">
+                <span>{t('workspaces.pickerNewFolder')}</span>
+                <input
+                  type="text"
+                  value={newFolder}
+                  placeholder={t('workspaces.pickerNewFolderPlaceholder')}
+                  onChange={(event) => setNewFolder(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-ghost btn-small"
+                disabled={newFolder.trim().length === 0}
+                onClick={() => chooseDirectory(picker.path === '' ? newFolder.trim() : picker.path + '/' + newFolder.trim())}
+              >
+                {t('workspaces.pickerCreate')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-small"
+                disabled={!picker.selectable}
+                onClick={() => chooseDirectory(picker.path)}
+              >
+                {t('workspaces.pickerUseThis')}
+              </button>
+            </div>
+          </div>
+        )}
 
         {workspacesError !== null ? (
           <p className="muted">{workspacesError.message}</p>
