@@ -958,14 +958,25 @@ impl SessionManager {
         );
         // The owner travels with the conversation unless the caller claims it.
         restored.owner = owner.or(record.owner.clone()).or(restored.owner);
-        // A restored conversation is a new session on this node, so it belongs to a workspace on this
-        // node too: the owner's default one, created if this is the first thing they ever restored.
-        // Pointing at the archived session's workspace would be a dangling id whenever the package
-        // came from somewhere else.
-        if let Some(owner) = restored.owner.clone() {
-            let principal = Principal::new(owner.user_id, owner.node_id, Vec::new());
-            restored.workspace_id = Some(self.ensure_default_workspace(&principal).await?.id);
-        }
+        // A restored conversation is a new session on this node, and it belongs to a workspace on
+        // this node too. It goes back into its own workspace when this node still has one; otherwise
+        // into the owner's default - pointing at an id that only existed on the node the package came
+        // from would leave the session owned by nobody.
+        restored.workspace_id = match record.workspace_id.clone() {
+            Some(id) if self.get_workspace(&id).await?.is_some() => Some(id),
+            _ => match restored.owner.clone() {
+                Some(owner) => Some(
+                    self.ensure_default_workspace(&Principal::new(
+                        owner.user_id,
+                        owner.node_id,
+                        Vec::new(),
+                    ))
+                    .await?
+                    .id,
+                ),
+                None => None,
+            },
+        };
         restored.model_hint = record.model_hint.clone();
         restored.reasoning_effort = record.reasoning_effort;
         restored.metadata = record.metadata.clone();

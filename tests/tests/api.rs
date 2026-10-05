@@ -2166,6 +2166,7 @@ async fn archiving_writes_a_package_and_restoring_brings_it_back() {
     let h = Harness::start_with_archives("AGENTOS_TEST_ARCHIVE_TOKEN", root.clone()).await;
     let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "archived talk" })).await;
     let id = session["id"].as_str().unwrap().to_string();
+    let created_workspace_id = session["workspace_id"].as_str().map(str::to_string);
 
     // A conversation worth archiving: two turns, one of them with an attachment.
     let (status, _) = h
@@ -2213,6 +2214,15 @@ async fn archiving_writes_a_package_and_restoring_brings_it_back() {
     assert_eq!(body["manifest"]["artifacts"], 1, "the attachment travelled: {body}");
     let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
     assert!(path.exists(), "the package is on disk at {path:?}");
+    // The package is filed under the conversation's workspace, not under its owner: the archive root
+    // follows the same boundary as the files, so "this workspace's data" is one directory everywhere.
+    let workspace_id = created_workspace_id.unwrap();
+    assert_eq!(
+        path.parent().and_then(|dir| dir.file_name()).and_then(|name| name.to_str()),
+        Some(workspace_id.as_str()),
+        "the package is filed under its workspace: {path:?}"
+    );
+    assert_eq!(body["manifest"]["workspace_id"], json!(workspace_id), "{body}");
 
     // The record is now a tombstone: archived, and no longer taking goals.
     let (_, detail) = h.get(&format!("/v1/sessions/{id}")).await;

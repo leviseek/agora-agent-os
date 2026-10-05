@@ -297,3 +297,11 @@ directory; discovery shares knowledge, not state.
 验证方式与仓库既有做法一致：真实浏览器（headless Chrome over CDP）跑一遍
 `scripts/cdp-workspaces.mjs`——连接 → 建工作区 → 在其中建会话 → 列表里该会话的「工作区」列显示该工作区，
 且无浏览器侧异常。
+
+**后续（归档与验证，2026-10-05）。** 归档从「按 owner 分目录」改为「按工作区分目录」：包落在
+`<archive_dir>/<ws_id>/<ses>-<ts>.zip`，`manifest.json` 增加 `workspace_id`（旧包缺失即 `None`），
+`list_packages` 本来就只读两层目录，因此列表/查找/预览/删除无需改动，旧包也不会被搬动。
+恢复（`restore_archive`）优先放回原工作区（该工作区在本节点仍存在时），否则落到恢复者/原主的默认工作区——
+指向一个只存在于来源节点的 id 会让会话无主。这样「这个工作区的数据」在存储、工作区目录、归档根三处对齐。
+`archiving_writes_a_package_and_restoring_brings_it_back` 新增两条断言钉住：包的父目录名等于会话的 `workspace_id`，
+且清单里的 `workspace_id` 与之一致。

@@ -40,6 +40,10 @@ pub struct ArchiveManifest {
     pub title: String,
     #[serde(default)]
     pub owner: Option<PrincipalRef>,
+    /// The workspace the conversation belonged to, so a package can say which working unit it came
+    /// from - and so a listing can group by it. Absent in packages written before workspaces existed.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     /// The node that wrote the package. Two nodes archiving the same session id is possible in
     /// principle (a fork), and this is what tells them apart.
     pub node_id: String,
@@ -128,15 +132,20 @@ pub async fn write_package(
     node_id: &str,
 ) -> Result<ArchivedBundle> {
     let archived_at = now_ms();
-    // One directory per owner: an archive root shared by several people stays readable.
-    let owner_dir = root.join(sanitise_segment(
-        &record.owner_label().replace('@', "-at-"),
-    ));
-    tokio::fs::create_dir_all(&owner_dir)
+    // One directory per workspace: an archive root shared by several working units stays readable,
+    // and it follows the same boundary as the files themselves - which is what makes "archive this
+    // workspace" and "delete this workspace's data" the same operation. A session written before
+    // workspaces existed keeps the old owner-bucketed directory, so an upgrade moves no package.
+    let bucket = match &record.workspace_id {
+        Some(id) => id.as_str().to_string(),
+        None => record.owner_label().replace('@', "-at-"),
+    };
+    let bucket_dir = root.join(sanitise_segment(&bucket));
+    tokio::fs::create_dir_all(&bucket_dir)
         .await
         .map_err(|error| RuntimeError::unavailable(format!("archive root is not writable: {error}")))?;
     let stem = format!("{}-{archived_at}", record.id.as_str());
-    let path = owner_dir.join(format!("{stem}.zip"));
+    let path = bucket_dir.join(format!("{stem}.zip"));
 
     let mut files: BTreeMap<String, String> = BTreeMap::new();
     let mut buffer: Vec<u8> = Vec::new();
@@ -211,6 +220,7 @@ pub async fn write_package(
             session_id: record.id.as_str().to_string(),
             title: record.title.clone(),
             owner: record.owner.clone(),
+            workspace_id: record.workspace_id.as_ref().map(|id| id.as_str().to_string()),
             node_id: node_id.to_string(),
             created_at: record.created_at,
             archived_at,
