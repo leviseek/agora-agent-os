@@ -47,6 +47,8 @@ pub const FEATURES: &[&str] = &[
     "diagnostics.bundle",
     "model.vision-declared",
     "vision.capability-gated",
+    "attachments.upload",
+    "observations.without-tool-protocol",
 ];
 
 /// The sentence the built-in placeholder provider answers with.

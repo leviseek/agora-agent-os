@@ -32,6 +32,12 @@ const REQUIRED = [
   "conversation.placeholder-filtered",
   "session.model-choice",
   "approvals.list",
+  // Vision: a runtime without these answers an image with a confident description of something
+  // nobody looked at, which is exactly the failure this list exists to catch.
+  "model.vision-declared",
+  "vision.capability-gated",
+  "attachments.upload",
+  "observations.without-tool-protocol",
 ];
 
 const problems = [];
@@ -106,9 +112,20 @@ if (meta) {
     const models = await getJson(runtime + "/v1/models");
     const configured = models.configured ?? [];
     const real = configured.filter((p) => p.configured && p.kind !== "mock" && p.kind !== "local");
-    say("providers    : " + configured.map((p) => p.name + (p.configured ? "" : " (no key)")).join(", "));
+    const described = (p) => p.name + "/" + p.model + (p.configured ? "" : " (no key)") + " [vision:" + (p.vision ?? "unknown") + "]";
+    say("providers    : " + configured.map(described).join(", "));
     say("will answer  : " + (real.length > 0 ? real[0].name + " (a real model)" : "the built-in placeholder - no provider has a key"));
     if (real.length === 0) notes.push("set a provider key (for example DEEPSEEK_API_KEY) for real answers instead of placeholder prose");
+    // Vision is a separate question from "is a real model configured": deepseek-chat is a real
+    // model that answers HTTP 400 to an image, and the failure it produces looks like an answer.
+    const sighted = models.vision_capable ?? configured.filter((p) => p.vision === "yes" && p.configured).map((p) => p.name);
+    say("sees images  : " + (sighted.length > 0 ? sighted.join(", ") : "nobody - a screenshot will be refused"));
+    if (sighted.length === 0) {
+      notes.push(
+        "no configured provider can be shown an image: set the deepseek model to deepseek-flash (DEEPSEEK_MODEL=deepseek-flash), or add OPENAI_API_KEY / DASHSCOPE_API_KEY",
+      );
+    }
+    if (sighted.length === 0) problems.push("attaching an image would be refused: no vision-capable provider is configured");
   } catch (error) { notes.push("could not read /v1/models: " + error.message); }
 
   try {
