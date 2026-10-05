@@ -40,6 +40,19 @@ pub async fn meta(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
         "domain_version": agentos_core::DOMAIN_VERSION,
         "uptime_ms": now_ms().saturating_sub(state.started_at),
         "auth_required": cfg.api.auth_required(),
+        // Which identity mode this runtime is in, because it decides what ownership can mean. With no
+        // principal table, every request is the same operator with admin rights: a session's owner is
+        // recorded, and it separates nobody. A console that does not say so leaves two people
+        // wondering why they can both read each other's conversations.
+        "identity": {
+            "mode": if cfg.api.principals.is_empty() { "single-principal" } else { "principals" },
+            "principals": cfg.api.principals.len(),
+            "separation": if cfg.api.principals.is_empty() {
+                "every request is the same operator: ownership is recorded but separates nobody"
+            } else {
+                "each request carries a configured principal: ownership and grants separate people"
+            },
+        },
         "store_backend": state.kernel.store.backend_name(),
         "blob_backend": state.kernel.blobs.backend_name(),
         "ws_path": cfg.api.ws_path,
@@ -227,7 +240,7 @@ pub async fn create_session(
     // The owner is who is asking. A body that names someone else is honoured only for an admin:
     // otherwise "create a session as someone else" would be a way to take over their conversations.
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
-    let user = match body.user_id {
+    let (user, owner) = match body.user_id.clone() {
         Some(requested) if requested != me.user_id => {
             if !me.is_admin() {
                 return Err(ApiError(
@@ -238,15 +251,19 @@ pub async fn create_session(
                     .with_detail("user_id", me.user_id.clone()),
                 ));
             }
-            requested
+            // Creating on somebody's behalf makes them the owner. Recording them as a label and the
+            // caller as the owner was a record that disagreed with itself: the list said one name and
+            // the permission table said another, and the person it was created for could not be
+            // granted anything without going through the caller first.
+            (requested.clone(), agentos_core::model::PrincipalRef::new(requested, None))
         }
-        _ => me.user_id.clone(),
+        _ => (me.user_id.clone(), me.as_ref()),
     };
     let title = body.title.unwrap_or_else(|| "untitled session".into());
     let record = state
         .kernel
         .sessions
-        .create_session_for(&user, &title, Some(me.as_ref()))
+        .create_session_for(&user, &title, Some(owner))
         .await?;
     Ok(Json(json!(record)))
 }

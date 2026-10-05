@@ -739,6 +739,24 @@ impl RuntimeConfig {
         if let Some(v) = Self::env_str("AGENTOS_GRPC_ADDR") { self.api.grpc_addr = v; }
         if let Some(v) = Self::env_str("AGENTOS_WS_PATH") { self.api.ws_path = v; }
         if let Some(v) = Self::env_str("AGENTOS_CORS_ORIGIN") { self.api.cors_allow_origin = v; }
+        // Who this runtime accepts, as JSON: [{"user_id":"alice","token_env":"ALICE_TOKEN"}].
+        //
+        // The tokens themselves are read from the environment variables each entry names, never from
+        // this value: a configuration that carried secrets would end up in a file, a log or a
+        // screenshot. A value that will not parse is reported and ignored rather than half-applied -
+        // a runtime with a broken identity table must not silently become one where anybody is
+        // everybody.
+        if let Some(v) = Self::env_str("AGENTOS_PRINCIPALS") {
+            match serde_json::from_str::<Vec<PrincipalConfig>>(&v) {
+                Ok(principals) => self.api.principals = principals,
+                Err(error) => {
+                    self.warnings.push(format!(
+                        "AGENTOS_PRINCIPALS is not a JSON array of principals ({error}); ignored, so \
+                         this runtime keeps its previous identity configuration"
+                    ));
+                }
+            }
+        }
         if let Some(v) = Self::env_str("AGENTOS_RATE_LIMIT") {
             if let Ok(n) = v.parse() { self.api.rate_limit_per_minute = n; }
         }

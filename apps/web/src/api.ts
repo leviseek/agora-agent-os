@@ -232,6 +232,12 @@ export interface RuntimeMeta {
   domain_version: string;
   uptime_ms: number;
   auth_required: boolean;
+  /** Which identity mode this runtime is in, and therefore what ownership can mean. */
+  identity?: {
+    mode: 'single-principal' | 'principals';
+    principals: number;
+    separation: string;
+  };
   store_backend: string;
   blob_backend?: string;
   ws_path: string;

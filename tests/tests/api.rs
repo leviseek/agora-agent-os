@@ -2526,3 +2526,51 @@ async fn a_rejected_request_leaves_no_role_behind() {
         .await;
     assert_eq!(status, 409);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creating_for_somebody_else_makes_them_the_owner() {
+    let h = Harness::start_with_principals().await;
+
+    // An admin may create on somebody's behalf. The person it is for is the owner: recording them
+    // as a label and the caller as the owner is a record that disagrees with itself, and the person
+    // it was created for cannot be granted anything without going through the caller.
+    let (status, body) = h
+        .post_as(
+            Some("root-token"),
+            "/v1/sessions",
+            json!({ "user_id": "carol", "title": "for carol" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["user_id"], "carol");
+    assert_eq!(body["owner"]["user_id"], "carol", "the label and the owner agree: {body}");
+
+    // And carol holds it, even though she was not the one who asked for it.
+    let id = body["id"].as_str().unwrap().to_string();
+    let (status, _) = h.get_as(Some("root-token"), &format!("/v1/sessions/{id}")).await;
+    assert_eq!(status, 200);
+
+    // A non-admin cannot create for somebody else at all.
+    let (status, body) = h
+        .post_as(Some("bob-token"), "/v1/sessions", json!({ "user_id": "carol", "title": "no" }))
+        .await;
+    assert_eq!(status, 403, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_runtime_says_which_identity_mode_it_is_in() {
+    // With a principal table: two people, and separation is real.
+    let h = Harness::start_with_principals().await;
+    let (_, meta) = h.get("/v1/meta").await;
+    assert_eq!(meta["identity"]["mode"], "principals", "{meta}");
+    assert_eq!(meta["identity"]["principals"], 3, "{meta}");
+
+    // Without one: every request is the same operator, and the runtime says so rather than
+    // leaving two consoles to discover it by reading each other's conversations.
+    let plain = Harness::start(None, 0).await;
+    let (_, meta) = plain.get("/v1/meta").await;
+    assert_eq!(meta["identity"]["mode"], "single-principal", "{meta}");
+    assert_eq!(meta["identity"]["principals"], 0, "{meta}");
+    let separation = meta["identity"]["separation"].as_str().unwrap_or_default();
+    assert!(separation.contains("separates nobody"), "{separation}");
+}

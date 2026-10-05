@@ -1318,6 +1318,25 @@ textarea:focus {
   opacity: 0.75;
 }
 
+/* ------------------------------------------------------------------ notices */
+
+/* Something a reader has to know before the page makes sense. Louder than the muted text around it,
+   quieter than an error: nothing is broken, the deployment is just not what it looks like. */
+.notice {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.notice-warn {
+  border-color: var(--warn-border, var(--border-accent));
+  background: var(--warn-bg, rgba(180, 130, 20, 0.08));
+}
+
+.notice p {
+  margin: 4px 0 0;
+}
+
 /* ------------------------------------------------------------------ copyable values */
 
 /* A value that looks like text but copies like a button: no border, no background, and the pointer

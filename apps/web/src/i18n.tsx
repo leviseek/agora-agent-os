@@ -275,6 +275,9 @@ const en = {
   'sessions.subtitle': 'One session is one actor; messages inside a session are strictly ordered.',
   'sessions.new': 'New session',
   'sessions.owner': 'Owner',
+  'sessions.singlePrincipalTitle': 'This runtime has one identity',
+  'sessions.singlePrincipalBody':
+    'No principal table is configured, so every request is the same admin operator: sessions are owned by whoever is recorded, and that record separates nobody. To have two consoles act as two people, start the runtime with AGENTOS_PRINCIPALS (the dev stack takes the same variable).',
   'access.narrowing': 'Capabilities this session may use',
   'access.allCapabilities': 'All of them ({n})',
   'access.onlyPicked': 'Only the ones I tick',
@@ -857,6 +860,9 @@ const zh: Partial<Record<MessageKey, string>> = {
   'sessions.subtitle': '一个会话就是一个 Actor；会话内消息严格有序。',
   'sessions.new': '新建会话',
   'sessions.owner': '归属',
+  'sessions.singlePrincipalTitle': '这个运行时只有一个身份',
+  'sessions.singlePrincipalBody':
+    '没有配置 principal 表，所以每个请求都是同一个管理员 operator：会话会记录归属，但这个记录分不开任何人。想让两个控制台是两个不同的人，请用 AGENTOS_PRINCIPALS 启动运行时（开发栈接收同一个变量）。',
   'access.narrowing': '本会话可用的能力',
   'access.allCapabilities': '全部（{n} 项）',
   'access.onlyPicked': '仅我勾选的',

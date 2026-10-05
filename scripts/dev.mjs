@@ -347,6 +347,12 @@ if (wantRuntime) {
     AGENTOS_GRPC_ADDR: '127.0.0.1:' + runtimeGrpc.value,
     AGENTOS_NODE_NAME: nodeName,
   };
+  // Who this runtime accepts, straight through when the caller set it. It is how one dev stack
+  // serves two consoles as two different people; without it every request is the same operator and
+  // ownership separates nobody, which looks like a bug until you know.
+  if (typeof process.env.AGENTOS_PRINCIPALS === 'string' && process.env.AGENTOS_PRINCIPALS.trim().length > 0) {
+    env.AGENTOS_PRINCIPALS = process.env.AGENTOS_PRINCIPALS;
+  }
   if (process.env.AGENTOS_DEV_CHECK_ONLY === '1') {
     // A way to ask "is my runtime current?" without starting anything.
     ensureRuntimeBinary(binary, { dryRun: true });
@@ -398,4 +404,24 @@ if (!runtimeOnly && wantWeb) {
 console.log('[dev]   data dir     : ' + path.resolve(repoRoot, dataDir) + '  (one per running stack)');
 console.log('[dev]   node name    : ' + nodeName + '  (AGENTOS_NODE_NAME)');
 console.log('[dev]   node id      : persisted in the data dir, unique per stack');
+// Say which identity mode is running, because it decides whether two consoles can be two people.
+const principals = (process.env.AGENTOS_PRINCIPALS ?? '').trim();
+if (principals.length > 0) {
+  let names = 'unreadable';
+  try {
+    names = JSON.parse(principals)
+      .map((entry) => entry.user_id)
+      .filter((name) => typeof name === 'string' && name.length > 0)
+      .join(', ');
+  } catch {
+    // The runtime reports the same thing when it refuses the table; saying "unreadable" here is
+    // enough to send somebody looking.
+  }
+  console.log('[dev]   identity     : principals (' + names + ')  (AGENTOS_PRINCIPALS)');
+} else {
+  console.log(
+    '[dev]   identity     : single-principal - every request is the same admin operator, so owner ' +
+      'and grants separate nobody. Two consoles as two people need AGENTOS_PRINCIPALS.',
+  );
+}
 console.log('');

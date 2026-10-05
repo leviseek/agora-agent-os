@@ -48,6 +48,7 @@ export function SessionsView() {
     renameSession,
     viewDrafts,
     updateViewDraft,
+    meta,
   } = useApp();
   const { setView } = useNav();
 
@@ -118,8 +119,18 @@ export function SessionsView() {
     return (table[role] ?? []).includes(action);
   };
 
+  // Ownership only separates people when the runtime can tell them apart. Saying so here is the
+  // difference between "the permissions are broken" and "this runtime has one identity".
+  const singlePrincipal = meta?.identity?.mode === 'single-principal';
+
   return (
     <div className="stack">
+      {singlePrincipal ? (
+        <div className="notice notice-warn">
+          <strong>{t('sessions.singlePrincipalTitle')}</strong>
+          <p className="muted small">{t('sessions.singlePrincipalBody')}</p>
+        </div>
+      ) : null}
       <Panel title={t('sessions.create')} subtitle="POST /v1/sessions">
         <form className="form-grid form-grid-inline" onSubmit={(event) => void onCreate(event)}>
           <label className="field">
