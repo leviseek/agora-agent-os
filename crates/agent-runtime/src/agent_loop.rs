@@ -408,7 +408,7 @@ impl AgentLoop {
         // ---- Act ----------------------------------------------------------------
         Self::transition(run, AgentRunState::Thinking)?;
         Self::transition(run, AgentRunState::Acting)?;
-        let (graph, graph_id) = self.materialise_plan(run, &plan)?;
+        let (graph, graph_id) = self.materialise_plan(run, &plan, context.documents)?;
         run.task_graph_id = Some(graph_id.clone());
 
         let mut outcome = None;
@@ -672,25 +672,84 @@ impl AgentLoop {
 
     /// Turn plan steps into task graph nodes. Capability steps become capability tasks, think
     /// steps become model tasks and respond steps become join nodes.
-    fn materialise_plan(&self, run: &AgentRun, plan: &Plan) -> Result<(TaskGraphRecord, TaskId)> {
+    fn materialise_plan(
+        &self,
+        run: &AgentRun,
+        plan: &Plan,
+        documents: &[crate::documents::AttachedDocument],
+    ) -> Result<(TaskGraphRecord, TaskId)> {
         let mut graph = TaskGraphRecord::new(run.session_id.clone(), format!("plan for: {}", run.goal));
         graph.agent_id = Some(run.id.clone());
         let mut by_plan_id: std::collections::HashMap<String, TaskId> = std::collections::HashMap::new();
 
+        // The names of the files the user attached, so a step that tries to read one from the
+        // workspace can be corrected. An uploaded file is not in the workspace: it is in the
+        // artifact store, and its content is already in the prompt.
+        let attached_names: Vec<String> = documents
+            .iter()
+            .filter_map(|document| match &document.part {
+                agentos_core::model::ContentPart::Artifact { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+
         for step in &plan.steps {
-            let payload = match step.kind {
-                PlanStepKind::Capability => TaskPayload::Capability {
-                    capability: step.capability.clone().unwrap_or_default(),
-                    version: None,
-                    input: step.input.clone(),
-                },
-                PlanStepKind::Think => TaskPayload::Model {
-                    prompt: format!("{}\nGoal: {}", step.description, plan.goal),
-                    model_hint: self.spec.model_hint.clone(),
-                },
-                PlanStepKind::Respond => TaskPayload::Join { template: step.description.clone() },
+            // A planner that reads its own instructions literally asks for a file it was handed:
+            // "read sales.csv" as a capability step. The filesystem capability cannot see an
+            // uploaded attachment, so that step fails, the step that depended on it is cancelled,
+            // and the run ends with a promise instead of an answer. Measured exactly that way. The
+            // content is already in this prompt, so the step becomes a question about it.
+            let reads_an_attachment = step.kind == PlanStepKind::Capability
+                && attached_names.iter().any(|name| {
+                    step.input
+                        .get("path")
+                        .and_then(|path| path.as_str())
+                        .map(|path| path.ends_with(name.as_str()))
+                        .unwrap_or(false)
+                });
+            if reads_an_attachment {
+                tracing::info!(
+                    step = step.id.as_str(),
+                    "a plan step tried to read an attached file from the workspace; asking the model \
+                     about the attachment instead"
+                );
+            }
+            let kind_and_payload = if reads_an_attachment {
+                let name = step
+                    .input
+                    .get("path")
+                    .and_then(|path| path.as_str())
+                    .unwrap_or("the attached file");
+                (
+                    PlanStepKind::Think,
+                    TaskPayload::Model {
+                        prompt: format!(
+                            "{}\nThe file {name} is attached to this goal, and its content is above \
+                             in this prompt. Read the values you need from it - do not try to open it \
+                             as a workspace file.\nGoal: {}",
+                            step.description, plan.goal
+                        ),
+                        model_hint: self.spec.model_hint.clone(),
+                    },
+                )
+            } else {
+                let payload = match step.kind {
+                    PlanStepKind::Capability => TaskPayload::Capability {
+                        capability: step.capability.clone().unwrap_or_default(),
+                        version: None,
+                        input: step.input.clone(),
+                    },
+                    PlanStepKind::Think => TaskPayload::Model {
+                        prompt: format!("{}\nGoal: {}", step.description, plan.goal),
+                        model_hint: self.spec.model_hint.clone(),
+                    },
+                    PlanStepKind::Respond => TaskPayload::Join { template: step.description.clone() },
+                };
+                (step.kind, payload)
             };
-            let kind = match step.kind {
+            let (step_kind, payload) = kind_and_payload;
+            let step = &PlanStep { kind: step_kind, ..step.clone() };
+            let kind = match step_kind {
                 PlanStepKind::Capability => TaskKind::Capability,
                 PlanStepKind::Think => TaskKind::Model,
                 PlanStepKind::Respond => TaskKind::Join,
