@@ -681,6 +681,22 @@ pub async fn decide_session_access(
         .await?;
     Ok(Json(json!({ "request": decided, "session": record })))
 }
+/// Everything waiting on this person, across every session.
+///
+/// The per-session route answers "what is happening here"; this one answers "what is waiting on
+/// me", which is the question a person actually has when they open the console.
+pub async fn access_inbox(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+) -> ApiResult<Json<Value>> {
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let inbox = state.kernel.sessions.access_inbox(&me).await?;
+    Ok(Json(json!({
+        "user_id": me.user_id,
+        "to_decide": inbox.to_decide,
+        "mine": inbox.mine,
+    })))
+}
 /// Who the gateway thinks this caller is.
 ///
 /// The console shows it, and it is the fastest way to tell a wrong token from a missing permission.

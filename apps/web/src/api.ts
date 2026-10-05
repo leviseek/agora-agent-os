@@ -459,6 +459,22 @@ export interface AccessRequest {
   granted_role?: string | null;
 }
 
+/** One request, with enough about its session to act on it without opening it. */
+export interface AccessInboxEntry {
+  session_id: string;
+  session_title: string;
+  session_owner?: { user_id: string; node_id?: string | null } | null;
+  request: AccessRequest;
+}
+
+export interface AccessInboxResponse {
+  user_id: string;
+  /** Pending requests on sessions the caller may decide. */
+  to_decide: AccessInboxEntry[];
+  /** Everything the caller asked for, whatever came of it. */
+  mine: AccessInboxEntry[];
+}
+
 export interface AccessRequestsResponse {
   session_id: string;
   /** True when the caller may answer them. */
@@ -986,6 +1002,11 @@ export class AgentOsClient {
       method: 'PUT',
       json: body,
     });
+  }
+
+  /** Everything waiting on this person, across every session. */
+  accessInbox(): Promise<AccessInboxResponse> {
+    return this.request<AccessInboxResponse>('/v1/access-requests', { method: 'GET' });
   }
 
   accessRequests(id: string): Promise<AccessRequestsResponse> {

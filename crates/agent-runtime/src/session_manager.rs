@@ -1415,3 +1415,65 @@ impl SessionManager {
         Ok((record, decided))
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// the access inbox: everything waiting on this person, across every session
+// ---------------------------------------------------------------------------------------------
+
+/// One request, with just enough about its session to act on it without opening the session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessInboxEntry {
+    pub session_id: SessionId,
+    pub session_title: String,
+    #[serde(default)]
+    pub session_owner: Option<agentos_core::model::PrincipalRef>,
+    pub request: agentos_core::model::SessionAccessRequest,
+}
+
+/// What is waiting on this principal: requests they must answer, and requests they made.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AccessInbox {
+    /// Pending requests on sessions where this principal may decide.
+    pub to_decide: Vec<AccessInboxEntry>,
+    /// Everything they asked for, whatever came of it.
+    pub mine: Vec<AccessInboxEntry>,
+}
+
+impl SessionManager {
+    /// Read every session once and answer both questions from that single pass.
+    ///
+    /// A per-session walk would be N store reads for a page that exists to save the reader clicks;
+    /// the whole collection is small by design (a session is one record) and is read at once here.
+    pub async fn access_inbox(&self, principal: &agentos_core::model::Principal) -> Result<AccessInbox> {
+        let records = self.session_collection().list(self.store.as_ref(), 10_000).await?;
+        let me = principal.as_ref();
+        let mut inbox = AccessInbox::default();
+        for record in records {
+            let role = agentos_core::model::role_of(&record, principal);
+            let may_decide = principal.is_admin()
+                || role
+                    .map(|role| agentos_core::model::role_allows(role, agentos_core::model::SessionAction::Grant))
+                    .unwrap_or(false);
+            for request in &record.access_requests {
+                let entry = AccessInboxEntry {
+                    session_id: record.id.clone(),
+                    session_title: record.title.clone(),
+                    session_owner: record.owner.clone(),
+                    request: request.clone(),
+                };
+                if request.principal.matches(&me) {
+                    inbox.mine.push(entry.clone());
+                }
+                if may_decide
+                    && request.state == agentos_core::model::AccessRequestState::Pending
+                {
+                    inbox.to_decide.push(entry);
+                }
+            }
+        }
+        // Newest first, in both lists: a request is only interesting while it is fresh.
+        inbox.to_decide.sort_by(|a, b| b.request.created_at.cmp(&a.request.created_at));
+        inbox.mine.sort_by(|a, b| b.request.created_at.cmp(&a.request.created_at));
+        Ok(inbox)
+    }
+}

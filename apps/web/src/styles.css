@@ -1318,6 +1318,37 @@ textarea:focus {
   opacity: 0.75;
 }
 
+/* ------------------------------------------------------------------ nav badge */
+
+/* A count on a tab: what needs a decision should be visible without opening the page. */
+.nav-badge {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent, #6b7cff);
+  color: var(--accent-contrast, #fff);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* Text that behaves like a link without pretending to be an anchor. */
+.linkish {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--link, #7aa2ff);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.linkish:hover {
+  text-decoration: underline;
+}
+
 /* ------------------------------------------------------------------ notices */
 
 /* Something a reader has to know before the page makes sense. Louder than the muted text around it,

@@ -2574,3 +2574,63 @@ async fn the_runtime_says_which_identity_mode_it_is_in() {
     let separation = meta["identity"]["separation"].as_str().unwrap_or_default();
     assert!(separation.contains("separates nobody"), "{separation}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_access_inbox_gathers_what_is_waiting_on_you() {
+    let h = Harness::start_with_principals().await;
+    let (_, created) = h
+        .post_as(Some("alice-token"), "/v1/sessions", json!({ "title": "inbox" }))
+        .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Nothing waiting on anybody yet.
+    let (status, body) = h.get_as(Some("alice-token"), "/v1/access-requests").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["to_decide"].as_array().unwrap().len(), 0, "{body}");
+    assert_eq!(body["mine"].as_array().unwrap().len(), 0, "{body}");
+
+    // Bob asks. His inbox has his own request; Alice's has one waiting on her, with the title of
+    // the conversation in it so she can decide without opening anything.
+    let (_, asked) = h
+        .post_as(
+            Some("bob-token"),
+            &format!("/v1/sessions/{id}/access-requests"),
+            json!({ "role": "viewer", "note": "just reading" }),
+        )
+        .await;
+    let request_id = asked["request"]["id"].as_str().unwrap().to_string();
+    let (_, bob_inbox) = h.get_as(Some("bob-token"), "/v1/access-requests").await;
+    assert_eq!(bob_inbox["to_decide"].as_array().unwrap().len(), 0, "{bob_inbox}");
+    let mine = bob_inbox["mine"].as_array().unwrap();
+    assert_eq!(mine.len(), 1, "{bob_inbox}");
+    assert_eq!(mine[0]["request"]["state"], "pending");
+    assert_eq!(mine[0]["session_title"], "inbox");
+
+    let (_, alice_inbox) = h.get_as(Some("alice-token"), "/v1/access-requests").await;
+    let to_decide = alice_inbox["to_decide"].as_array().unwrap();
+    assert_eq!(to_decide.len(), 1, "{alice_inbox}");
+    assert_eq!(to_decide[0]["session_id"], id);
+    assert_eq!(to_decide[0]["session_title"], "inbox");
+    assert_eq!(to_decide[0]["session_owner"]["user_id"], "alice");
+    assert_eq!(to_decide[0]["request"]["principal"]["user_id"], "bob");
+
+    // A stranger who owns nothing has an empty decide list, whatever else is happening.
+    let (_, root_inbox) = h.get_as(Some("root-token"), "/v1/access-requests").await;
+    assert_eq!(root_inbox["to_decide"].as_array().unwrap().len(), 1, "an admin decides too: {root_inbox}");
+
+    // Approving clears it from the queue and settles the requester's own list.
+    let (status, _) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/sessions/{id}/access-requests/{request_id}/decide"),
+            json!({ "approve": true, "role": "viewer" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, alice_inbox) = h.get_as(Some("alice-token"), "/v1/access-requests").await;
+    assert_eq!(alice_inbox["to_decide"].as_array().unwrap().len(), 0, "{alice_inbox}");
+    let (_, bob_inbox) = h.get_as(Some("bob-token"), "/v1/access-requests").await;
+    let mine = bob_inbox["mine"].as_array().unwrap();
+    assert_eq!(mine[0]["request"]["state"], "approved");
+    assert_eq!(mine[0]["request"]["granted_role"], "viewer");
+}

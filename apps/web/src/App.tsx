@@ -13,6 +13,7 @@ import { AgentStateView } from './views/AgentStateView';
 import { TaskGraphView } from './views/TaskGraphView';
 import { ApprovalsView } from './views/ApprovalsView';
 import { ArchivesView } from './views/ArchivesView';
+import { AccessView } from './views/AccessView';
 import { CapabilitiesView } from './views/CapabilitiesView';
 import { TopologyView } from './views/TopologyView';
 import { EventsView } from './views/EventsView';
@@ -46,8 +47,10 @@ function Console() {
     selectedSessionId,
     sessions,
     busy,
+    accessInbox,
   } = useApp();
   const selected = sessions.find((session) => session.id === selectedSessionId) ?? null;
+  const waiting = accessInbox?.to_decide.length ?? 0;
   const active = VIEWS.find((definition) => definition.key === view);
 
   return (
@@ -66,7 +69,16 @@ function Console() {
               onClick={() => setView(definition.key)}
               title={t(definition.hintKey)}
             >
-              <span className="nav-label">{t(definition.labelKey)}</span>
+              <span className="nav-label">
+                {t(definition.labelKey)}
+                {definition.key === 'access' && waiting > 0 ? (
+                  // What needs a decision, on the tab itself: a page that has to be opened before it
+                  // can tell you it has work is a page that hides work.
+                  <span className="nav-badge" title={t('nav.access.waiting', { n: waiting })}>
+                    {waiting}
+                  </span>
+                ) : null}
+              </span>
               <span className="nav-hint">{t(definition.hintKey)}</span>
             </button>
           ))}
@@ -156,6 +168,8 @@ function renderView(view: string) {
       return <CapabilitiesView />;
     case 'archives':
       return <ArchivesView />;
+    case 'access':
+      return <AccessView />;
     case 'approvals':
       return <ApprovalsView />;
     case 'topology':

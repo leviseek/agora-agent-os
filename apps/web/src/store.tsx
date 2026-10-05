@@ -11,6 +11,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from 'react';
 import { AgentOsClient, ApiError, toApiError } from './api';
 import type {
+  AccessInboxResponse,
   AccessRequestsResponse,
   ArchiveDetail,
   ArchiveEntry,
@@ -286,6 +287,9 @@ export interface AppStoreValue {
   saveCapabilities: (id: string, allow: string[] | null) => Promise<boolean>;
   /** Access requests: ask, list, decide. */
   loadAccessRequests: (id: string) => Promise<AccessRequestsResponse | null>;
+  /** What is waiting on this person, across every session. The nav badge reads it. */
+  accessInbox: AccessInboxResponse | null;
+  refreshAccessInbox: () => Promise<void>;
   requestAccess: (id: string, role: string, note?: string) => Promise<boolean>;
   decideAccess: (id: string, requestId: string, approve: boolean, role?: string) => Promise<boolean>;
   /** The archive root's packages, newest first. Fetched when the archive view asks for them. */
@@ -397,6 +401,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [accessInbox, setAccessInbox] = useState<AccessInboxResponse | null>(null);
   const [archives, setArchives] = useState<ArchiveEntry[]>([]);
   const [archivesRoot, setArchivesRoot] = useState('');
   const [archivesEnabled, setArchivesEnabled] = useState(true);
@@ -468,6 +473,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Nothing asks about approvals until somebody looks. An earlier version polled this route every
   // few seconds from the moment the page loaded, which against a runtime that predates the route
   // painted a 404 into the browser console on every single refresh.
+  const refreshAccessInbox = useCallback(async (): Promise<void> => {
+    try {
+      setAccessInbox(await clientRef.current.accessInbox());
+    } catch {
+      // A runtime without the route (an older build) has no inbox rather than an error page: the
+      // access view explains itself, and the badge simply shows nothing.
+      setAccessInbox(null);
+    }
+  }, []);
+
   const refreshApprovals = useCallback(async (): Promise<void> => {
     if (approvalsUnsupportedRef.current) return;
     try {
@@ -634,6 +649,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (APPROVAL_KINDS.has(event.kind)) {
         void refreshApprovals();
       }
+      // A request, or an answer to one, changes what is waiting on somebody: the inbox and the nav
+      // badge are the same fact seen twice.
+      if (
+        event.kind === 'session_access_requested' ||
+        event.kind === 'session_access_decided'
+      ) {
+        void refreshAccessInbox();
+      }
       if (REFRESH_KINDS.has(event.kind)) {
         if (event.session_id !== null && event.session_id === selectedRef.current) {
           scheduleDetailRefresh();
@@ -674,10 +697,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (connection === 'online') {
       stream.setAutoReconnect(autoReconnect);
       if (!autoReconnect) stream.connect();
+      // What is waiting on this person is part of being connected: the nav badge has to be right
+      // before anybody opens the page that fills it.
+      void refreshAccessInbox();
     } else {
       stream.setAutoReconnect(false);
     }
-  }, [stream, connection, autoReconnect]);
+  }, [stream, connection, autoReconnect, refreshAccessInbox]);
 
   useEffect(
     () => () => {
@@ -1209,6 +1235,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       getArchive,
       restoreArchive,
       deleteArchive,
+      accessInbox,
+      refreshAccessInbox,
       loadCapabilities,
       saveCapabilities,
       loadAccessRequests,
@@ -1283,6 +1311,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       getArchive,
       restoreArchive,
       deleteArchive,
+      accessInbox,
+      refreshAccessInbox,
       loadCapabilities,
       saveCapabilities,
       loadAccessRequests,
@@ -1302,6 +1332,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       pingSocket,
       reconnectSocket,
       openSession,
+      accessInbox,
+      refreshAccessInbox,
     ],
   );
 
