@@ -120,21 +120,29 @@ impl Capability for CalculatorCapability {
         descriptor(
             "calculator",
             "1.0.0",
-            "Evaluate an arithmetic expression (+, -, *, /, %, ^, parentheses).",
+            "Evaluate arithmetic (+, -, *, /, %, ^, parentheses). Several expressions may be \
+             separated by ; or newlines, and each result comes back in order.",
             CapabilityKind::Builtin,
             &["math", "deterministic"],
             json!({
                 "type": "object",
                 "required": ["expression"],
                 "additionalProperties": false,
-                "properties": { "expression": { "type": "string", "minLength": 1, "maxLength": 1024 } }
+                "properties": {
+                    "expression": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    // Listed on purpose, although the mesh drops unknown fields anyway: a schema that
+                    // describes what a caller keeps trying to send is a better hint than a silent
+                    // discard, and models do annotate their own calls.
+                    "note": { "type": "string", "maxLength": 512 }
+                }
             }),
             json!({
                 "type": "object",
                 "required": ["expression", "result"],
                 "properties": {
                     "expression": { "type": "string" },
-                    "result": { "type": "number" }
+                    "result": { "type": "number" },
+                    "results": { "type": "array", "items": { "type": "number" } }
                 }
             }),
             CapabilityPermission::pure(),
@@ -146,8 +154,30 @@ impl Capability for CalculatorCapability {
             .get("expression")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RuntimeError::invalid_input("calculator requires an expression field"))?;
-        let result = evaluate(expression)?;
-        Ok(json!({ "expression": expression, "result": result }))
+        // Several expressions in one call. Models write "a+b; c+d" when asked for two sums, and
+        // answering that with "unexpected trailing input" fails the step - which then cascades into
+        // an answer about the failure. Each expression is still evaluated strictly; only the
+        // separator is new.
+        let parts: Vec<&str> = expression
+            .split([';', '\n'])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return Err(RuntimeError::invalid_input("the expression is empty"));
+        }
+        let mut results = Vec::with_capacity(parts.len());
+        for part in &parts {
+            results.push(evaluate(part)?);
+        }
+        let last = *results.last().expect("at least one expression");
+        Ok(json!({
+            "expression": expression,
+            // The single value answers the common single-expression case; the list is always there
+            // for a caller that asked for several.
+            "result": if results.len() == 1 { results[0] } else { last },
+            "results": results,
+        }))
     }
 }
 

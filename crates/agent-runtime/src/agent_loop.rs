@@ -830,6 +830,17 @@ impl AgentLoop {
             ChatMessage::user(goal_with_documents(goal, context.documents))
                 .with_images(context.images.to_vec()),
         );
+        if !context.documents.is_empty() {
+            // Said again, after the results: a run whose steps failed is exactly when a model decides
+            // "no data was attached" and answers about the absence instead of the table. The file is
+            // in this prompt, and the sentence has to survive the results block that follows it.
+            messages.push(ChatMessage::system(format!(
+                "The goal above carries {} attached file(s). Their content is part of this prompt - \
+                 read it there. Do not tell the user that no attachment arrived, and do not ask for a \
+                 re-upload: if a step failed, the attachment is still here.",
+                context.documents.len()
+            )));
+        }
         if !observations.is_empty() {
             // What the capabilities returned belongs to the model as context, not as a tool
             // exchange: this loop never asks a model for tool_calls, so there is no preceding

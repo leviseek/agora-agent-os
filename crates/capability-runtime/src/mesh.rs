@@ -246,6 +246,10 @@ impl CapabilityMesh {
         }
 
         // --- input validation ---------------------------------------------------------
+        // Extra fields are dropped rather than punished: a model that adds a note to its own call is
+        // still making the call it was asked to make, and a rejected step cascades into an answer
+        // about the failure instead of about the goal.
+        let input = crate::schema::prune(&descriptor.input_schema, &input);
         crate::schema::validate(&descriptor.input_schema, &input, "input")?;
 
         let ctx = CapabilityContext {

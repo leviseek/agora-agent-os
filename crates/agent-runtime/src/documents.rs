@@ -255,6 +255,11 @@ impl agentos_capability_runtime::capability::Capability for DocumentReadCapabili
                 "additionalProperties": false,
                 "properties": {
                     "name": { "type": "string", "maxLength": 256, "description": "Part of the file name; omit when the session has one attachment." },
+                    // The obvious aliases, listed rather than left to a schema violation: a model
+                    // asked the same question twice reaches for "file" as often as for "name", and a
+                    // rejected call is a step that fails and an answer that blames the attachment.
+                    "file": { "type": "string", "maxLength": 256, "description": "Alias for name." },
+                    "path": { "type": "string", "maxLength": 256, "description": "Alias for name." },
                     "offset": { "type": "number", "minimum": 0, "description": "Character offset to start at." },
                     "limit": { "type": "number", "minimum": 1, "maximum": DOCUMENT_PAGE_MAX, "description": "Characters to return." }
                 }
@@ -300,9 +305,9 @@ impl agentos_capability_runtime::capability::Capability for DocumentReadCapabili
                 "this session has no attached text file: attach one, then name it in the goal",
             ));
         }
-        let wanted = input
-            .get("name")
-            .and_then(|value| value.as_str())
+        let wanted = ["name", "file", "path"]
+            .iter()
+            .find_map(|key| input.get(*key).and_then(|value| value.as_str()))
             .map(str::trim)
             .filter(|name| !name.is_empty());
         let chosen = match wanted {

@@ -8,6 +8,39 @@
 use agentos_core::error::{Result, RuntimeError};
 use serde_json::Value;
 
+/// Drop the properties a schema does not declare, recursively.
+///
+/// Called before validation, and the reason is measured: a model that calls
+/// capability with the values it was asked for *plus* an explanatory field - {"expression": "...",
+/// "note": "where the numbers came from"} - had the whole step rejected for the extra field, the step
+/// that depended on it cancelled, and the run ended with the model telling the user its attachment
+/// had never arrived. Refusing a call over a field nobody reads is the wrong trade: what matters is
+/// that the declared fields are present and well-typed.
+///
+/// Only objects whose schema declares `properties` are pruned, and only keys that are absent from
+/// it: a schema that says nothing about its shape keeps its input untouched.
+pub fn prune(schema: &Value, instance: &Value) -> Value {
+    let Some(obj) = schema.as_object() else {
+        return instance.clone();
+    };
+    let Some(Value::Object(map)) = Some(instance) else {
+        return instance.clone();
+    };
+    let Some(Value::Object(props)) = obj.get("properties") else {
+        return instance.clone();
+    };
+    let mut pruned = serde_json::Map::new();
+    for (key, value) in map {
+        match props.get(key) {
+            Some(sub) => {
+                pruned.insert(key.clone(), prune(sub, value));
+            }
+            None => continue,
+        }
+    }
+    Value::Object(pruned)
+}
+
 pub fn validate(schema: &Value, instance: &Value, path: &str) -> Result<()> {
     if schema.is_null() {
         return Ok(());
@@ -152,6 +185,24 @@ mod tests {
     fn wrong_type_is_rejected() {
         let schema = json!({"type":"object","properties":{"n":{"type":"number"}}});
         assert!(validate(&schema, &json!({"n":"x"}), "input").is_err());
+    }
+
+    #[test]
+    fn pruning_keeps_what_the_schema_declares_and_drops_the_rest() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "expression": { "type": "string" },
+                "nested": { "type": "object", "properties": { "a": { "type": "string" } } }
+            }
+        });
+        let pruned = prune(&schema, &json!({"expression": "1+1", "note": "because", "nested": {"a": "x", "b": "y"}}));
+        assert_eq!(pruned, json!({"expression": "1+1", "nested": {"a": "x"}}));
+        // And what survives is what validation then sees: the extra field is gone, not rejected.
+        assert!(validate(&schema, &pruned, "input").is_ok());
+        // A schema with no declared shape is left alone.
+        assert_eq!(prune(&json!({}), &json!({"anything": 1})), json!({"anything": 1}));
     }
 
     #[test]
