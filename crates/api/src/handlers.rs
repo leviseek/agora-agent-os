@@ -243,6 +243,10 @@ pub struct PostMessageRequest {
     /// content and stored as artifacts before the run starts.
     #[serde(default)]
     pub images: Vec<String>,
+    /// Artifact ids returned by POST /v1/sessions/{id}/attachments. This is how a browser attaches
+    /// an image: it cannot reach the runtime's workspace, so it uploads the bytes and names them.
+    #[serde(default)]
+    pub attachments: Vec<String>,
     /// Provider to prefer for this one goal. Overrides the session setting, and does not persist.
     #[serde(default)]
     pub model: Option<String>,
@@ -271,14 +275,28 @@ pub async fn post_message(
             state
                 .kernel
                 .sessions
-                .post_goal(&session, &body.text, &body.images, body.model.clone(), effort)
+                .post_goal(
+                    &session,
+                    &body.text,
+                    &body.images,
+                    &body.attachments,
+                    body.model.clone(),
+                    effort,
+                )
                 .await?,
         ))
     } else {
         state
             .kernel
             .sessions
-            .post_goal_async(&session, &body.text, &body.images, body.model.clone(), effort)
+            .post_goal_async(
+                &session,
+                &body.text,
+                &body.images,
+                &body.attachments,
+                body.model.clone(),
+                effort,
+            )
             .await?;
         Ok(Json(json!({ "accepted": true, "session_id": id })))
     }
@@ -389,6 +407,96 @@ pub async fn get_artifact(
         bytes,
     )
         .into_response())
+}
+
+/// Upload an image and get back an artifact id to attach to a goal.
+///
+/// The body is the image itself, not JSON: a browser has the bytes, and wrapping them in base64
+/// would spend a third more of the request limit for nothing. The type is decided by content, the
+/// size by policy.max_artifact_bytes, and a session that does not exist is refused before anything
+/// is stored.
+pub async fn upload_attachment(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    let session = parse_session(&id)?;
+    if state.kernel.sessions.get(&session).await?.is_none() {
+        return Err(ApiError(RuntimeError::not_found(format!(
+            "session {id} does not exist"
+        ))));
+    }
+    let limit = state.config.policy.max_artifact_bytes;
+    if body.len() as u64 > limit {
+        return Err(ApiError(RuntimeError::invalid_input(format!(
+            "the upload is {} bytes, the limit is {limit}",
+            body.len()
+        ))));
+    }
+    // A name is what a human reads in the transcript; the client may send one, and a missing one
+    // must not become an empty file name.
+    let name = headers
+        .get("x-agentos-filename")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.rsplit(['/', '\\']).next().unwrap_or(value).to_string())
+        .unwrap_or_else(|| "upload".to_string());
+    let declared = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    // The session manager owns the artifact store and the bus, so the gateway does not have to
+    // know which crate a stored image belongs to.
+    let deps = state.kernel.sessions.deps();
+    // Refuse before storing, when nothing can look at the picture. The runtime would answer such a
+    // goal with the placeholder's prose, which reads like a description of an image nobody saw.
+    let sighted = state.kernel.models.vision_capable();
+    if sighted.is_empty() {
+        let blind = state
+            .kernel
+            .models
+            .provider_vision()
+            .into_iter()
+            .map(|(name, vision)| format!("{name}={}", vision.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = format!(
+            "no configured model can be shown an image, so this upload would be answered by a model that cannot see it. Providers: {blind}. Set the deepseek model to one that accepts images (deepseek-flash), or configure OPENAI_API_KEY / DASHSCOPE_API_KEY."
+        );
+        return Err(ApiError(RuntimeError::invalid_input(message)));
+    }
+    let record = agentos_agent_runtime::images::store_upload(
+        &deps.artifacts,
+        &session,
+        &name,
+        declared.as_deref(),
+        &body,
+    )
+    .await?;
+    deps.bus
+        .publish(
+            agentos_core::model::NewEvent::new(
+                agentos_core::model::EventKind::ArtifactCreated,
+                "image uploaded",
+            )
+            .session(session)
+            .node(deps.node_id.clone())
+            .payload(json!({
+                "artifact_id": record.id.as_str(),
+                "name": record.name,
+                "bytes": record.size,
+                "content_type": record.content_type,
+            })),
+        )
+        .await?;
+    Ok(Json(json!({
+        "artifact_id": record.id.as_str(),
+        "name": record.name,
+        "content_type": record.content_type,
+        "bytes": record.size,
+    })))
 }
 
 /// Fork a session. The fork inherits the conversation and the runs, with fresh identifiers.
@@ -699,6 +807,9 @@ pub async fn list_models(State(state): State<ApiState>) -> ApiResult<Json<Value>
         "providers": state.kernel.models.provider_infos().await,
         "configured": state.config.model_summary(),
         "default": state.config.models.default_provider,
+        // Who can be shown an image. A client asks this before offering a paperclip, so the answer
+        // to "why can I not attach a screenshot" is available without trying one.
+        "vision_capable": state.kernel.models.vision_capable(),
     })))
 }
 

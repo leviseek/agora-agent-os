@@ -24,6 +24,7 @@ pub use ids::{
     ActorId, AgentId, ArtifactId, CapabilityId, CheckpointId, CorrelationId, EventId, MemoryId,
     MessageId, ModelId, NodeId, RequestId, SessionId, TaskId, TraceId, WorkerId,
 };
+pub use config::vision_of_model;
 pub use time::{now_ms, Timestamp};
 
 /// Version of the Agent OS domain contract. Bump on breaking domain changes.
@@ -44,6 +45,8 @@ pub const FEATURES: &[&str] = &[
     "conversation.placeholder-filtered",
     "approvals.list",
     "diagnostics.bundle",
+    "model.vision-declared",
+    "vision.capability-gated",
 ];
 
 /// The sentence the built-in placeholder provider answers with.

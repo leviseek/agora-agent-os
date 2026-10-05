@@ -196,6 +196,28 @@ impl ModelResponse {
     }
 }
 
+/// Whether a provider can be shown an image. Three states, not two: a model name that says
+/// nothing about pictures is not evidence that it cannot see them, and refusing on ignorance would
+/// break local servers running a vision model with an uninformative name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Vision {
+    Yes,
+    No,
+    Unknown,
+}
+
+impl Vision {
+    /// The tag a client switches on.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Vision::Yes => "yes",
+            Vision::No => "no",
+            Vision::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ProviderHealth {
     Ready,
@@ -300,6 +322,20 @@ pub trait ModelProvider: Send + Sync + 'static {
     /// Whether the provider can emit tool calls.
     fn supports_tools(&self) -> bool {
         true
+    }
+    /// Whether this provider's model can be shown an image.
+    ///
+    /// The router asks before sending one: a text-only model given an image_url answers HTTP 400,
+    /// and the failover then produces an answer from somewhere else about a picture nobody looked
+    /// at. Declining is only honest when it is known - "unknown" is not "no", so the default is to
+    /// let the request through rather than refuse a provider that might be able to see.
+    fn vision(&self) -> Vision {
+        Vision::Unknown
+    }
+    /// The provider's own view of whether it can see, resolved once so callers do not repeat the
+    /// model-name guess. Declared here so a provider can be asked without knowing its configuration.
+    fn can_see(&self) -> bool {
+        self.vision() != Vision::No
     }
     /// Cheap, synchronous "is this usable right now" check. The router skips providers that say
     /// no, which keeps credentials-free deployments quiet instead of logging a warning per call.

@@ -20,6 +20,20 @@ struct Harness {
 
 impl Harness {
     async fn start_with_env(env_name: &str, auth_token: Option<&str>, rate_limit: u32) -> Self {
+        Self::start_with_models(env_name, auth_token, rate_limit, None).await
+    }
+
+    /// The same harness, with a say in the model configuration.
+    ///
+    /// Vision needs its own deployment: the shipped defaults register five providers and only some
+    /// of them can be shown an image, so a test about attaching one has to say what it attaches to
+    /// rather than inheriting whatever the example config happens to contain.
+    async fn start_with_models(
+        env_name: &str,
+        auth_token: Option<&str>,
+        rate_limit: u32,
+        models: Option<agentos_core::config::ModelConfig>,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("agentos-api-{}", agentos_core::now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut config = RuntimeConfig::default();
@@ -31,6 +45,9 @@ impl Harness {
         // A distinct variable per harness: tests run in parallel in one process, so a shared
         // variable name would be a race on process-global state.
         config.api.auth_token_env = env_name.to_string();
+        if let Some(models) = models {
+            config.models = models;
+        }
         if let Some(token) = auth_token {
             std::env::set_var(env_name, token);
         } else {
@@ -103,7 +120,76 @@ impl Harness {
         let parsed = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
         (status, parsed)
     }
+
+    /// Upload raw bytes the way a browser does: the body is the file, not JSON.
+    async fn upload(&self, path: &str, name: &str, content_type: &str, bytes: &[u8]) -> (u16, Value) {
+        let response = self
+            .client
+            .post(self.url(path))
+            .header("content-type", content_type)
+            .header("x-agentos-filename", name)
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        let parsed = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+        (status, parsed)
+    }
+
+    async fn get_bytes(&self, path: &str) -> (u16, Vec<u8>, String) {
+        let response = self.client.get(self.url(path)).send().await.unwrap();
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = response.bytes().await.unwrap_or_default().to_vec();
+        (status, bytes, content_type)
+    }
 }
+
+/// A model configuration with the placeholder plus one provider that declares it can see.
+///
+/// The shipping default depends on environment variables and on which example config is in play;
+/// a test about attaching an image needs a deployment where attaching one is possible at all.
+fn models_with_a_sighted_provider() -> agentos_core::config::ModelConfig {
+    let mut models = agentos_core::config::ModelConfig::default();
+    models.providers.retain(|provider| provider.kind == agentos_core::config::ProviderKind::Mock);
+    models.providers.push(agentos_core::config::ProviderConfig {
+        name: "sighted".into(),
+        kind: agentos_core::config::ProviderKind::Openai,
+        model: "sighted-model".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        api_key_env: "AGENTOS_TEST_SIGHTED_KEY".into(),
+        enabled: true,
+        priority: 40,
+        timeout_ms: 500,
+        vision: Some(true),
+    });
+    std::env::set_var("AGENTOS_TEST_SIGHTED_KEY", "test-key");
+    models
+}
+
+/// A model configuration where nothing can be shown an image: the placeholder alone.
+fn models_without_eyes() -> agentos_core::config::ModelConfig {
+    let mut models = agentos_core::config::ModelConfig::default();
+    models.providers.retain(|provider| provider.kind == agentos_core::config::ProviderKind::Mock);
+    models.default_provider = "mock".into();
+    models
+}
+
+/// A 1x1 PNG: the smallest thing that passes a content sniff, so a test does not need a fixture.
+const ONE_PIXEL_PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R',
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0D, b'I', b'D', b'A', b'T', 0x78, 0x9C, 0x63, 0xFC, 0xCF, 0xC0, 0xF0,
+    0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0xAB, 0xCE, 0x36, 0x89, 0x00, 0x00, 0x00, 0x00, b'I', b'E',
+    b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+];
 
 impl Drop for Harness {
     fn drop(&mut self) {
@@ -797,7 +883,7 @@ async fn a_session_remembers_its_model_and_effort_and_a_goal_can_override_them()
     assert_eq!(runs[0]["reasoning_effort"], json!("high"));
 
     // A single goal can override both without changing the session.
-    let (status, body) = h
+    let (status, _body) = h
         .post(
             &format!("/v1/sessions/{id}/messages"),
             json!({ "text": "and 7*7?", "wait": true, "model": "echo-provider", "effort": "low" }),
@@ -874,7 +960,7 @@ async fn a_session_survives_a_restart_without_a_snapshot() {
         let session = kernel.sessions.create_session("u1", "survives").await.unwrap();
         let result = kernel
             .sessions
-            .post_goal(&session.id, "what is 6*7?", &[], None, None)
+            .post_goal(&session.id, "what is 6*7?", &[], &[], None, None)
             .await
             .unwrap();
         assert!(result["answer"].is_string(), "the run answered: {result}");
@@ -930,14 +1016,17 @@ async fn the_diagnostics_bundle_is_useful_and_does_not_leak() {
     config.observability.log_level = "error".into();
     config.api.auth_token_env = "AGENTOS_TEST_DIAG_TOKEN".into();
     config.models.providers.push(agentos_core::config::ProviderConfig {
-            name: "deepseek".into(),
-            kind: agentos_core::config::ProviderKind::Deepseek,
-            model: "deepseek-chat".into(),
-            base_url: "https://api.deepseek.com".into(),
-            api_key_env: "AGENTOS_TEST_DIAG_KEY".into(),
+        name: "deepseek".into(),
+        kind: agentos_core::config::ProviderKind::Deepseek,
+        model: "deepseek-chat".into(),
+        base_url: "https://api.deepseek.com".into(),
+        api_key_env: "AGENTOS_TEST_DIAG_KEY".into(),
         enabled: true,
         priority: 1,
         timeout_ms: 5_000,
+        // A text-only model on purpose: this test is about what an unconfigured provider looks
+        // like in a diagnostics bundle.
+        vision: Some(false),
     });
     // An MCP server whose env map carries a value that must never travel.
     config.mcp.servers.push(agentos_core::config::McpServerConfig {
@@ -1079,6 +1168,51 @@ async fn streamed_deltas_reach_live_subscribers() {
         "a per-token preview must not be written to the log"
     );
 
+    h.shutdown.cancel();
+}
+
+/// An image sent to a runtime whose only model cannot see is refused, not answered.
+///
+/// The failure this pins down was measured end to end: the image went to a text-only model, the
+/// provider answered HTTP 400, the router failed over to the placeholder, and the user got a
+/// confident paragraph about a picture that no model had looked at.
+#[tokio::test]
+async fn an_image_is_refused_when_no_configured_model_can_see() {
+    let h = Harness::start_with_models(
+        "AGENTOS_TEST_BLIND_TOKEN",
+        None,
+        600,
+        Some(models_without_eyes()),
+    )
+    .await;
+    let (_, models) = h.get("/v1/models").await;
+    assert_eq!(
+        models["vision_capable"].as_array().map(|list| list.len()),
+        Some(0),
+        "a default deployment has no vision provider: {models}"
+    );
+    let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "blind" })).await;
+    let id = session["id"].as_str().unwrap().to_string();
+    let (status, body) = h
+        .upload(
+            &format!("/v1/sessions/{id}/attachments"),
+            "shot.png",
+            "image/png",
+            ONE_PIXEL_PNG,
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("no configured model can be shown an image"),
+        "the refusal must say what the problem is: {message}"
+    );
+    assert!(
+        // The provider list is what makes it fixable: it says who was asked and that all of them
+        // are blind, so nobody has to guess which model answered.
+        message.contains("mock=no") && message.contains("model to one that accepts images"),
+        "the refusal must name the fix: {message}"
+    );
     h.shutdown.cancel();
 }
 

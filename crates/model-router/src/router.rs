@@ -1,6 +1,6 @@
 //! Provider selection, failover and per-provider statistics.
 
-use crate::provider::{ModelProvider, ModelRequest, ModelResponse, ModelTask, ProviderHealth};
+use crate::provider::{ModelProvider, ModelRequest, ModelResponse, ModelTask, ProviderHealth, Vision};
 use agentos_core::config::ProviderKind;
 use agentos_core::error::{Result, RuntimeError};
 use parking_lot::RwLock;
@@ -52,11 +52,21 @@ impl Default for RoutingPolicy {
     }
 }
 
+/// Deserialisation default for `ProviderInfo::vision`: an older payload did not say, and saying
+/// nothing is not the same as saying no.
+fn unknown_vision() -> Vision {
+    Vision::Unknown
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProviderInfo {
     pub name: String,
     pub kind: ProviderKind,
     pub model: String,
+    /// Whether this model can be shown an image: yes, no, or unknown. A client needs this to say
+    /// "this model cannot see" before a screenshot is posted, instead of after a 400.
+    #[serde(default = "unknown_vision")]
+    pub vision: Vision,
     /// Always a bare identifier: ready, degraded, unconfigured or down.
     pub health: ProviderHealth,
     /// Why the provider is in that state; empty when healthy or when there is nothing to say.
@@ -155,8 +165,19 @@ impl ModelRouter {
         names
     }
 
+    /// Whether a request carries images: the only thing that makes vision relevant.
+    fn carries_images(request: &ModelRequest) -> bool {
+        request.messages.iter().any(|message| !message.images.is_empty())
+    }
+
     /// Ordered candidate list for a request: explicit hint, then task preference, then default,
     /// then the fallback chain. Duplicates are removed and unknown providers are dropped.
+    ///
+    /// When the request carries an image, the list is narrowed to providers that can be shown one:
+    /// a text-only model answers HTTP 400 to an image_url, and the failover that follows produces
+    /// a confident answer about a picture no model ever saw. Providers that are merely *unknown*
+    /// stay in the list - "unknown" is not "no", and a local server running a vision model with an
+    /// uninformative name must keep working.
     pub fn resolve(&self, request: &ModelRequest) -> Vec<String> {
         let mut ordered: Vec<String> = Vec::new();
         let configured = |name: &String| {
@@ -229,11 +250,46 @@ impl ModelRouter {
         // Prefer providers that are actually usable. If none are, keep the full list so the
         // caller still gets a precise "no API key" error instead of a vague one.
         let usable: Vec<String> = ordered.iter().filter(|n| configured(n)).cloned().collect();
-        if usable.is_empty() {
-            ordered
-        } else {
-            usable
+        let usable = if usable.is_empty() { ordered } else { usable };
+
+        if !Self::carries_images(request) {
+            return usable;
         }
+        let sighted: Vec<String> = usable
+            .into_iter()
+            .filter(|name| {
+                self.providers
+                    .get(name)
+                    .map(|provider| provider.vision() != Vision::No)
+                    .unwrap_or(false)
+            })
+            .collect();
+        sighted
+    }
+
+    /// The providers that would be asked about an image. For a client that wants to say "this
+    /// model cannot see" before a goal is posted, rather than after a 400.
+    pub fn vision_capable(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .providers
+            .iter()
+            .filter(|(_, provider)| provider.is_configured() && provider.vision() == Vision::Yes)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// What each provider is, including whether it can be shown an image. Reported by /v1/models,
+    /// because "why did my screenshot get answered by a text model?" is a configuration question.
+    pub fn provider_vision(&self) -> Vec<(String, Vision)> {
+        let mut rows: Vec<(String, Vision)> = self
+            .providers
+            .iter()
+            .map(|(name, provider)| (name.clone(), provider.vision()))
+            .collect();
+        rows.sort();
+        rows
     }
 
     /// Ask for a completion, failing over across providers on retryable errors.
@@ -264,6 +320,17 @@ impl ModelRouter {
         );
         let candidates = self.resolve(&request);
         if candidates.is_empty() {
+            // Two very different situations, told apart on purpose: nothing is registered at all,
+            // or everything registered is blind to the image this request carries.
+            if Self::carries_images(&request) {
+                return Err(RuntimeError::model(format!(
+                    "no configured model can be shown an image: {} cannot see, and no vision-capable \
+                     provider is set up. Configure a model that accepts images (for example \
+                     model=\"deepseek-flash\" on the deepseek provider), or send the goal without the image.",
+                    self.names().join(", ")
+                ))
+                .retryable(false));
+            }
             return Err(RuntimeError::model("no model provider is registered"));
         }
         let mut errors: Vec<String> = Vec::new();
@@ -338,6 +405,7 @@ impl ModelRouter {
                 name: name.clone(),
                 kind: provider.kind(),
                 model: provider.model().to_string(),
+                vision: provider.vision(),
                 health: provider.health().await,
                 health_reason: String::new(),
                 calls: s.calls,
@@ -410,6 +478,121 @@ impl ModelProvider for FailingProvider {
     }
 }
 
+
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+    use crate::mock::MockProvider;
+    use crate::provider::{ChatMessage, ImageInput, ModelRequest, ModelResponse, ModelTask};
+    use agentos_core::config::ProviderKind;
+
+    /// A provider whose eyesight is whatever the test says it is.
+    struct Eyed {
+        name: String,
+        vision: Vision,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for Eyed {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Deepseek
+        }
+        fn model(&self) -> &str {
+            "eyed-model"
+        }
+        fn vision(&self) -> Vision {
+            self.vision
+        }
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            Ok(ModelResponse::text(&self.name, "eyed-model", "seen"))
+        }
+    }
+
+    fn router(providers: Vec<(&str, Vision)>, default: &str) -> ModelRouter {
+        let mut policy = RoutingPolicy {
+            default_provider: default.to_string(),
+            fallback_chain: vec![],
+            max_retries_per_provider: 1,
+            ..Default::default()
+        };
+        for (index, (name, _)) in providers.iter().enumerate() {
+            policy
+                .priorities
+                .insert(name.to_string(), 100 - index as u32);
+        }
+        let mut router = ModelRouter::new(policy);
+        for (name, vision) in providers {
+            router.register(Arc::new(Eyed { name: name.to_string(), vision }));
+        }
+        router
+    }
+
+    fn request_with_an_image() -> ModelRequest {
+        let image = ImageInput { mime: "image/png".into(), base64: "aGVsbG8=".into() };
+        ModelRequest::new(
+            ModelTask::Think,
+            vec![ChatMessage::user("what is this?").with_images(vec![image])],
+        )
+    }
+
+    #[test]
+    fn an_image_skips_a_model_that_says_it_cannot_see() {
+        // The measured failure: deepseek-chat answers HTTP 400 to an image_url, the router failed
+        // over, and the placeholder described a picture nobody had looked at.
+        let router = router(vec![("blind", Vision::No), ("sighted", Vision::Yes)], "blind");
+        let candidates = router.resolve(&request_with_an_image());
+        assert_eq!(candidates, vec!["sighted".to_string()], "got {candidates:?}");
+    }
+
+    #[test]
+    fn an_image_still_reaches_a_model_whose_eyesight_is_unknown() {
+        // "Unknown" is not "no": a local server running a vision model with a name nobody
+        // recognises must keep working.
+        let router = router(vec![("mystery", Vision::Unknown), ("blind", Vision::No)], "mystery");
+        let candidates = router.resolve(&request_with_an_image());
+        assert_eq!(candidates, vec!["mystery".to_string()], "got {candidates:?}");
+    }
+
+    #[test]
+    fn without_an_image_nothing_is_filtered() {
+        let router = router(vec![("blind", Vision::No), ("sighted", Vision::Yes)], "blind");
+        let plain = ModelRequest::new(ModelTask::Think, vec![ChatMessage::user("hello")]);
+        let candidates = router.resolve(&plain);
+        assert_eq!(candidates.len(), 2, "text asks every provider, blind or not: {candidates:?}");
+        assert_eq!(candidates[0], "blind", "the default still leads for text");
+    }
+
+    #[tokio::test]
+    async fn an_image_with_no_sighted_provider_fails_with_the_fix_in_the_message() {
+        let router = router(vec![("blind", Vision::No)], "blind");
+        let error = router.complete(request_with_an_image()).await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("no configured model can be shown an image"), "got {message}");
+        assert!(message.contains("blind cannot see"), "the message names who was asked: {message}");
+        assert!(
+            message.contains("deepseek-flash"),
+            "the error has to name a model that would work: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_default_placeholder_never_answers_an_image_alone() {
+        // The built-in provider has no eyes, and the whole point is that it does not pretend.
+        let mut policy = RoutingPolicy {
+            default_provider: "mock".into(),
+            fallback_chain: vec!["mock".into()],
+            ..Default::default()
+        };
+        policy.priorities.insert("mock".into(), 0);
+        let mut router = ModelRouter::new(policy);
+        router.register(Arc::new(MockProvider::default()));
+        assert_eq!(router.vision_capable(), Vec::<String>::new());
+        assert!(router.complete(request_with_an_image()).await.is_err());
+    }
+}
 
 #[cfg(test)]
 mod placeholder_tests {

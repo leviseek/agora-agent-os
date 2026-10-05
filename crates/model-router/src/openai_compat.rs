@@ -5,7 +5,7 @@
 //! API key is read from the environment at call time and never stored.
 
 use crate::provider::{
-    ModelProvider, ModelRequest, ModelResponse, ProviderHealth, ToolCall, Usage,
+    ModelProvider, ModelRequest, ModelResponse, ProviderHealth, ToolCall, Usage, Vision,
 };
 use agentos_core::config::{ProviderConfig, ProviderKind};
 use agentos_core::error::{Result, RuntimeError};
@@ -21,6 +21,8 @@ pub struct OpenAiCompatibleProvider {
     key_env: String,
     client: reqwest::Client,
     timeout_ms: u64,
+    /// What the configuration says about image input; None leaves it to the model name.
+    vision_hint: Option<bool>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -36,7 +38,14 @@ impl OpenAiCompatibleProvider {
             key_env: cfg.api_key_env.clone(),
             client,
             timeout_ms: cfg.timeout_ms,
+            vision_hint: cfg.vision,
         }
+    }
+
+    /// Say whether an image can be sent here, without a configuration file having to say it.
+    pub fn with_vision(mut self, vision: Option<bool>) -> Self {
+        self.vision_hint = vision;
+        self
     }
 
     fn endpoint(&self) -> String {
@@ -139,6 +148,22 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
     fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Configuration first, model name second. An operator who has run this model before knows
+    /// better than a substring match.
+    fn vision(&self) -> Vision {
+        match self.vision_hint {
+            Some(true) => Vision::Yes,
+            Some(false) => Vision::No,
+            // The guess lives in core because the configuration does too, and because two crates
+            // have to agree on what a model name implies.
+            None => match agentos_core::config::vision_of_model(&self.model) {
+                "yes" => Vision::Yes,
+                "no" => Vision::No,
+                _ => Vision::Unknown,
+            },
+        }
     }
 
     fn is_configured(&self) -> bool {
@@ -463,6 +488,7 @@ mod vision_tests {
                 enabled: true,
                 priority: 1,
                 timeout_ms: 1000,
+                vision: None,
             },
             reqwest::Client::new(),
         )
@@ -513,6 +539,7 @@ mod effort_tests {
                 enabled: true,
                 priority: 1,
                 timeout_ms: 1000,
+                vision: None,
             },
             reqwest::Client::new(),
         )
@@ -579,6 +606,7 @@ mod tests {
             enabled: true,
             priority: 1,
             timeout_ms: 1000,
+            vision: None,
         }
     }
 

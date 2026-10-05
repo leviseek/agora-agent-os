@@ -27,7 +27,7 @@ pub enum LogFormat {
     Json,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Deepseek,
@@ -35,10 +35,53 @@ pub enum ProviderKind {
     Qwen,
     Local,
     /// Deterministic in-process provider used by tests and by offline demos.
+    #[default]
     Mock,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Can this model be shown an image, judging by its name?
+///
+/// A guess, and deliberately a conservative one: it recognises the families that document image
+/// input and answers "unknown" for everything else - ignorance is not a "no", or a local server
+/// running a vision model with an uninformative name would stop working. The guess exists because
+/// the alternative was measured: deepseek-chat given an image_url answers HTTP 400, the router
+/// failed over to the placeholder, and the user got a confident description of a picture that no
+/// model ever saw.
+/// A configuration value that an operator can override without editing the default: the model
+/// name and the endpoint both change between deployments, and hard-coding either is how a runtime
+/// ends up pinned to a model that cannot do what the user just asked for.
+fn env_or(name: &str, fallback: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+pub fn vision_of_model(model: &str) -> &'static str {
+    let name = model.to_ascii_lowercase();
+    // Families that document image input.
+    const VISION_MARKERS: &[&str] = &[
+        "-vl", "vl-", "vision", "gpt-4o", "gpt-4.1", "gpt-5", "claude-3", "claude-4", "gemini",
+        "llava", "pixtral", "internvl", "minicpm-v", "glm-4v", "yi-vl", "step-1v", "deepseek-flash",
+    ];
+    if VISION_MARKERS.iter().any(|marker| name.contains(marker)) {
+        return "yes";
+    }
+    // Families that document text only. Being wrong here costs a refused image; being wrong the
+    // other way costs a 400 and a fallback that pretends to have seen the picture.
+    const TEXT_ONLY_MARKERS: &[&str] = &[
+        "deepseek-chat", "deepseek-reasoner", "deepseek-coder", "gpt-3.5", "text-davinci",
+        "qwen-plus", "qwen-turbo", "qwen-max", "llama-3", "mistral", "mixtral", "codellama",
+    ];
+    if TEXT_ONLY_MARKERS.iter().any(|marker| name.contains(marker)) {
+        return "no";
+    }
+    "unknown"
+}
+
+/// Default gives every added field a value, so a struct literal that predates the field still
+/// compiles and still means what it meant: name and kind are the only fields a caller must state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub name: String,
     pub kind: ProviderKind,
@@ -50,6 +93,13 @@ pub struct ProviderConfig {
     /// Relative preference for the router; higher wins ties.
     pub priority: i32,
     pub timeout_ms: u64,
+    /// Whether this provider's model can be shown an image.
+    ///
+    /// Unknown by default, and then the model name decides (see `vision_of_model` below): the
+    /// name is the only honest evidence available offline, and guessing "yes" is how a picture ends
+    /// up at a text-only model as an HTTP 400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 impl ProviderConfig {
@@ -385,46 +435,58 @@ impl Default for ModelConfig {
                     enabled: true,
                     priority: 0,
                     timeout_ms: 5_000,
+                    // The placeholder has no eyes; it says so rather than pretending.
+                    vision: Some(false),
                 },
                 ProviderConfig {
                     name: "deepseek".into(),
                     kind: ProviderKind::Deepseek,
-                    model: "deepseek-chat".into(),
-                    base_url: "https://api.deepseek.com".into(),
+                    // The vision-capable model: deepseek-chat is text-only and answers HTTP 400 to
+                    // an image_url, which then looked like "the picture was answered" because the
+                    // router failed over. Set DEEPSEEK_MODEL to pin a deployment to another one.
+                    model: env_or("DEEPSEEK_MODEL", "deepseek-flash"),
+                    base_url: env_or("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
                     api_key_env: "DEEPSEEK_API_KEY".into(),
                     enabled: true,
                     priority: 30,
                     timeout_ms: 60_000,
+                    // Documented as accepting images, so a screenshot is not refused here.
+                    vision: Some(true),
                 },
                 ProviderConfig {
                     name: "openai".into(),
                     kind: ProviderKind::Openai,
-                    model: "gpt-4o-mini".into(),
-                    base_url: "https://api.openai.com".into(),
+                    // gpt-4o-mini is the text model of the 4o family; the full gpt-4o sees images.
+                    model: env_or("OPENAI_MODEL", "gpt-4o-mini"),
+                    base_url: env_or("OPENAI_BASE_URL", "https://api.openai.com"),
                     api_key_env: "OPENAI_API_KEY".into(),
                     enabled: true,
                     priority: 20,
                     timeout_ms: 60_000,
+                    vision: None,
                 },
                 ProviderConfig {
                     name: "qwen".into(),
                     kind: ProviderKind::Qwen,
-                    model: "qwen-plus".into(),
-                    base_url: "https://dashscope.aliyuncs.com/compatible-mode".into(),
+                    model: env_or("QWEN_MODEL", "qwen-plus"),
+                    base_url: env_or("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode"),
                     api_key_env: "DASHSCOPE_API_KEY".into(),
                     enabled: true,
                     priority: 15,
                     timeout_ms: 60_000,
+                    vision: None,
                 },
                 ProviderConfig {
                     name: "local".into(),
                     kind: ProviderKind::Local,
-                    model: "local-llm".into(),
-                    base_url: "http://127.0.0.1:11434".into(),
+                    model: env_or("AGENTOS_LOCAL_MODEL", "local-llm"),
+                    base_url: env_or("AGENTOS_LOCAL_BASE_URL", "http://127.0.0.1:11434"),
                     api_key_env: "AGENTOS_LOCAL_API_KEY".into(),
                     enabled: true,
                     priority: 5,
                     timeout_ms: 120_000,
+                    // A local server is whatever somebody is running there; the name decides.
+                    vision: None,
                 },
             ],
             request_timeout_ms: 60_000,
@@ -841,6 +903,16 @@ impl RuntimeConfig {
                 m.insert("enabled".into(), serde_json::json!(p.enabled));
                 m.insert("key_env".into(), serde_json::json!(p.api_key_env));
                 m.insert("configured".into(), serde_json::json!(p.is_configured()));
+                // What this model is likely to accept, so a client can tell a user why an image
+                // was refused before they attach one. Configured wins over the model name.
+                m.insert(
+                    "vision".into(),
+                    serde_json::json!(match p.vision {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => vision_of_model(&p.model),
+                    }),
+                );
                 m
             })
             .collect()
@@ -857,6 +929,40 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The guess the router routes on. Getting these wrong in either direction is a real failure:
+    /// a "yes" that is wrong sends an image to a model that answers 400 and then to a fallback that
+    /// describes nothing, and a "no" that is wrong refuses an image a model could have read.
+    #[test]
+    fn the_model_name_guess_knows_the_families_that_matter_here() {
+        assert_eq!(vision_of_model("deepseek-flash"), "yes");
+        assert_eq!(vision_of_model("qwen-vl-max"), "yes");
+        assert_eq!(vision_of_model("gpt-4o"), "yes");
+        assert_eq!(vision_of_model("gpt-4o-mini"), "yes", "the 4o family takes images at every size");
+        assert_eq!(vision_of_model("llava:13b"), "yes");
+        assert_eq!(vision_of_model("deepseek-chat"), "no", "the measured 400");
+        assert_eq!(vision_of_model("deepseek-reasoner"), "no");
+        assert_eq!(vision_of_model("qwen-plus"), "no");
+        // Unknown stays unknown: a local model with a name nobody recognises is not refused.
+        assert_eq!(vision_of_model("local-llm"), "unknown");
+        assert_eq!(vision_of_model("my-finetune-v3"), "unknown");
+    }
+
+    #[test]
+    fn the_default_deepseek_model_can_be_shown_an_image() {
+        // The default used to be deepseek-chat, which answers HTTP 400 to an image_url. The
+        // operator can pin another model, but the default has to work.
+        let models = ModelConfig::default();
+        let deepseek = models.provider("deepseek").expect("the default config has a deepseek provider");
+        assert_eq!(
+            vision_of_model(&deepseek.model),
+            "yes",
+            "the shipped default model must accept images: {}",
+            deepseek.model
+        );
+        let mock = models.provider("mock").expect("the placeholder is registered");
+        assert_eq!(mock.vision, Some(false), "the placeholder has no eyes and says so");
     }
 
     #[test]
