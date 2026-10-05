@@ -241,13 +241,13 @@ export function SessionsView() {
                         {t('sessions.close')}
                       </button>
                     )}
-                    {session.state === 'closed' || session.state === 'archived' ? null : (
+                    {session.state === 'closed' ? (
                       <button
                         type="button"
                         className="btn btn-ghost btn-small"
-                        // Archiving closes the session on the way, so it is offered while it is still
-                        // open and disappears once it is closed (archive it from the closed row, or
-                        // reopen it first).
+                        // Only a closed session can be archived: closing is the deliberate "we are done
+                        // for now", archiving is what moves it out of the hot store. An open one shows
+                        // the button greyed out, with the reason, so nobody wonders where it went.
                         disabled={busy || !rowAllows(session, 'archive')}
                         title={t('sessions.archiveHint')}
                         onClick={(event) => {
@@ -257,7 +257,7 @@ export function SessionsView() {
                       >
                         {t('sessions.archive')}
                       </button>
-                    )}
+                    ) : null}
                   </td>
                 </tr>
               ))}

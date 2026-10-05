@@ -635,7 +635,7 @@ const zh: Partial<Record<MessageKey, string>> = {
   'archives.filesLine': '包内 {files} 个文件，每个都有校验和',
   'archives.archived': '已归档为 {id}',
   'sessions.archive': '归档',
-  'sessions.archiveHint': '把这个已关闭的对话写成一个包，并从热存储移出',
+  'sessions.archiveHint': '把这个已关闭的对话写成一个包，并从热存储移出（只有已关闭的会话能归档）',
   'nav.approvals.hint': '等待决策的能力调用',
   'nav.capabilities.hint': '发现与调用',
   'nav.topology': '拓扑',

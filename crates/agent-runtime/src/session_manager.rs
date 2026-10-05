@@ -408,20 +408,18 @@ impl SessionManager {
         let Some(record) = self.get(session).await? else {
             return Err(RuntimeError::not_found(format!("session {session} does not exist")));
         };
-        if record.state == SessionState::Archived {
+        // Only a closed session is archived, and the refusal says what to do instead.
+        //
+        // Closing is the deliberate step that says "we are done with this for now"; archiving is the
+        // step that moves it out of the hot store. Closing silently on the way would archive a
+        // conversation that was still being had, hide the fact that its actor had just been stopped,
+        // and leave the person who meant to keep talking to discover it later.
+        if record.state != SessionState::Closed {
             return Err(RuntimeError::conflict(format!(
-                "session {session} is already archived; restore it instead"
-            )));
-        }
-        if record.state == SessionState::Failed {
-            return Err(RuntimeError::conflict(format!(
-                "session {session} failed: there is no conversation to archive"
-            )));
-        }
-
-        // Stop whatever is running: a package cannot contain a run that is still being written.
-        if !record.state.is_terminal() {
-            self.close(session).await?;
+                "session {session} is {}: close it before archiving it",
+                record.state.as_str()
+            ))
+            .with_detail("state", record.state.as_str()));
         }
 
         // The exact conversation when an actor still holds it, the rebuilt one otherwise. An
@@ -453,14 +451,10 @@ impl SessionManager {
         .await?;
 
         let mut updated = record.clone();
-        updated.state = if updated.state == SessionState::Closed {
-            updated
-                .state
-                .transition(SessionState::Archived)
-                .unwrap_or(SessionState::Archived)
-        } else {
-            SessionState::Archived
-        };
+        updated.state = updated
+            .state
+            .transition(SessionState::Archived)
+            .map_err(|error| RuntimeError::conflict(format!("cannot archive {session}: {error}")))?;
         updated.updated_at = now_ms();
         self.session_collection()
             .save(self.store.as_ref(), updated.id.as_str(), &updated)
@@ -600,6 +594,16 @@ impl SessionManager {
             graph_collection
                 .save(self.store.as_ref(), graph.id.as_str(), &graph)
                 .await?;
+        }
+
+        // Open, not merely "not closed": a restore produces a conversation somebody is about to
+        // carry on with, so the actor comes up here rather than on the first message. What comes back
+        // is a session you can keep talking in, which is the whole point of restoring one.
+        if let Err(error) = self.spawn_from_history(&restored.id, &restored).await {
+            // The session is usable either way: the first goal rebuilds the actor from the runs that
+            // were just written. Worth saying out loud, though, because "restored but not live" is a
+            // symptom of a store that is not keeping up.
+            tracing::warn!(session = %restored.id, %error, "restored session could not be opened immediately");
         }
 
         self.bus

@@ -2085,7 +2085,21 @@ async fn archiving_writes_a_package_and_restoring_brings_it_back() {
         .await;
     assert_eq!(status, 200);
 
-    // Archive it.
+    // Archiving an open conversation is refused: closing is the deliberate step before it.
+    let (status, body) = h.post(&format!("/v1/sessions/{id}/archive"), json!({})).await;
+    assert_eq!(status, 409, "an open session is not archived: {body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("close it before archiving"), "{message}");
+    let (_, still) = h.get(&format!("/v1/sessions/{id}")).await;
+    let still_state = still["session"]["state"].as_str().unwrap_or_default();
+    assert!(
+        still_state == "active" || still_state == "idle",
+        "the refusal changed nothing: {still}"
+    );
+
+    // Close it, then archive it.
+    let (status, _) = h.post(&format!("/v1/sessions/{id}/close"), json!({})).await;
+    assert_eq!(status, 200);
     let (status, body) = h.post(&format!("/v1/sessions/{id}/archive"), json!({})).await;
     assert_eq!(status, 200, "{body}");
     let archive_id = body["archive_id"].as_str().unwrap().to_string();
@@ -2127,6 +2141,19 @@ async fn archiving_writes_a_package_and_restoring_brings_it_back() {
     let restored_id = body["session"]["id"].as_str().unwrap().to_string();
     assert_ne!(restored_id, id, "a restore never overwrites the original");
     assert_eq!(body["session"]["title"], "archived talk (restored)");
+    // Restored open, and live: the actor is up, so its status comes from the actor rather than from
+    // the durable rebuild. "Restored" means a conversation you can carry on with, not a record.
+    let restored_state = body["session"]["state"].as_str().unwrap_or_default().to_string();
+    assert!(
+        restored_state == "active" || restored_state == "idle",
+        "a restored session is open (active, or idle once its actor settles): {body}"
+    );
+    let (status, status_body) = h.get(&format!("/v1/sessions/{restored_id}/status")).await;
+    assert_eq!(status, 200, "{status_body}");
+    assert!(
+        status_body["rebuilt_from_history"].is_null(),
+        "a restored session answers from a live actor: {status_body}"
+    );
 
     // The restored conversation has the turns, and can be talked to again.
     let (_, detail) = h.get(&format!("/v1/sessions/{restored_id}")).await;
@@ -2160,7 +2187,10 @@ async fn a_damaged_package_is_refused_rather_than_half_restored() {
     let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "damaged" })).await;
     let id = session["id"].as_str().unwrap().to_string();
     h.post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "hello", "wait": true })).await;
-    let (_, body) = h.post(&format!("/v1/sessions/{id}/archive"), json!({})).await;
+    let (status, _) = h.post(&format!("/v1/sessions/{id}/close"), json!({})).await;
+    assert_eq!(status, 200);
+    let (status, body) = h.post(&format!("/v1/sessions/{id}/archive"), json!({})).await;
+    assert_eq!(status, 200, "a closed session archives: {body}");
     let path = std::path::PathBuf::from(body["path"].as_str().unwrap());
 
     // Corrupt the package the way a full disk or a careless edit would: rewrite one file inside it.
