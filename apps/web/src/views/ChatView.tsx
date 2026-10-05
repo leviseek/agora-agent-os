@@ -121,7 +121,12 @@ export function ChatView() {
   // themselves, NOT by the run list: the detail view refreshes on a debounce, and a local model
   // finishes before the first refresh lands - which used to mean the live text never rendered at
   // all, even though the deltas had been arriving the whole time.
-  const liveEntry = streamed.size > 0 ? [...streamed.entries()][streamed.size - 1] : null;
+  //
+  // Read from THIS session's entry only. The socket carries every session's events, so the flat map
+  // this used to read rendered whichever session streamed last - open B while A answers, and A's
+  // words appeared in B.
+  const liveHere = streamed.get(selectedSessionId ?? '') ?? null;
+  const liveEntry = liveHere !== null && liveHere.size > 0 ? [...liveHere.entries()][liveHere.size - 1] : null;
   const liveRunId = liveEntry === null ? null : liveEntry[0];
   const liveText = liveEntry === null ? '' : liveEntry[1];
   const liveRunVisible = liveRunId !== null && runs.some((run) => run.agent_id === liveRunId);
@@ -481,7 +486,8 @@ export function ChatView() {
 
           {liveText.length > 0 && !liveRunVisible ? (
             // The deltas are already here but the run itself has not reached the detail view yet,
-            // which is the normal case for a fast model. Show the text anyway.
+            // which is the normal case for a fast model. Show the text anyway - it is this session's
+            // text, which is what makes showing it correct.
             <article className="run">
               <div className="bubble bubble-agent bubble-pending">
                 <span className="bubble-role">

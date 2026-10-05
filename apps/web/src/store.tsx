@@ -223,7 +223,14 @@ export interface AppStoreValue {
   sessionsError: ApiError | null;
   sessionsLoading: boolean;
   /** Live answer text per run, replaced by the stored answer once the run finishes. */
-  streamed: Map<string, string>;
+  /**
+   * The live preview of an answer still being written, per session.
+   *
+   * Keyed by session first because the socket carries every session's events: a flat map keyed by
+   * run let one session's text render in another session's transcript - open B while A is streaming
+   * and A's words appeared under B.
+   */
+  streamed: Map<string, Map<string, string>>;
   /** Images attached to the conversation, newest last, as the transcript refers to them. */
   attachments: AttachedImage[];
   /** Capability calls waiting for a decision. */
@@ -336,7 +343,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionQuery, setSessionQueryState] = useState<string>('');
   // Live answer text per run, replaced by the stored answer when the run completes.
-  const [streamed, setStreamed] = useState<Map<string, string>>(() => new Map());
+  const [streamed, setStreamed] = useState<Map<string, Map<string, string>>>(() => new Map());
   const [attachments, setAttachments] = useState<AttachedImage[]>([]);
   // Unsent composer state, per session. Kept above the views so a tab switch cannot throw away
   // what somebody was about to send.
@@ -580,15 +587,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return next;
       });
       if (event.kind === 'agent_delta') {
-        // The preview of an answer still being written. Keyed by run so two runs cannot blend,
-        // and dropped the moment the run finishes - the stored answer replaces it.
+        // The preview of an answer still being written. Keyed by session and then by run: the socket
+        // delivers every session's events, so a preview that is not bound to its session is a
+        // preview that shows up in whatever transcript happens to be open.
         const payload = event.payload as { run_id?: string; text?: string } | null;
         const runId = payload?.run_id;
         const text = payload?.text;
-        if (typeof runId === 'string' && typeof text === 'string' && text.length > 0) {
+        const sessionId = event.session_id;
+        if (
+          typeof sessionId === 'string' &&
+          typeof runId === 'string' &&
+          typeof text === 'string' &&
+          text.length > 0
+        ) {
           setStreamed((previous) => {
             const next = new Map(previous);
-            next.set(runId, (next.get(runId) ?? '') + text);
+            const forSession = new Map(next.get(sessionId) ?? []);
+            forSession.set(runId, (forSession.get(runId) ?? '') + text);
+            next.set(sessionId, forSession);
             return next;
           });
         }
@@ -596,11 +612,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (event.kind === 'run_completed' || event.kind === 'run_failed' || event.kind === 'run_cancelled') {
         const payload = event.payload as { run_id?: string } | null;
         const runId = payload?.run_id;
-        if (typeof runId === 'string') {
+        const sessionId = event.session_id;
+        if (typeof runId === 'string' && typeof sessionId === 'string') {
+          // The stored answer replaces the preview the moment the run settles.
           setStreamed((previous) => {
-            if (!previous.has(runId)) return previous;
+            const forSession = previous.get(sessionId);
+            if (forSession === undefined || !forSession.has(runId)) return previous;
             const next = new Map(previous);
-            next.delete(runId);
+            const trimmed = new Map(forSession);
+            trimmed.delete(runId);
+            if (trimmed.size === 0) next.delete(sessionId);
+            else next.set(sessionId, trimmed);
             return next;
           });
         }
