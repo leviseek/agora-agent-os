@@ -269,6 +269,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             },
             latency_ms: agentos_core::now_ms().saturating_sub(started),
             finish_reason,
+            failed_over_from: vec![],
         })
     }
 
@@ -424,6 +425,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             },
             latency_ms: agentos_core::now_ms().saturating_sub(started),
             finish_reason,
+            failed_over_from: vec![],
         })
     }
 }

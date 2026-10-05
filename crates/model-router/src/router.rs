@@ -7,6 +7,14 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Does this provider kind only work once somebody supplies a credential?
+///
+/// The placeholder and a local endpoint work out of the box, so their presence says nothing about
+/// intent; every other kind stays silent until a key is configured.
+fn needs_a_credential(kind: ProviderKind) -> bool {
+    !matches!(kind, ProviderKind::Mock | ProviderKind::Local)
+}
+
 #[derive(Debug, Clone)]
 pub struct RoutingPolicy {
     pub default_provider: String,
@@ -16,6 +24,16 @@ pub struct RoutingPolicy {
     pub fallback_chain: Vec<String>,
     pub max_retries_per_provider: u32,
     pub retry_backoff_ms: u64,
+    /// Configured priority per provider, higher first. Empty means "no opinion", and the router
+    /// falls back to the provider name so the order is at least deterministic.
+    pub priorities: HashMap<String, u32>,
+}
+
+impl RoutingPolicy {
+    /// Priority of a provider, defaulting to 0 when the configuration does not say.
+    pub fn priority_of(&self, name: &str) -> u32 {
+        self.priorities.get(name).copied().unwrap_or(0)
+    }
 }
 
 impl Default for RoutingPolicy {
@@ -29,6 +47,7 @@ impl Default for RoutingPolicy {
             fallback_chain: vec!["mock".into(), "local".into()],
             max_retries_per_provider: 2,
             retry_backoff_ms: 50,
+            priorities: HashMap::new(),
         }
     }
 }
@@ -99,6 +118,12 @@ impl ModelRouter {
             default_provider: config.default_provider.clone(),
             max_retries_per_provider: config.max_retries.max(1),
             fallback_chain: vec!["mock".into()],
+            // The operator's own ordering, so "deepseek first" does not depend on the alphabet.
+            priorities: config
+                .providers
+                .iter()
+                .map(|provider| (provider.name.clone(), provider.priority.max(0) as u32))
+                .collect(),
             ..Default::default()
         };
         let mut router = Self::new(policy);
@@ -153,7 +178,44 @@ impl ModelRouter {
                 push(p, &mut ordered);
             }
         }
-        push(&self.policy.default_provider, &mut ordered);
+        // The built-in placeholder is a stand-in, not a model. When it is the configured default
+        // and a real provider is usable, the real one goes first: otherwise a deployment with a
+        // working API key still gets canned placeholder prose until somebody picks a model by
+        // hand, and those canned turns then sit in the conversation history.
+        // Is the configured default the built-in placeholder?
+        let default_is_placeholder = self
+            .providers
+            .get(&self.policy.default_provider)
+            .map(|provider| provider.kind() == ProviderKind::Mock)
+            .unwrap_or(false);
+        // Real providers a request could actually use, best first. Priority comes from the
+        // configuration, so an operator's preference is honoured instead of the alphabet's.
+        let mut usable_real: Vec<(u32, String)> = self
+            .providers
+            .iter()
+            .filter(|(name, provider)| {
+                *name != &self.policy.default_provider
+                    && provider.is_configured()
+                    // "Configured" is not the same as "set up". A local endpoint needs no
+                    // credential, so it always claims to be configured, and preferring it would
+                    // send every request to a server that may not be running - pushing out the
+                    // placeholder that would have answered instantly. A credential somebody had
+                    // to supply is evidence that this provider was meant to be used.
+                    && needs_a_credential(provider.kind())
+            })
+            .map(|(name, _)| (self.policy.priority_of(name), name.clone()))
+            .collect();
+        usable_real.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+        if default_is_placeholder && !usable_real.is_empty() {
+            // A real model answers; the placeholder is the fallback it was meant to be.
+            for (_, name) in &usable_real {
+                push(name, &mut ordered);
+            }
+            push(&self.policy.default_provider, &mut ordered);
+        } else {
+            push(&self.policy.default_provider, &mut ordered);
+        }
         for p in &self.policy.fallback_chain {
             push(p, &mut ordered);
         }
@@ -224,6 +286,12 @@ impl ModelRouter {
                 match outcome {
                     Ok(response) => {
                         self.record(name, true, agentos_core::now_ms().saturating_sub(started), response.usage.total_tokens as u64);
+                        let mut response = response;
+                        // Hand the caller the trail: an answer that came from the second choice must
+                        // not be credited to the first one.
+                        if !errors.is_empty() {
+                            response.failed_over_from = errors.clone();
+                        }
                         return Ok(response);
                     }
                     Err(err) => {
@@ -342,6 +410,130 @@ impl ModelProvider for FailingProvider {
     }
 }
 
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+    use crate::mock::MockProvider;
+    use crate::provider::{ChatMessage, ModelRequest, ModelResponse, ModelTask};
+    use agentos_core::config::ProviderKind;
+
+    /// A stand-in for a real provider: it says whether it is usable, and nothing else.
+    struct Real {
+        name: String,
+        usable: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for Real {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Deepseek
+        }
+        fn model(&self) -> &str {
+            "real-model"
+        }
+        fn is_configured(&self) -> bool {
+            self.usable
+        }
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("the test only asks who would be chosen")
+        }
+    }
+
+    /// A stand-in for a provider that needs no credential, like a local endpoint.
+    struct Keyless {
+        name: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for Keyless {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Local
+        }
+        fn model(&self) -> &str {
+            "local-model"
+        }
+        fn is_configured(&self) -> bool {
+            true
+        }
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("the test only asks who would be chosen")
+        }
+    }
+
+    fn router(real_usable: bool, priorities: &[(&str, u32)]) -> ModelRouter {
+        let mut policy = RoutingPolicy {
+            default_provider: "mock".into(),
+            fallback_chain: vec!["mock".into()],
+            ..Default::default()
+        };
+        policy.priorities = priorities
+            .iter()
+            .map(|(name, priority)| (name.to_string(), *priority))
+            .collect();
+        let mut router = ModelRouter::new(policy);
+        router.register(Arc::new(MockProvider::default()));
+        for (name, _) in priorities {
+            router.register(Arc::new(Real { name: name.to_string(), usable: real_usable }));
+        }
+        router
+    }
+
+    fn ask(router: &ModelRouter) -> Vec<String> {
+        router.resolve(&ModelRequest::new(ModelTask::Think, vec![ChatMessage::user("hi")]))
+    }
+
+    #[test]
+    fn a_configured_real_provider_answers_before_the_placeholder() {
+        // The bug this pins: with the placeholder as the configured default, a deployment that
+        // had a working API key still got canned placeholder prose - and those turns then sat in
+        // the conversation, where a real model copied their style.
+        let candidates = ask(&router(true, &[("openai", 20), ("deepseek", 30)]));
+        assert_eq!(candidates[0], "deepseek", "highest priority wins: {candidates:?}");
+        assert_eq!(candidates[1], "openai");
+        assert_eq!(candidates.last().unwrap(), "mock", "the placeholder is the fallback");
+    }
+
+    #[test]
+    fn a_keyless_local_endpoint_does_not_jump_ahead_of_the_placeholder() {
+        // A local endpoint needs no credential, so it always claims to be configured. Preferring
+        // it would point every request at a server that may not be running: the run would sit
+        // there until it timed out instead of being answered by the placeholder.
+        let mut policy = RoutingPolicy {
+            default_provider: "mock".into(),
+            fallback_chain: vec!["mock".into()],
+            ..Default::default()
+        };
+        policy.priorities = [("local".to_string(), 5)].into_iter().collect();
+        let mut router = ModelRouter::new(policy);
+        router.register(Arc::new(MockProvider::default()));
+        router.register(Arc::new(Keyless { name: "local".into() }));
+        let candidates = ask(&router);
+        assert_eq!(candidates[0], "mock", "got {candidates:?}");
+    }
+
+    #[test]
+    fn with_nothing_else_usable_the_placeholder_still_answers() {
+        // Offline deployments keep working: no key, no network, no problem.
+        let candidates = ask(&router(false, &[("deepseek", 30)]));
+        assert_eq!(candidates[0], "mock", "got {candidates:?}");
+    }
+
+    #[test]
+    fn asking_for_the_placeholder_explicitly_still_gets_it() {
+        let router = router(true, &[("deepseek", 30)]);
+        let mut request = ModelRequest::new(ModelTask::Think, vec![ChatMessage::user("hi")]);
+        request.model_hint = Some("mock".into());
+        assert_eq!(router.resolve(&request)[0], "mock", "an explicit choice is not overridden");
+    }
+}
+
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
@@ -405,6 +597,7 @@ mod streaming_tests {
                     usage: crate::provider::Usage::default(),
                     latency_ms: 1,
                     finish_reason: "stop".into(),
+                    failed_over_from: vec![],
                 })
             }
         }

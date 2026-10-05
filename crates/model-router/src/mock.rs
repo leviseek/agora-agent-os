@@ -229,6 +229,7 @@ impl ModelProvider for MockProvider {
                 usage: Usage { prompt_tokens: 64, completion_tokens: 128, total_tokens: 192 },
                 latency_ms: agentos_core::now_ms().saturating_sub(started),
                 finish_reason: "stop".into(),
+                failed_over_from: vec![],
             });
         }
 
@@ -253,6 +254,7 @@ impl ModelProvider for MockProvider {
                 usage: Usage { prompt_tokens: 96, completion_tokens: 64, total_tokens: 160 },
                 latency_ms: agentos_core::now_ms().saturating_sub(started),
                 finish_reason: "stop".into(),
+                failed_over_from: vec![],
             });
         }
 
@@ -276,6 +278,7 @@ impl ModelProvider for MockProvider {
                     usage: Usage { prompt_tokens: 48, completion_tokens: 24, total_tokens: 72 },
                     latency_ms: agentos_core::now_ms().saturating_sub(started),
                     finish_reason: "tool_calls".into(),
+                    failed_over_from: vec![],
                 });
             }
         }
@@ -294,13 +297,15 @@ impl ModelProvider for MockProvider {
                     usage: Usage { prompt_tokens: 48, completion_tokens: 24, total_tokens: 72 },
                     latency_ms: agentos_core::now_ms().saturating_sub(started),
                     finish_reason: "tool_calls".into(),
+                    failed_over_from: vec![],
                 });
             }
         }
 
         Ok(ModelResponse {
             content: format!(
-                "Acknowledged: {goal}. No capability was required, so this is the final answer."
+                "Acknowledged: {goal}. {}.",
+                agentos_core::PLACEHOLDER_ANSWER_MARKER
             ),
             tool_calls: vec![],
             provider: self.name().to_string(),
@@ -308,6 +313,7 @@ impl ModelProvider for MockProvider {
             usage: Usage { prompt_tokens: 40, completion_tokens: 32, total_tokens: 72 },
             latency_ms: agentos_core::now_ms().saturating_sub(started),
             finish_reason: "stop".into(),
+            failed_over_from: vec![],
         })
     }
 }

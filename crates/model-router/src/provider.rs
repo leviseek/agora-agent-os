@@ -167,6 +167,14 @@ pub struct ModelResponse {
     pub usage: Usage,
     pub latency_ms: u64,
     pub finish_reason: String,
+    /// Providers that were tried first and failed, as "name: error".
+    ///
+    /// The router fails over by design, but a caller - and the person reading the answer - must be
+    /// able to tell that the text did not come from the provider that was asked for. Silently
+    /// crediting a fallback answer to the preferred model is how a canned answer ends up looking
+    /// like a real one.
+    #[serde(default)]
+    pub failed_over_from: Vec<String>,
 }
 
 impl ModelResponse {
@@ -179,6 +187,7 @@ impl ModelResponse {
             usage: Usage::default(),
             latency_ms: 0,
             finish_reason: "stop".into(),
+            failed_over_from: vec![],
         }
     }
 
