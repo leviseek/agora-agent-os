@@ -241,11 +241,21 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .with_detail("body", truncate(&text, 512))
             })?;
 
-        let content = message
+        let mut content = message
             .get("content")
             .and_then(|c| c.as_str())
             .unwrap_or_default()
             .to_string();
+        if content.trim().is_empty() {
+            if let Some(reasoning) = message.get("reasoning_content").and_then(|c| c.as_str()) {
+                if !reasoning.trim().is_empty() {
+                    content = format!(
+                        "_(no answer text came back; this is the model's reasoning)_\n\n{}",
+                        reasoning.trim()
+                    );
+                }
+            }
+        }
 
         let mut tool_calls = Vec::new();
         if let Some(calls) = message.get("tool_calls").and_then(|c| c.as_array()) {
@@ -360,6 +370,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
         let mut buffer = String::new();
         let mut content = String::new();
+        // A thinking model streams its reasoning in a field of its own. Collected rather than
+        // discarded: a run whose only output was reasoning is not an empty answer, and it must not
+        // be reported as one.
+        let mut reasoning = String::new();
         let mut fragments: Vec<ToolCallFragment> = Vec::new();
         let mut usage: Value = json!({});
         let mut finish_reason: Option<String> = None;
@@ -397,6 +411,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         content.push_str(text);
                         on_delta(text.to_string());
                     }
+                }
+                // DeepSeek and the Qwen thinking models put the chain of thought here. It is not
+                // shown as the answer - but if the answer turns out to be empty, this is what the
+                // model actually said, and saying so beats "the model returned an empty answer".
+                if let Some(text) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                    reasoning.push_str(text);
                 }
                 if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
                     for call in calls {
@@ -437,6 +457,24 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let finish_reason = finish_reason.unwrap_or_else(|| {
             if tool_calls.is_empty() { "stop".to_string() } else { "tool_calls".to_string() }
         });
+
+        // Empty prose is not an answer, but it is also not nothing: if the model reasoned and then
+        // produced no visible text, the reasoning is what it said. Handing that back is honest and
+        // useful; an empty string here became "the model returned an empty final answer", which
+        // told the reader nothing at all.
+        if content.trim().is_empty() && !reasoning.trim().is_empty() {
+            tracing::warn!(
+                provider = self.name.as_str(),
+                finish_reason = finish_reason.as_str(),
+                reasoning_chars = reasoning.len(),
+                "the model streamed reasoning but no answer; returning the reasoning"
+            );
+            content = format!(
+                "_(no answer text came back; this is the model's reasoning)_\n\n{}",
+                reasoning.trim()
+            );
+            on_delta(content.clone());
+        }
 
         Ok(ModelResponse {
             content,

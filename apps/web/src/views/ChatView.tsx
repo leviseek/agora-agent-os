@@ -5,6 +5,7 @@ import type { DragEvent, FormEvent } from 'react';
 import { ApiErrorBanner, Badge, EmptyState, JsonBlock, Panel } from '../components';
 import { formatTime } from '../format';
 import { useSessionEvents } from '../hooks';
+import { MarkdownText } from '../MarkdownText';
 import { useI18n } from '../i18n';
 
 /** Provider names that are the runtime's own deterministic stand-in, not a real model. */
@@ -442,9 +443,10 @@ export function ChatView() {
                       ) : null}
                     </span>
                     {liveRunId === run.agent_id && liveText.length > 0 ? (
-                      // The preview of an answer still being written. It disappears when the run
-                      // finishes, because the stored answer takes its place.
-                      <p className="streaming-text">{liveText}</p>
+                      // The preview of an answer still being written, rendered the same way as the
+                      // stored answer so nothing shifts when the run finishes. A half-written code
+                      // fence renders as a code block, which is what the reader expects to watch.
+                      <MarkdownText text={liveText} className="streaming-text md-answer" />
                     ) : (
                       <p className="muted">{t('chat.workingHint')}</p>
                     )}
@@ -454,7 +456,8 @@ export function ChatView() {
                 {run.final_answer !== null ? (
                   <div className="bubble bubble-agent">
                     <span className="bubble-role">{t('chat.answer')}</span>
-                    <p>{run.final_answer}</p>
+                    {/* Answers arrive as Markdown; rendering the source would show the scaffolding. */}
+                    <MarkdownText text={run.final_answer} className="md-answer" />
                   </div>
                 ) : null}
 
@@ -477,7 +480,7 @@ export function ChatView() {
                   {t('chat.agent')}
                   <span className="streaming-dot" aria-hidden="true" />
                 </span>
-                <p className="streaming-text">{liveText}</p>
+                <MarkdownText text={liveText} className="streaming-text md-answer" />
               </div>
             </article>
           ) : null}
