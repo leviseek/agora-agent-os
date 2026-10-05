@@ -67,13 +67,6 @@ function writeStorage(key: string, value: string | null): void {
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'online' | 'error';
 
-/** One image the conversation refers to, as the transcript describes it. */
-export interface AttachedImage {
-  artifact_id: string;
-  name: string;
-  mime: string;
-}
-
 /** One image the runtime has accepted and stored, ready to be named in a goal. */
 export interface UploadedAttachment {
   artifact_id: string;
@@ -231,8 +224,6 @@ export interface AppStoreValue {
    * and A's words appeared under B.
    */
   streamed: Map<string, Map<string, string>>;
-  /** Images attached to the conversation, newest last, as the transcript refers to them. */
-  attachments: AttachedImage[];
   /** Capability calls waiting for a decision. */
   approvals: PendingApproval[];
   /** Ask the runtime what is waiting. The approvals view calls this when it opens. */
@@ -344,7 +335,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [sessionQuery, setSessionQueryState] = useState<string>('');
   // Live answer text per run, replaced by the stored answer when the run completes.
   const [streamed, setStreamed] = useState<Map<string, Map<string, string>>>(() => new Map());
-  const [attachments, setAttachments] = useState<AttachedImage[]>([]);
   // Unsent composer state, per session. Kept above the views so a tab switch cannot throw away
   // what somebody was about to send.
   const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
@@ -435,25 +425,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const response = await clientRef.current.getSession(target);
       setDetail(response);
       setDetailError(null);
-      // Attachments live in the transcript, so they are collected from there rather than from a
-      // second source of truth. Only the newest few matter: the strip shows what was just sent.
-      // A runtime without the route (an older build) simply has no attachments to show.
-      const transcript = await clientRef.current
-        .sessionTranscript(target, 60)
-        .catch(() => ({ messages: [], total: 0, truncated: false }));
-      const found: AttachedImage[] = [];
-      for (const message of transcript.messages) {
-        for (const part of message.parts) {
-          if (part.type === 'image' && part.artifact_id !== undefined && part.name !== undefined) {
-            found.push({
-              artifact_id: part.artifact_id,
-              name: part.name,
-              mime: part.mime ?? 'application/octet-stream',
-            });
-          }
-        }
-      }
-      setAttachments(found.slice(-6));
+      // Attachments are rendered inside the turn that carried them, from the run record itself, so
+      // there is nothing to collect here. Asking for a session-wide list used to show images only
+      // (a document is not an image part) and never showed what belonged to which message.
     } catch (cause) {
       setDetailError(toApiError(cause));
     } finally {
@@ -822,14 +796,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setBusy(true);
       try {
         const response = await clientRef.current.postMessage(
-        id,
-        text,
-        wait,
-        images,
-        undefined,
-        undefined,
-        attachments,
-      );
+          id,
+          text,
+          wait,
+          images,
+          undefined,
+          undefined,
+          // The staged uploads, by artifact id. Dropping this argument silently sends the goal
+          // without its files: the model then answers about an attachment it never received.
+          attachments,
+        );
         await refreshDetail(id);
         await refreshSessions();
         return response;
@@ -985,7 +961,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsError,
       sessionsLoading,
       streamed,
-      attachments,
       approvals,
       approvalsUnsupported,
       refreshApprovals,
@@ -1044,7 +1019,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsError,
       sessionsLoading,
       streamed,
-      attachments,
       approvals,
       approvalsUnsupported,
       refreshApprovals,

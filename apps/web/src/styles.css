@@ -1312,6 +1312,49 @@ textarea:focus {
   color: var(--danger, #c0392b);
 }
 
+/* ------------------------------------------------------------------ turn attachments */
+
+/* The files a goal carried, inside that goal's bubble. Wrapped, because a goal can carry several and
+   a bubble that grows sideways pushes the transcript out of the window. */
+.turn-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.turn-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 2px 6px 2px 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2, transparent);
+  font-size: 12px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.turn-attachment img {
+  width: 26px;
+  height: 26px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex: none;
+}
+
+.turn-attachment span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-attachment:hover {
+  border-color: var(--border-accent);
+}
+
 /* ------------------------------------------------------------------ diagrams */
 
 .mermaid-figure {

@@ -461,6 +461,21 @@ impl SessionActor {
             .await?;
 
         let mut run = AgentRun::new(self.session_id.clone(), &spec, goal.clone());
+        // The attachments belong to the run, so the transcript can be rebuilt from runs after a
+        // restart and still show what was sent with each goal.
+        run.attachments = all_parts
+            .iter()
+            .map(|part| match part {
+                agentos_core::model::ContentPart::Image { artifact_id, name, mime } => {
+                    agentos_core::model::AttachmentRef::image(artifact_id.clone(), name.clone(), mime.clone())
+                }
+                agentos_core::model::ContentPart::Artifact { artifact_id, name } => {
+                    agentos_core::model::AttachmentRef::document(artifact_id.clone(), name.clone())
+                }
+                _ => agentos_core::model::AttachmentRef::document(String::new(), String::new()),
+            })
+            .filter(|attachment| !attachment.artifact_id.is_empty())
+            .collect();
         self.state.active_run = Some(run.id.as_str().to_string());
         self.persist_run(&run).await?;
         self.deps
@@ -709,6 +724,9 @@ impl SessionActor {
                 // Set when the answer came from a fallback rather than the provider that was asked
                 // for, so a client can say so instead of presenting it as a clean success.
                 "degraded": r.degraded,
+                // What was attached to this goal. A console can then show it next to the turn it
+                // belongs to instead of guessing from a session-wide list.
+                "attachments": r.attachments,
                 "usage": r.usage,
             })).collect::<Vec<_>>(),
             // Session totals are summed from the runs rather than kept beside them: one source of

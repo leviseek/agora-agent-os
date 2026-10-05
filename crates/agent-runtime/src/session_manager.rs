@@ -288,6 +288,7 @@ fn durable_status_json(session: &SessionId, state: &SessionActorState) -> serde_
                 "final_answer": run.final_answer,
                 "error": run.error,
                 "degraded": run.degraded,
+                "attachments": run.attachments,
                 "usage": run.usage,
             }))
             .collect::<Vec<_>>(),
@@ -374,6 +375,24 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
             );
             goal.created_at = run.created_at;
             goal.agent_id = Some(run.id.as_str().to_string());
+            // The files this goal carried, rebuilt from the run record: without them a restored
+            // conversation shows the question and the answer but not what was attached to it.
+            for attachment in &run.attachments {
+                goal.parts.push(match attachment.kind.as_str() {
+                    "image" => agentos_core::model::ContentPart::Image {
+                        artifact_id: attachment.artifact_id.clone(),
+                        name: attachment.name.clone(),
+                        mime: attachment
+                            .content_type
+                            .clone()
+                            .unwrap_or_else(|| "application/octet-stream".into()),
+                    },
+                    _ => agentos_core::model::ContentPart::Artifact {
+                        artifact_id: attachment.artifact_id.clone(),
+                        name: attachment.name.clone(),
+                    },
+                });
+            }
             state.transcript.push(goal);
             if let Some(answer) = &run.final_answer {
                 let mut reply = TranscriptMessage::text(

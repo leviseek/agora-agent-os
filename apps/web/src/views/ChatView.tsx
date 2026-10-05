@@ -70,7 +70,6 @@ export function ChatView() {
     connection,
     sessions,
     streamed,
-    attachments,
     artifactUrl,
     modelOptions,
     configureSession,
@@ -349,25 +348,6 @@ export function ChatView() {
         <ApiErrorBanner error={detailError} scope="GET /v1/sessions/{id}" onRetry={() => void refreshDetail()} />
         <ApiErrorBanner error={session.error} scope="GET /v1/sessions/{id}/events" onRetry={session.reload} />
 
-        {attachments.length > 0 ? (
-          <div className="attachments">
-            <span className="muted small">{t('chat.attachments')}</span>
-            {attachments.map((image) => (
-              <a
-                key={image.artifact_id}
-                className="attachment"
-                href={artifactUrl(image.artifact_id)}
-                target="_blank"
-                rel="noreferrer"
-                title={image.mime}
-              >
-                <img src={artifactUrl(image.artifact_id)} alt={image.name} />
-                <span>{image.name}</span>
-              </a>
-            ))}
-          </div>
-        ) : null}
-
         <div className="transcript" ref={transcriptRef}>
           {sending !== null ? (
             // Said the moment the goal leaves: the waiting is the runtime's, and the user should be
@@ -437,6 +417,32 @@ export function ChatView() {
                 <div className="bubble bubble-user">
                   <span className="bubble-role">{t('agent.goal')}</span>
                   <p>{run.goal}</p>
+                  {run.attachments !== undefined && run.attachments.length > 0 ? (
+                    // The files this goal carried, in the turn that carried them. They used to be
+                    // listed once for the whole session, which is not where a reader looks for them -
+                    // and documents never appeared at all.
+                    <div className="turn-attachments">
+                      {run.attachments.map((attachment) => (
+                        <a
+                          key={attachment.artifact_id}
+                          className="turn-attachment"
+                          href={artifactUrl(attachment.artifact_id)}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={attachment.content_type ?? attachment.name}
+                        >
+                          {attachment.kind === 'image' ? (
+                            <img src={artifactUrl(attachment.artifact_id)} alt={attachment.name} />
+                          ) : (
+                            <span className="attachment-glyph" aria-hidden="true">
+                              📄
+                            </span>
+                          )}
+                          <span>{attachment.name}</span>
+                        </a>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
 
                 {runEvents.length > 0 ? (

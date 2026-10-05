@@ -258,6 +258,45 @@ pub struct AgentRun {
     /// fallback's, and a reader deserves to know that before trusting it.
     #[serde(default)]
     pub degraded: Option<String>,
+    /// What the user attached to this run's goal: image or document, by name and artifact id.
+    ///
+    /// On the run rather than only in the transcript because the transcript can be rebuilt - a
+    /// restart without a snapshot reconstructs goal/answer turns from the runs - and an attachment
+    /// that only exists as a part of a message is an attachment that disappears from history.
+    #[serde(default)]
+    pub attachments: Vec<AttachmentRef>,
+}
+
+/// One file the user attached to a goal, as the conversation refers to it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentRef {
+    /// "image" or "document": what the model was given, which decides how a client shows it.
+    pub kind: String,
+    pub artifact_id: String,
+    pub name: String,
+    /// The content type the runtime decided for it, when it knows.
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+impl AttachmentRef {
+    pub fn image(artifact_id: impl Into<String>, name: impl Into<String>, mime: impl Into<String>) -> Self {
+        Self {
+            kind: "image".into(),
+            artifact_id: artifact_id.into(),
+            name: name.into(),
+            content_type: Some(mime.into()),
+        }
+    }
+
+    pub fn document(artifact_id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            kind: "document".into(),
+            artifact_id: artifact_id.into(),
+            name: name.into(),
+            content_type: None,
+        }
+    }
 }
 
 impl AgentRun {
@@ -283,6 +322,8 @@ impl AgentRun {
             model_hint: spec.model_hint.clone(),
             reasoning_effort: spec.reasoning_effort,
             degraded: None,
+            // Filled in by whoever resolves the goal's attachments.
+            attachments: Vec::new(),
         }
     }
 

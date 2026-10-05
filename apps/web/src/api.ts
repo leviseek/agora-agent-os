@@ -329,9 +329,20 @@ export interface RunSummary {
   reasoning_effort?: string | null;
   /** Set when the answer came from a fallback: "mock answered after deepseek: HTTP 400 ...". */
   degraded?: string | null;
+  /** The files this goal carried, so a transcript can show them next to the turn they belong to. */
+  attachments?: RunAttachment[];
   model: string | null;
   final_answer: string | null;
   error: string | null;
+}
+
+/** One file attached to a goal: an image the model saw, or a document it read. */
+export interface RunAttachment {
+  /** 'image' or 'document'. */
+  kind: string;
+  artifact_id: string;
+  name: string;
+  content_type?: string | null;
 }
 
 export interface GraphSummary {

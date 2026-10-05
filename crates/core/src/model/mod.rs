@@ -20,8 +20,8 @@ pub use actor::{
     ActorRecord, ActorSnapshotMeta, Checkpoint, CheckpointMeta, CloneRequest, MigrationReport,
 };
 pub use agent::{
-    ActionCall, AgentRun, AgentSpec, AgentStep, Observation, Plan, PlanStep, PlanStepKind,
-    ReasoningEffort, StepKind, TokenUsage,
+    ActionCall, AgentRun, AgentSpec, AgentStep, AttachmentRef, Observation, Plan, PlanStep,
+    PlanStepKind, ReasoningEffort, StepKind, TokenUsage,
 };
 pub use artifact::{ArtifactKind, ArtifactRecord};
 pub use capability::{

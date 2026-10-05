@@ -218,9 +218,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
             let retryable = status.as_u16() == 429 || status.is_server_error();
+            // The provider's own words, in the message. "returned HTTP 400" is not a diagnosis: the
+            // reason was in the body all along - "unsupported image ... webp, png, jpeg, gif" - and
+            // a user who cannot see it has nothing to act on.
             return Err(RuntimeError::model(format!(
-                "provider {} returned HTTP {status}",
-                self.name
+                "provider {} returned HTTP {status}: {}",
+                self.name,
+                provider_reason(&text)
             ))
             .retryable(retryable)
             .with_detail("status", status.as_u16())
@@ -357,8 +361,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let text = response.text().await.unwrap_or_default();
             let retryable = status.as_u16() == 429 || status.is_server_error();
             return Err(RuntimeError::model(format!(
-                "provider {} returned HTTP {status}",
-                self.name
+                "provider {} returned HTTP {status}: {}",
+                self.name,
+                provider_reason(&text)
             ))
             .retryable(retryable)
             .with_detail("status", status.as_u16())
@@ -492,6 +497,37 @@ struct ToolCallFragment {
     id: Option<String>,
     name: String,
     arguments: String,
+}
+
+/// The provider's own explanation, pulled out of an error body.
+///
+/// OpenAI-compatible providers nest it as {"error":{"message": ...}}; anything else is passed through
+/// truncated. This is what turns "HTTP 400" into "the image is unsupported", which is the difference
+/// between a report and something a person can act on.
+fn provider_reason(body: &str) -> String {
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(|message| message.as_str())
+                .map(|message| message.to_string())
+                .or_else(|| {
+                    parsed
+                        .get("error")
+                        .and_then(|error| error.as_str())
+                        .map(|error| error.to_string())
+                })
+                .or_else(|| {
+                    parsed
+                        .get("message")
+                        .and_then(|message| message.as_str())
+                        .map(|message| message.to_string())
+                })
+        })
+        .unwrap_or_else(|| body.trim().to_string());
+    truncate(&message, 300)
 }
 
 fn truncate(s: &str, max: usize) -> String {
