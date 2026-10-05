@@ -133,6 +133,12 @@ pub struct Plan {
     pub goal: String,
     pub steps: Vec<PlanStep>,
     pub reasoning: String,
+    /// Provider and model that produced this plan, when a model did.
+    #[serde(default)]
+    pub answered_by: Option<(String, String)>,
+    /// Providers that were tried and failed before that plan.
+    #[serde(default)]
+    pub failed_over_from: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +246,10 @@ pub struct AgentRun {
     /// The thinking effort this run was asked for, if any.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Set when the answer did not come from the provider that was asked for: the text is a
+    /// fallback's, and a reader deserves to know that before trusting it.
+    #[serde(default)]
+    pub degraded: Option<String>,
 }
 
 impl AgentRun {
@@ -264,6 +274,7 @@ impl AgentRun {
             usage: TokenUsage::default(),
             model_hint: spec.model_hint.clone(),
             reasoning_effort: spec.reasoning_effort,
+            degraded: None,
         }
     }
 

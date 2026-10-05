@@ -1220,6 +1220,20 @@ textarea:focus {
   padding: 3px 6px;
 }
 
+/* ------------------------------------------------------------------ degraded runs */
+
+.degraded-note {
+  font-size: 12px;
+  color: var(--warn, #b26a00);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 1px 6px;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ------------------------------------------------------------------ notices */
 
 .notice {

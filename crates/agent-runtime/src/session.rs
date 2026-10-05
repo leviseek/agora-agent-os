@@ -9,6 +9,22 @@
 use crate::agent_loop::{history_for_model, AgentLoop, PromptContext};
 use crate::context::load_workspace_context;
 use crate::compaction::compaction_window;
+
+/// The built-in stand-in provider. Its answers are recorded like any other turn - the user should
+/// see exactly what happened - but they are kept out of the history handed to a real model, because
+/// a model reading canned placeholder prose copies its phrasing. That is exactly what happened
+/// before this filter existed: a real answer came back sounding like the placeholder.
+const PLACEHOLDER_PROVIDER: &str = "mock";
+
+/// Does this turn carry the placeholder's own wording, whoever the runtime says wrote it?
+pub fn is_placeholder_flavoured(message: &TranscriptMessage) -> bool {
+    message.parts.iter().any(|part| match part {
+        agentos_core::model::ContentPart::Text { text } => {
+            text.contains(agentos_core::PLACEHOLDER_ANSWER_MARKER)
+        }
+        _ => false,
+    })
+}
 use crate::deltas::DeltaPublisher;
 use crate::memory::{episode, recall_context, summary, MemoryStore};
 use agentos_actor_runtime::actor::{Actor, ActorContext, ErasedActor, TypedActor};
@@ -151,6 +167,29 @@ impl SessionActor {
 
     pub fn state_ref(&self) -> &SessionActorState {
         &self.state
+    }
+
+    /// Was this turn written by the built-in placeholder rather than a real model?
+    ///
+    /// Two ways to be one, and both are needed. The transcript records the run behind each reply,
+    /// so a reply from a placeholder-answered run is identified directly. But a real model that
+    /// reads a placeholder answer in its history reproduces it almost verbatim - and that copy is
+    /// attributed to the real model, so attribution alone would leave it in the history and the
+    /// pattern would keep reproducing itself. Hence the content check.
+    fn is_placeholder_turn(&self, message: &TranscriptMessage) -> bool {
+        if let Some(agent_id) = message.agent_id.as_deref() {
+            let answered_by_placeholder = self
+                .state
+                .runs
+                .iter()
+                .find(|run| run.id.as_str() == agent_id)
+                .map(|run| run.provider.as_deref() == Some(PLACEHOLDER_PROVIDER))
+                .unwrap_or(false);
+            if answered_by_placeholder {
+                return true;
+            }
+        }
+        is_placeholder_flavoured(message)
     }
 
     fn persist_session(&self) -> impl std::future::Future<Output = Result<()>> + '_ {
@@ -404,7 +443,14 @@ impl SessionActor {
         // The conversation so far, minus the goal that was just appended: the loop adds the
         // current goal itself, so passing it here would duplicate the newest turn.
         let prior = &self.state.transcript[..self.state.transcript.len().saturating_sub(1)];
-        let history = history_for_model(prior, self.deps.history_messages, self.deps.history_chars);
+        // Placeholder answers are dropped from the model's view: they are not a voice worth
+        // imitating, and a real model that reads them answers in their canned style.
+        let speakable: Vec<TranscriptMessage> = prior
+            .iter()
+            .filter(|message| !self.is_placeholder_turn(message))
+            .cloned()
+            .collect();
+        let history = history_for_model(&speakable, self.deps.history_messages, self.deps.history_chars);
         self.deps
             .bus
             .publish(
@@ -476,7 +522,6 @@ impl SessionActor {
             self.session_id.clone(),
             run.id.as_str().to_string(),
             self.deps.node_id.clone(),
-            120,
         );
         let mut loop_ = AgentLoop::new(self.deps.clone(), self.session_id.clone(), correlation.clone(), token.clone())
             .with_deltas(deltas.sink())
@@ -614,6 +659,9 @@ impl SessionActor {
                 "reasoning_effort": r.reasoning_effort,
                 "final_answer": r.final_answer,
                 "error": r.error,
+                // Set when the answer came from a fallback rather than the provider that was asked
+                // for, so a client can say so instead of presenting it as a clean success.
+                "degraded": r.degraded,
                 "usage": r.usage,
             })).collect::<Vec<_>>(),
             // Session totals are summed from the runs rather than kept beside them: one source of
@@ -801,5 +849,47 @@ impl SessionActorHandle {
 
     pub fn into_erased(self) -> Box<dyn ErasedActor> {
         Box::new(self.inner)
+    }
+}
+
+#[cfg(test)]
+mod placeholder_filter_tests {
+    use super::*;
+    use agentos_core::model::{ContentPart, MessageRole, SessionMessage};
+    use agentos_core::{MessageId, SessionId};
+
+    fn turn(role: MessageRole, text: &str) -> SessionMessage {
+        SessionMessage {
+            id: MessageId::new(),
+            session_id: SessionId::new(),
+            role,
+            parts: vec![ContentPart::Text { text: text.to_string() }],
+            created_at: agentos_core::now_ms(),
+            correlation_id: None,
+            agent_id: None,
+        }
+    }
+
+    #[test]
+    fn the_placeholders_wording_is_recognised_whoever_is_credited_with_it() {
+        // A real model that reads a placeholder answer reproduces it almost word for word. That
+        // copy is credited to the real model, so only a content check catches it - and if it is
+        // not caught, the history keeps teaching the next run to answer the same way.
+        let copied = turn(
+            MessageRole::Assistant,
+            "Acknowledged: 你好. No capability was required, so this is the final answer.",
+        );
+        assert!(is_placeholder_flavoured(&copied));
+    }
+
+    #[test]
+    fn a_real_answer_is_left_alone() {
+        let real = turn(
+            MessageRole::Assistant,
+            "21*2 = 42. I used the calculator capability to be sure.",
+        );
+        assert!(!is_placeholder_flavoured(&real));
+        let question = turn(MessageRole::User, "what is 21*2?");
+        assert!(!is_placeholder_flavoured(&question), "user turns are never filtered");
     }
 }

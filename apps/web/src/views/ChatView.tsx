@@ -22,7 +22,9 @@ function isRunning(state: string): boolean {
   return !TERMINAL_RUN_STATES.has(state);
 }
 
-function runTone(state: string): 'ok' | 'error' | 'warn' | 'info' {
+function runTone(state: string, degraded?: string | null): 'ok' | 'error' | 'warn' | 'info' {
+  // A run answered by a fallback is not a clean success, whatever its state says.
+  if (degraded !== undefined && degraded !== null && degraded.length > 0) return 'warn';
   if (state === 'succeeded') return 'ok';
   if (state === 'failed') return 'error';
   if (state === 'cancelled') return 'warn';
@@ -238,7 +240,14 @@ export function ChatView() {
             return (
               <article className="run" key={run.agent_id}>
                 <header className="run-head">
-                  <Badge tone={runTone(run.state)}>{tState(run.state)}</Badge>
+                  <Badge tone={runTone(run.state, run.degraded)}>{tState(run.state)}</Badge>
+                  {run.degraded !== undefined && run.degraded !== null && run.degraded.length > 0 ? (
+                    // Said plainly, next to the answer: this text is a fallback's, not the model's
+                    // that was asked for. Hiding it is how a canned answer looks like a real one.
+                    <span className="degraded-note" title={run.degraded}>
+                      {t('chat.degraded', { reason: run.degraded })}
+                    </span>
+                  ) : null}
                   <span className="muted small">{t('chat.runLabel', { id: run.agent_id })}</span>
                   {answeredBy !== null ? (
                     isPlaceholderProvider(answeredBy) ? (

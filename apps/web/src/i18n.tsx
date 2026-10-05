@@ -294,6 +294,7 @@ const en = {
   'chat.effortMedium': 'medium',
   'chat.effortHigh': 'high',
   'chat.effortLabel': 'thinking: {effort}',
+  'chat.degraded': 'fallback answer — {reason}',
   'approvals.title': 'Approvals',
   'approvals.subtitle': '{n} call(s) waiting for a decision',
   'approvals.hint':
@@ -795,6 +796,7 @@ const zh: Partial<Record<MessageKey, string>> = {
   'chat.effortMedium': '中',
   'chat.effortHigh': '高',
   'chat.effortLabel': '思考：{effort}',
+  'chat.degraded': '回退作答 — {reason}',
   'approvals.title': '审批',
   'approvals.subtitle': '{n} 个调用等待决策',
   'approvals.hint':

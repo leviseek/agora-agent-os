@@ -263,7 +263,92 @@ impl SessionManager {
         }
     }
 
-    /// Reconstruct a session actor from what is durable: its record and its runs.
+    
+/// The runtime view of a session that has no live actor, spelled exactly like the actor's own
+/// status so a client cannot tell the difference - except that `active_run` is always null.
+fn durable_status_json(session: &SessionId, state: &SessionActorState) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session.as_str(),
+        "state": state.session.state.as_str(),
+        "title": state.session.title,
+        "messages": state.transcript.len(),
+        "goals_handled": state.goals_handled,
+        "active_run": serde_json::Value::Null,
+        "runs": state
+            .runs
+            .iter()
+            .map(|run| serde_json::json!({
+                "agent_id": run.id.as_str(),
+                "state": run.state.as_str(),
+                "goal": run.goal,
+                "steps": run.steps.len(),
+                "provider": run.provider,
+                "model": run.model,
+                "model_hint": run.model_hint,
+                "reasoning_effort": run.reasoning_effort,
+                "final_answer": run.final_answer,
+                "error": run.error,
+                "degraded": run.degraded,
+                "usage": run.usage,
+            }))
+            .collect::<Vec<_>>(),
+        "compaction_usage": state.compaction_usage,
+        "compacted_through": state.compacted_through,
+        "usage": state.runs.iter().fold(state.compaction_usage, |mut total, run| {
+            total.add(&run.usage);
+            total
+        }),
+        "graphs": Vec::<serde_json::Value>::new(),
+        // Said out loud: this view was rebuilt from durable facts, not read from a live actor.
+        "rebuilt_from_history": true,
+    })
+}
+
+/// The same shape the actor returns for a transcript, rebuilt from durable facts.
+fn durable_transcript_json(
+    state: &SessionActorState,
+    limit: Option<usize>,
+) -> serde_json::Value {
+    let all = &state.transcript;
+    let start = match limit {
+        Some(limit) if limit > 0 && all.len() > limit => all.len() - limit,
+        _ => 0,
+    };
+    serde_json::json!({
+        "messages": &all[start..],
+        "total": all.len(),
+        "truncated": start > 0,
+    })
+}
+
+/// A checkpoint built from rebuilt state, for an actor that has to be brought back without one.
+    ///
+    /// Nothing is replayed: the state already contains every durable fact, so the event offset is
+    /// where the log currently ends.
+    async fn synthetic_checkpoint(
+        &self,
+        actor_id: &ActorId,
+        session: &SessionId,
+        state: &SessionActorState,
+    ) -> Result<Checkpoint> {
+        Ok(Checkpoint {
+            meta: CheckpointMeta {
+                id: agentos_core::CheckpointId::new(),
+                actor_id: actor_id.clone(),
+                session_id: session.clone(),
+                generation: 0,
+                applied_seq: 0,
+                event_offset: self.bus.last_seq().await.unwrap_or(0),
+                bytes: 0,
+                state_hash: String::new(),
+                domain_version: agentos_core::DOMAIN_VERSION.to_string(),
+                created_at: now_ms(),
+            },
+            state: serde_json::to_value(state)?,
+        })
+    }
+
+/// Reconstruct a session actor from what is durable: its record and its runs.
     async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActorState>> {
         let record = self
             .session_collection()

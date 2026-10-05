@@ -183,6 +183,18 @@ pub struct AgentLoopOutcome {
     pub graph_id: Option<TaskId>,
 }
 
+/// What the run answered with, and who answered it.
+///
+/// The provenance travels with the text because the two are only useful together: a caller that
+/// shows an answer without saying where it came from cannot tell a real reply from a fallback.
+pub struct FinalAnswer {
+    pub text: String,
+    /// Provider and model of the response the text came from, when a model produced it.
+    pub answered_by: Option<(String, String)>,
+    /// Providers that were tried and failed before that response.
+    pub failed_over_from: Vec<String>,
+}
+
 pub struct AgentLoop {
     deps: Arc<SessionDeps>,
     session_id: agentos_core::SessionId,
@@ -423,6 +435,24 @@ impl AgentLoop {
         let answer = self
             .finalise(goal, &plan, &observations, context, &meter, tools)
             .await?;
+        // Whoever actually produced the text is who the run is credited to. The plan's provider is
+        // not it: a failover between the two calls is exactly how a fallback answer used to be
+        // presented as the preferred model's work.
+        if let Some((provider, model)) = &answer.answered_by {
+            run.provider = Some(provider.clone());
+            run.model = Some(model.clone());
+        }
+        if !answer.failed_over_from.is_empty() {
+            run.degraded = Some(format!(
+                "{} answered after {}",
+                answer
+                    .answered_by
+                    .as_ref()
+                    .map(|(provider, _)| provider.clone())
+                    .unwrap_or_else(|| "a fallback".into()),
+                answer.failed_over_from.join(" | ")
+            ));
+        }
         run.usage = meter.snapshot();
         steps += 1;
         Self::push_step(run, AgentStep {
@@ -435,12 +465,12 @@ impl AgentLoop {
             duration_ms: now_ms().saturating_sub(final_started),
             correlation_id: Some(agentos_core::CorrelationId::new()),
         });
-        run.final_answer = Some(answer.clone());
+        run.final_answer = Some(answer.text.clone());
 
         // The turn record is written by the session actor once the run settles: it knows the goal,
         // the outcome and whether the run failed, so one record per turn is enough. Writing a
         // second, near-identical record here only made recall see everything twice.
-        Ok(AgentLoopOutcome { answer, steps, plan: run.plan.clone(), graph_id: Some(graph_id) })
+        Ok(AgentLoopOutcome { answer: answer.text, steps, plan: run.plan.clone(), graph_id: Some(graph_id) })
     }
 
     async fn plan(
@@ -515,7 +545,16 @@ impl AgentLoop {
                     input: serde_json::json!({ "content": response.content }),
                     depends_on: vec![],
                 }],
+                answered_by: Some((response.provider.clone(), response.model.clone())),
+                failed_over_from: response.failed_over_from.clone(),
             });
+        let mut plan = plan;
+        // The plan carries its own provenance, so an answer that came out of planning can still say
+        // where it came from.
+        if plan.answered_by.is_none() {
+            plan.answered_by = Some((response.provider.clone(), response.model.clone()));
+            plan.failed_over_from = response.failed_over_from.clone();
+        }
         Ok((plan, Answerer { provider: response.provider, model: response.model }))
     }
 
@@ -584,19 +623,29 @@ impl AgentLoop {
         context: PromptContext<'_>,
         meter: &UsageMeter,
         tools: Vec<ToolSpec>,
-    ) -> Result<String> {
-        // A respond step with a concrete answer short-circuits the second model call.
+    ) -> Result<FinalAnswer> {
+        // A respond step with a concrete answer short-circuits the second model call. The text came
+        // from the planning call, so that call is what the answer is credited to.
         if let Some(step) = plan.steps.iter().find(|s| s.kind == PlanStepKind::Respond) {
             if let Some(content) = step.input.get("content").and_then(|c| c.as_str()) {
                 if !content.trim().is_empty() && observations.is_empty() {
-                    return Ok(content.to_string());
+                    return Ok(FinalAnswer {
+                        text: content.to_string(),
+                        answered_by: plan.answered_by.clone(),
+                        failed_over_from: plan.failed_over_from.clone(),
+                    });
                 }
             }
         }
 
         if let Some((_, value)) = observations.iter().find(|(title, _)| title.to_lowercase().contains("answer")) {
             if let Some(text) = value.get("content").and_then(|c| c.as_str()) {
-                return Ok(text.to_string());
+                // Produced by a capability, not by a model: no provider to credit.
+                return Ok(FinalAnswer {
+                    text: text.to_string(),
+                    answered_by: None,
+                    failed_over_from: vec![],
+                });
             }
         }
 
@@ -617,10 +666,11 @@ impl AgentLoop {
                 ));
             }
         }
-        // The final answer is the one a user watches arrive, so it is the call that streams.
-        let mut request = ModelRequest::new(ModelTask::Summarize, messages)
-            .with_tools(tools)
-            .with_json();
+        // The final answer is the one a user watches arrive, so it is the call that streams - and
+        // it is prose. Asking for JSON mode here was a real bug: DeepSeek rejects json_object
+        // unless the prompt contains the word "json" (the planning prompt does, this one does not),
+        // so every answer fell through to the fallback provider and arrived in one canned lump.
+        let mut request = ModelRequest::new(ModelTask::Summarize, messages).with_tools(tools);
         request.reasoning_effort = self.spec.reasoning_effort;
         request.model_hint = self.spec.model_hint.clone();
         let response = match &self.deltas {
@@ -630,15 +680,24 @@ impl AgentLoop {
         match response {
             Ok(r) => {
                 meter.record(&r.usage);
-                if !r.content.trim().is_empty() {
-                    return Ok(r.content);
+                if r.content.trim().is_empty() {
+                    return Err(RuntimeError::model("the model returned an empty final answer"));
                 }
-                Err(RuntimeError::model("the model returned an empty final answer"))
+                Ok(FinalAnswer {
+                    text: r.content,
+                    answered_by: Some((r.provider, r.model)),
+                    failed_over_from: r.failed_over_from,
+                })
             }
             Err(e) => {
                 // Degrade gracefully: return the best observation we have instead of failing the run.
+                // The answer is then not a model's at all, and it says so.
                 if let Some((title, value)) = observations.last() {
-                    Ok(format!("{title}: {value}"))
+                    Ok(FinalAnswer {
+                        text: format!("{title}: {value}"),
+                        answered_by: None,
+                        failed_over_from: vec![e.to_string()],
+                    })
                 } else {
                     Err(e)
                 }
@@ -706,6 +765,9 @@ fn parse_plan(goal: &str, value: &serde_json::Value) -> Option<Plan> {
             .unwrap_or("model supplied plan")
             .to_string(),
         steps,
+        // Filled in by the caller, which is the only place that has seen the response.
+        answered_by: None,
+        failed_over_from: vec![],
     })
 }
 
