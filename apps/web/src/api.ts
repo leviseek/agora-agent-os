@@ -838,9 +838,12 @@ export class AgentOsClient {
     images: string[] = [],
     model?: string,
     effort?: string,
+    attachments: string[] = [],
   ): Promise<PostMessageResponse> {
     const json: Record<string, unknown> = { text, wait };
     if (images.length > 0) json.images = images;
+    // Artifact ids from upload() - how a browser attaches an image it cannot put in the workspace.
+    if (attachments.length > 0) json.attachments = attachments;
     // A one-off choice for this goal only; the session keeps whatever it had.
     if (model !== undefined && model.length > 0) json.model = model;
     if (effort !== undefined && effort.length > 0) json.effort = effort;
@@ -874,6 +877,37 @@ export class AgentOsClient {
   /** The URL of an artifact's bytes, for rendering an image the transcript refers to. */
   artifactUrl(id: string): string {
     return this.baseUrl.replace(/\/$/, '') + '/v1/artifacts/' + encodeURIComponent(id);
+  }
+
+  /**
+   * Upload an image and get back an attachment to name in a goal.
+   *
+   * The body is the file itself rather than JSON, so a 5 MiB screenshot does not become 7 MiB of
+   * base64 on the way. The name travels in a header the runtime reads; the content type is a hint,
+   * because the runtime decides the type by the bytes.
+   */
+  async upload(
+    sessionId: string,
+    file: File,
+  ): Promise<{ artifact_id: string; name: string; content_type: string; bytes: number }> {
+    const headers = new Headers({ Accept: 'application/json' });
+    if (this.token !== null && this.token.length > 0) {
+      headers.set('Authorization', 'Bearer ' + this.token);
+    }
+    headers.set('Content-Type', file.type.length > 0 ? file.type : 'application/octet-stream');
+    // Non-ASCII file names have to survive the trip; the runtime strips any path part.
+    headers.set('X-AgentOS-Filename', encodeURIComponent(file.name));
+    const response = await fetch(
+      this.url('/v1/sessions/' + encodeURIComponent(sessionId) + '/attachments'),
+      { method: 'POST', headers, body: file },
+    );
+    if (!response.ok) throw await readError(response);
+    return (await response.json()) as {
+      artifact_id: string;
+      name: string;
+      content_type: string;
+      bytes: number;
+    };
   }
 
   cancelSession(id: string): Promise<CancelResponse> {

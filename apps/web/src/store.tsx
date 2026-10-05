@@ -74,6 +74,14 @@ export interface AttachedImage {
   mime: string;
 }
 
+/** One image the runtime has accepted and stored, ready to be named in a goal. */
+export interface UploadedAttachment {
+  artifact_id: string;
+  name: string;
+  content_type: string;
+  bytes: number;
+}
+
 export interface AppStoreValue {
   baseUrl: string;
   token: string;
@@ -142,7 +150,22 @@ export interface AppStoreValue {
   selectSession: (id: string | null) => void;
   refreshDetail: (id?: string) => Promise<void>;
   closeSession: (id: string) => Promise<void>;
-  sendGoal: (text: string, wait: boolean, images?: string[]) => Promise<PostMessageResponse | null>;
+  sendGoal: (
+    text: string,
+    wait: boolean,
+    images?: string[],
+    attachments?: string[],
+  ) => Promise<PostMessageResponse | null>;
+  /**
+   * Upload images and get back the attachments to name in the next goal.
+   *
+   * A browser cannot write into the runtime's workspace, so naming a path is not an option: the
+   * bytes go to the runtime, which verifies them by content and hands back an artifact id.
+   */
+  uploadAttachments: (
+    sessionId: string,
+    files: File[],
+  ) => Promise<{ uploaded: UploadedAttachment[]; failed: { name: string; reason: string }[] }>;
   cancelRun: () => Promise<void>;
   clearEvents: () => void;
   clearActionError: () => void;
@@ -598,7 +621,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const sendGoal = useCallback(
-    async (text: string, wait: boolean, images: string[] = []): Promise<PostMessageResponse | null> => {
+    async (
+      text: string,
+      wait: boolean,
+      images: string[] = [],
+      attachments: string[] = [],
+    ): Promise<PostMessageResponse | null> => {
       const id = selectedRef.current;
       setActionError(null);
       if (id === null) {
@@ -607,7 +635,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       setBusy(true);
       try {
-        const response = await clientRef.current.postMessage(id, text, wait, images);
+        const response = await clientRef.current.postMessage(
+        id,
+        text,
+        wait,
+        images,
+        undefined,
+        undefined,
+        attachments,
+      );
         await refreshDetail(id);
         await refreshSessions();
         return response;
@@ -619,6 +655,38 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     },
     [refreshDetail, refreshSessions],
+  );
+
+  /**
+   * Upload files one at a time and report per file what happened.
+   *
+   * One failure must not lose the others: a user who dropped four screenshots and has one
+   * unsupported file should still be able to send the three that worked.
+   */
+  const uploadAttachments = useCallback(
+    async (
+      sessionId: string,
+      files: File[],
+    ): Promise<{ uploaded: UploadedAttachment[]; failed: { name: string; reason: string }[] }> => {
+      const uploaded: UploadedAttachment[] = [];
+      const failed: { name: string; reason: string }[] = [];
+      for (const file of files) {
+        try {
+          const record = await clientRef.current.upload(sessionId, file);
+          uploaded.push({
+            artifact_id: record.artifact_id,
+            name: record.name,
+            content_type: record.content_type,
+            bytes: record.bytes,
+          });
+        } catch (cause) {
+          const error = toApiError(cause);
+          failed.push({ name: file.name, reason: error.message });
+        }
+      }
+      return { uploaded, failed };
+    },
+    [],
   );
 
   const cancelRun = useCallback(async (): Promise<void> => {
@@ -705,6 +773,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       refreshDetail,
       closeSession,
       sendGoal,
+      uploadAttachments,
       cancelRun,
       clearEvents,
       clearActionError,
@@ -757,6 +826,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       refreshDetail,
       closeSession,
       sendGoal,
+      uploadAttachments,
       cancelRun,
       clearEvents,
       clearActionError,

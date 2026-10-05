@@ -1,7 +1,7 @@
 /** View 3 - Chat: the session transcript (runs + live events) and the goal box. */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { DragEvent, FormEvent } from 'react';
 import { ApiErrorBanner, Badge, EmptyState, JsonBlock, Panel } from '../components';
 import { formatTime } from '../format';
 import { useSessionEvents } from '../hooks';
@@ -15,6 +15,26 @@ function isPlaceholderProvider(provider: string): boolean {
 import { useNav } from '../navigation';
 import { useApp } from '../store';
 import type { EventRecord, RunSummary } from '../api';
+
+/** What the runtime accepts. The decision is by content, but the picker should not offer more. */
+const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp';
+
+/**
+ * One file on its way to the runtime.
+ *
+ * `uploading` exists so the composer never lies: a drop that has not landed yet must not look
+ * ready, and a file the runtime refused has to say why instead of disappearing.
+ */
+interface PendingAttachment {
+  key: string;
+  name: string;
+  status: 'uploading' | 'ready' | 'error';
+  previewUrl: string | null;
+  artifactId?: string;
+  error?: string;
+}
+
+let attachmentKey = 0;
 
 const TERMINAL_RUN_STATES = new Set(['succeeded', 'failed', 'cancelled']);
 
@@ -70,6 +90,7 @@ export function ChatView() {
     artifactUrl,
     modelOptions,
     configureSession,
+    uploadAttachments,
   } = useApp();
   const { setView } = useNav();
   const session = useSessionEvents(selectedSessionId, 200);
@@ -78,6 +99,12 @@ export function ChatView() {
   // Workspace-relative image paths, comma separated. Attachments are read by the runtime through
   // the workspace jail, so this box can only name files the runtime is allowed to read.
   const [imagePaths, setImagePaths] = useState('');
+  // Files dropped, pasted or picked. They are uploaded straight away and named as artifact ids when
+  // the goal is sent: a browser cannot write into the runtime's workspace, which is why "type the
+  // path in" was never going to work for a screenshot.
+  const [pending, setPending] = useState<PendingAttachment[]>([]);
+  const [dropping, setDropping] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // The session's stored choice, edited in place. Changing it PATCHes the session, so the next
   // goal (and every goal after) uses it; a one-off override is available through the API.
   const sessionModel = detail === null ? '' : detail.session.model_hint ?? '';
@@ -127,6 +154,75 @@ export function ChatView() {
   const streaming = activeRun !== undefined && isRunning(activeRun.state);
   const selected = sessions.find((item) => item.id === selectedSessionId) ?? null;
 
+  /**
+   * Upload everything that was dropped, pasted or picked, and keep the failures visible.
+   *
+   * The upload starts the moment the file arrives rather than on submit: a 4 MiB screenshot takes a
+   * moment, and doing it at send time would freeze the button with no explanation.
+   */
+  const acceptFiles = useCallback(
+    async (files: File[]): Promise<void> => {
+      const session = selectedSessionId;
+      if (session === null || files.length === 0) return;
+      const accepted = files.filter((file) => file.size > 0);
+      const items: PendingAttachment[] = accepted.map((file) => ({
+        key: 'att-' + ++attachmentKey,
+        name: file.name.length > 0 ? file.name : 'pasted image',
+        status: 'uploading',
+        // A blob URL renders the thumbnail before the bytes have made the round trip.
+        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+      }));
+      if (items.length === 0) return;
+      setPending((current) => [...current, ...items]);
+      const { uploaded, failed } = await uploadAttachments(session, accepted);
+      setPending((current) =>
+        current.map((item) => {
+          const index = items.findIndex((candidate) => candidate.key === item.key);
+          if (index < 0) return item;
+          const stored = uploaded[index];
+          if (stored !== undefined) {
+            return { ...item, status: 'ready', artifactId: stored.artifact_id, name: stored.name };
+          }
+          const refusal = failed[index] ?? { name: item.name, reason: 'upload failed' };
+          return { ...item, status: 'error', error: refusal.reason };
+        }),
+      );
+    },
+    [selectedSessionId, uploadAttachments],
+  );
+
+  const removeAttachment = (key: string): void => {
+    setPending((current) => {
+      const item = current.find((candidate) => candidate.key === key);
+      if (item?.previewUrl !== null && item?.previewUrl !== undefined) {
+        URL.revokeObjectURL(item.previewUrl);
+      }
+      return current.filter((candidate) => candidate.key !== key);
+    });
+  };
+
+  // Switching session drops what was staged: an uploaded image belongs to the session it was
+  // uploaded to, and sending it to another one would attach something the runtime never stored.
+  useEffect(() => {
+    setPending([]);
+  }, [selectedSessionId]);
+
+  const onDrop = async (event: DragEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    setDropping(false);
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    await acceptFiles(files);
+  };
+
+  const onPaste = async (event: React.ClipboardEvent<HTMLFormElement>): Promise<void> => {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    // Only take over the paste when it actually carries files: pasting text into the goal box is
+    // how most people write a goal.
+    event.preventDefault();
+    await acceptFiles(files);
+  };
+
   const onSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const text = goal.trim();
@@ -136,9 +232,20 @@ export function ChatView() {
       .split(',')
       .map((path) => path.trim())
       .filter((path) => path.length > 0);
-    const response = await sendGoal(text, wait, images);
+    const attachmentIds = pending
+      .filter((item) => item.status === 'ready' && item.artifactId !== undefined)
+      .map((item) => item.artifactId as string);
+    const response = await sendGoal(text, wait, images, attachmentIds);
     if (images.length > 0) {
       setImagePaths('');
+    }
+    if (attachmentIds.length > 0) {
+      setPending((current) => {
+        for (const item of current) {
+          if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+        }
+        return current.filter((item) => item.status !== 'ready');
+      });
     }
     if (response === null) return;
     setGoal('');
@@ -350,8 +457,23 @@ export function ChatView() {
         </div>
       </Panel>
 
-      <Panel title={t('chat.send')} subtitle="POST /v1/sessions/{id}/messages">
-        <form className="chat-form" onSubmit={(event) => void onSubmit(event)}>
+      <Panel title={t('chat.send')} subtitle="POST /v1/sessions/{id}/messages + /attachments">
+        <form
+          className={dropping ? 'chat-form chat-form-dropping' : 'chat-form'}
+          onSubmit={(event) => void onSubmit(event)}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDropping(true);
+          }}
+          onDragLeave={(event) => {
+            // Leaving for a child element fires dragleave on the form; only a real exit ends the
+            // highlight, or the whole composer flickers while the pointer crosses a button.
+            if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+            setDropping(false);
+          }}
+          onDrop={(event) => void onDrop(event)}
+          onPaste={(event) => void onPaste(event)}
+        >
           <div className="model-row">
             <label>
               <span>{t('chat.model')}</span>
@@ -393,6 +515,63 @@ export function ChatView() {
             placeholder={t('chat.placeholder')}
             onChange={(event) => setGoal(event.target.value)}
           />
+          {pending.length > 0 ? (
+            <div className="attachment-queue">
+              {pending.map((item) => (
+                <div
+                  className={'attachment-chip attachment-' + item.status}
+                  key={item.key}
+                  title={item.error ?? item.name}
+                >
+                  {item.previewUrl !== null ? (
+                    <img src={item.previewUrl} alt={item.name} />
+                  ) : (
+                    <span className="attachment-glyph" aria-hidden="true">
+                      🖼
+                    </span>
+                  )}
+                  <span className="attachment-name">{item.name}</span>
+                  {item.status === 'uploading' ? (
+                    <span className="muted small">{t('chat.uploading', { name: item.name })}</span>
+                  ) : null}
+                  {item.status === 'error' ? (
+                    <span className="attachment-error">{item.error ?? ''}</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="attachment-remove"
+                    title={t('chat.removeAttachment', { name: item.name })}
+                    onClick={() => removeAttachment(item.key)}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="attach-row">
+            <button
+              type="button"
+              className="btn btn-ghost btn-small"
+              disabled={connection !== 'online'}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              📎 {t('chat.attach')}
+            </button>
+            <span className="muted small">{t('chat.dropHint')}</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={IMAGE_TYPES}
+              multiple
+              hidden
+              onChange={(event) => {
+                void acceptFiles(Array.from(event.target.files ?? []));
+                // Reset so picking the same file twice still fires a change event.
+                event.target.value = '';
+              }}
+            />
+          </div>
           <input
             type="text"
             className="image-paths"
