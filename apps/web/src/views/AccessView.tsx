@@ -52,7 +52,7 @@ export function AccessView() {
     requestAccess,
     decideWorkspaceAccess,
     requestWorkspaceAccess,
-    workspaces,
+    discoverableWorkspaces,
     sessions,
     selectSession,
     selectWorkspace,
@@ -68,17 +68,15 @@ export function AccessView() {
     if (connection === 'online') void refreshAccessInbox();
   }, [connection, refreshAccessInbox]);
 
-  // Workspaces this person has no role in, and (for records written before workspaces existed)
-  // sessions with no role either. An admin holds every right already, so those are not askable.
+  // Workspaces this person has no role in (the discovery index), and - for records written before
+  // workspaces existed - sessions with no role either. An admin holds every right already.
   const askable = useMemo<AskTarget[]>(() => {
-    const fromWorkspaces: AskTarget[] = workspaces
-      .filter((entry) => (entry.workspace_role ?? null) === null && !entry.can.includes('read'))
-      .map((entry) => ({
-        key: 'ws:' + entry.workspace.id,
-        kind: 'workspace' as const,
-        id: entry.workspace.id,
-        label: entry.workspace.name,
-      }));
+    const fromWorkspaces: AskTarget[] = discoverableWorkspaces.map((entry) => ({
+      key: 'ws:' + entry.id,
+      kind: 'workspace' as const,
+      id: entry.id,
+      label: entry.name,
+    }));
     const fromSessions: AskTarget[] = sessions
       .filter((session) => (session.my_role ?? null) === null && (session.workspace_id ?? null) === null)
       .map((session) => ({
@@ -88,7 +86,7 @@ export function AccessView() {
         label: session.title,
       }));
     return [...fromWorkspaces, ...fromSessions];
-  }, [sessions, workspaces]);
+  }, [discoverableWorkspaces, sessions]);
 
   useEffect(() => {
     if (target === '' && askable.length > 0) {

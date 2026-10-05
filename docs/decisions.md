@@ -305,3 +305,16 @@ directory; discovery shares knowledge, not state.
 指向一个只存在于来源节点的 id 会让会话无主。这样「这个工作区的数据」在存储、工作区目录、归档根三处对齐。
 `archiving_writes_a_package_and_restoring_brings_it_back` 新增两条断言钉住：包的父目录名等于会话的 `workspace_id`，
 且清单里的 `workspace_id` 与之一致。
+
+**后续（可见性与远程调用收口，2026-10-05）。**
+1. **工作区可见性分两类**：`GET /v1/workspaces` 的 `workspaces` 只含调用者有角色的（或 admin 的全部），
+   `discoverable` 是其余工作区的**索引**（id / 名称 / 所有者 / 会话数）——人无法为一个叫不出名字的东西申请访问，
+   所以"存在"可见；成员名单与申请记录不可见。两份列表都不是权限：读、写、成员变更仍由守卫判定。
+   控制台据此把「本节点上的其他工作区」独立成面板，带"申请访问"。
+2. **远程能力调用携带调用者**：`CapabilityTransport::call` 增加 `caller: &CallerContext`，
+   `GrpcCapabilityTransport` 把 `session_id` / `actor_id` / `task_id` / `workspace_id` 全部写进 `InvokeRequest`
+   （此前该缝只传 endpoint/能力/输入，连会话都没有，等于远程一跳就能离开工作区）。`tests/tests/grpc.rs` 新增断言：
+   命名工作区的远程 `filesystem-read` 能读到该工作区目录里的文件，不命名工作区的同一调用得到 `not_found`。
+3. **控制台不再有会话级授权入口**：删掉未被引用的 `RequestAccessForm` / `AccessRequests`
+   （它们按会话口径写文案，留着迟早被接上去），会话详情新增一行「此角色来自工作区 X / 打开工作区」，
+   成员编辑只在工作区视图。

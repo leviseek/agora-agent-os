@@ -436,6 +436,8 @@ export interface SessionAccess {
   roles: string[];
   /** owner, editor, participant, viewer - or null when they have no role at all. */
   session_role: string | null;
+  /** The workspace this role comes from, when the session has one. */
+  workspace_id?: string | null;
   can: string[];
 }
 
@@ -530,8 +532,25 @@ export interface WorkspaceSummary {
 }
 
 export interface WorkspacesResponse {
+  /** The workspaces this caller has a role in: the full record, with members and requests. */
   workspaces: WorkspaceSummary[];
+  /**
+   * An index of the rest: a name, an owner and a session count, and nothing else.
+   *
+   * A person cannot ask for access to something they cannot name, so the existence of a workspace is
+   * visible; who is in it and who has asked is not.
+   */
+  discoverable?: WorkspaceIndex[];
   total: number;
+}
+
+/** One entry in the discovery index: enough to find a workspace and ask about it. */
+export interface WorkspaceIndex {
+  id: string;
+  name: string;
+  owner: { user_id: string; node_id?: string | null };
+  created_at: number;
+  session_count: number;
 }
 
 export interface WorkspaceDetail extends WorkspaceSummary {

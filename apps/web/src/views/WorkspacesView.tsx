@@ -36,6 +36,7 @@ export function WorkspacesView() {
   const {
     connection,
     workspaces,
+    discoverableWorkspaces,
     workspacesError,
     workspacesLoading,
     refreshWorkspaces,
@@ -45,6 +46,7 @@ export function WorkspacesView() {
     selectWorkspace,
     grantWorkspaceAccess,
     revokeWorkspaceAccess,
+    requestWorkspaceAccess,
     sessions,
     selectSession,
     busy,
@@ -57,6 +59,7 @@ export function WorkspacesView() {
   const [memberUser, setMemberUser] = useState('');
   const [memberNode, setMemberNode] = useState('');
   const [memberRole, setMemberRole] = useState('participant');
+  const [askRole, setAskRole] = useState('participant');
 
   useEffect(() => {
     if (connection === 'online') void refreshWorkspaces();
@@ -213,6 +216,65 @@ export function WorkspacesView() {
           </table>
         )}
       </Panel>
+
+      {discoverableWorkspaces.length > 0 ? (
+        <Panel
+          title={t('workspaces.discoverTitle')}
+          subtitle={t('workspaces.discoverHint')}
+          actions={
+            <label className="field field-inline">
+              <span>{t('workspaces.askRole')}</span>
+              <select value={askRole} onChange={(event) => setAskRole(event.target.value)}>
+                <option value="viewer">{t('sessions.role.viewer')}</option>
+                <option value="participant">{t('sessions.role.participant')}</option>
+                <option value="editor">{t('sessions.role.editor')}</option>
+              </select>
+            </label>
+          }
+        >
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('workspaces.name')}</th>
+                <th>{t('workspaces.owner')}</th>
+                <th>{t('workspaces.sessions')}</th>
+                <th>{t('workspaces.created')}</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {discoverableWorkspaces.map((entry) => (
+                <tr key={entry.id}>
+                  <td>
+                    {entry.name}
+                    <div className="muted small mono">{entry.id}</div>
+                  </td>
+                  <td className="mono">
+                    {entry.owner.node_id == null || entry.owner.node_id === ''
+                      ? entry.owner.user_id
+                      : entry.owner.user_id + '@' + entry.owner.node_id}
+                  </td>
+                  <td>{entry.session_count}</td>
+                  <td className="muted small">{formatDateTime(entry.created_at)}</td>
+                  <td className="cell-actions">
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      disabled={busy}
+                      onClick={async () => {
+                        const ok = await requestWorkspaceAccess(entry.id, askRole);
+                        if (ok) await refreshWorkspaces();
+                      }}
+                    >
+                      {t('workspaces.ask')}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      ) : null}
 
       {selected !== null ? (
         <Panel

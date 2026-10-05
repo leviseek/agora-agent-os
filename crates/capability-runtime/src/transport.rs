@@ -12,12 +12,16 @@ pub trait CapabilityTransport: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     /// Unary call. Implementations must honour the timeout themselves so they can produce a
     /// transport-specific error before the mesh deadline fires.
+    ///
+    /// `caller` travels with the call, so a capability that executes somewhere else is jailed and
+    /// narrowed exactly as a local one: without it a remote hop was the way out of a workspace.
     async fn call(
         &self,
         endpoint: &str,
         capability: &str,
         version: &str,
         input: serde_json::Value,
+        caller: &crate::capability::CallerContext,
         timeout_ms: u64,
     ) -> Result<serde_json::Value>;
 }
@@ -57,6 +61,7 @@ impl CapabilityTransport for LocalTransport {
         capability: &str,
         _version: &str,
         input: serde_json::Value,
+        _caller: &crate::capability::CallerContext,
         _timeout_ms: u64,
     ) -> Result<serde_json::Value> {
         let handler = self.handlers.read().get(capability).cloned();

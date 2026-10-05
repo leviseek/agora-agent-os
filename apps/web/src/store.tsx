@@ -25,6 +25,7 @@ import type {
   SessionDetail,
   SessionSummary,
   WorkspaceCapabilitiesResponse,
+  WorkspaceIndex,
   WorkspaceRecord,
   WorkspaceSummary,
 } from './api';
@@ -232,6 +233,8 @@ export interface AppStoreValue {
   sessionsLoading: boolean;
   /** Every workspace, with the caller's own role on each. */
   workspaces: WorkspaceSummary[];
+  /** Workspaces this caller has no role in: a name to ask about, never the member list. */
+  discoverableWorkspaces: WorkspaceIndex[];
   workspacesError: ApiError | null;
   workspacesLoading: boolean;
   refreshWorkspaces: () => Promise<void>;
@@ -402,6 +405,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [discoverableWorkspaces, setDiscoverableWorkspaces] = useState<WorkspaceIndex[]>([]);
   const [workspacesError, setWorkspacesError] = useState<ApiError | null>(null);
   const [workspacesLoading, setWorkspacesLoading] = useState(false);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
@@ -596,6 +600,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       const response = await active.listWorkspaces();
       setWorkspaces(response.workspaces);
+      setDiscoverableWorkspaces(response.discoverable ?? []);
       setWorkspacesError(null);
     } catch (cause) {
       setWorkspacesError(toApiError(cause));
@@ -1446,6 +1451,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsError,
       sessionsLoading,
       workspaces,
+      discoverableWorkspaces,
       workspacesError,
       workspacesLoading,
       refreshWorkspaces,
@@ -1541,6 +1547,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessionsError,
       sessionsLoading,
       workspaces,
+      discoverableWorkspaces,
       workspacesError,
       workspacesLoading,
       refreshWorkspaces,

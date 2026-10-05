@@ -2796,6 +2796,28 @@ async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
     // Bob has no role: he cannot look inside it...
     let (status, _) = h.get_as(Some("bob-token"), &format!("/v1/workspaces/{ws}")).await;
     assert_eq!(status, 403);
+    // ...it is not in his own list...
+    let (_, bob_list) = h.get_as(Some("bob-token"), "/v1/workspaces").await;
+    assert!(
+        bob_list["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["workspace"]["id"] != json!(ws)),
+        "a list holds only what the caller has a role in: {bob_list}"
+    );
+    // ...but he can see that it exists, because nobody can ask for access to something they cannot
+    // name. The index is a name, an owner and a count - never the member list, and never the requests.
+    let entry = bob_list["discoverable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == json!(ws))
+        .unwrap_or_else(|| panic!("a name to ask about: {bob_list}"));
+    assert_eq!(entry["name"], "project");
+    assert_eq!(entry["owner"]["user_id"], "alice");
+    assert!(entry.get("grants").is_none(), "the index carries no members: {entry}");
+    assert!(entry.get("access_requests").is_none(), "{entry}");
     // ...nor start a conversation in it...
     let (status, _) = h
         .post_as(Some("bob-token"), &format!("/v1/workspaces/{ws}/sessions"), json!({ "title": "mine" }))
@@ -2848,6 +2870,24 @@ async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
     assert_eq!(status, 200, "the approval handed out the workspace role: {body}");
     assert_eq!(body["you"]["session_role"], "participant");
     assert_eq!(body["you"]["workspace_id"], json!(ws));
+    // And now it is his list rather than an entry in the index.
+    let (_, bob_list) = h.get_as(Some("bob-token"), "/v1/workspaces").await;
+    assert!(
+        bob_list["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["workspace"]["id"] == json!(ws)),
+        "a granted role moves the workspace into his own list: {bob_list}"
+    );
+    assert!(
+        bob_list["discoverable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["id"] != json!(ws)),
+        "and out of the index: {bob_list}"
+    );
 
     // Demoted to viewer, he may still read and may no longer start a conversation.
     let (status, _) = h

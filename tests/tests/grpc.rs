@@ -96,5 +96,42 @@ async fn a_remote_client_can_run_a_goal_and_invoke_a_capability() {
         .expect_err("traversal denied remotely as well");
     assert_eq!(denied.kind, agentos_core::ErrorKind::PolicyDenied);
 
+    // The caller's workspace travels on the wire, so a remote capability is jailed exactly like a
+    // local one: naming it reaches the file that lives there...
+    let workspace = agentos_core::WorkspaceId::new();
+    let jail = kernel.policy.workspace_root().join(workspace.as_str());
+    std::fs::create_dir_all(&jail).unwrap();
+    std::fs::write(jail.join("only-here.txt"), "remote workspace").unwrap();
+    let read = capabilities
+        .invoke(RemoteInvocation {
+            capability: "filesystem-read".into(),
+            version: String::new(),
+            input: json!({ "path": "only-here.txt" }),
+            session_id: Some(session.clone()),
+            actor_id: None,
+            task_id: None,
+            workspace_id: Some(workspace.clone()),
+            timeout_ms: 5_000,
+        })
+        .await
+        .expect("the named workspace is the jail");
+    assert_eq!(read.output["content"], "remote workspace");
+
+    // ...and a call that names no workspace does not reach one: a remote hop must not be a way out.
+    let elsewhere = capabilities
+        .invoke(RemoteInvocation {
+            capability: "filesystem-read".into(),
+            version: String::new(),
+            input: json!({ "path": "only-here.txt" }),
+            session_id: Some(session.clone()),
+            actor_id: None,
+            task_id: None,
+            workspace_id: None,
+            timeout_ms: 5_000,
+        })
+        .await
+        .expect_err("a call that names no workspace does not reach one");
+    assert_eq!(elsewhere.kind, agentos_core::ErrorKind::NotFound, "{elsewhere}");
+
     shutdown.cancel();
 }

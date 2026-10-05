@@ -41,6 +41,7 @@ impl CapabilityTransport for GrpcCapabilityTransport {
         capability: &str,
         version: &str,
         input: serde_json::Value,
+        caller: &agentos_capability_runtime::capability::CallerContext,
         timeout_ms: u64,
     ) -> Result<serde_json::Value> {
         if endpoint != self.client.endpoint() {
@@ -57,13 +58,13 @@ impl CapabilityTransport for GrpcCapabilityTransport {
                 capability: capability.to_string(),
                 version: version.to_string(),
                 input,
-                session_id: None,
-                actor_id: None,
-                task_id: None,
-                // The transport seam carries no caller context today (not even a session id), so a
-                // remote call made through it lands in the node's legacy root. Set here from the
-                // caller once the seam is widened; the wire already has the field.
-                workspace_id: None,
+                // The whole caller travels: the far side jails the call, narrows it and attributes
+                // it exactly as this side would have. A remote hop must not be a way out of a
+                // workspace, and it must not lose who asked.
+                session_id: Some(caller.session_id.clone()),
+                actor_id: caller.actor_id.clone(),
+                task_id: caller.task_id.as_ref().map(|task| task.to_string()),
+                workspace_id: caller.workspace.clone(),
                 timeout_ms,
             })
             .await?;

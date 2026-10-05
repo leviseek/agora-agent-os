@@ -151,14 +151,20 @@ async fn transport_adapter_speaks_the_capability_transport_trait() {
     let transport = GrpcCapabilityTransport::connect(endpoint.clone()).await.expect("transport connects");
     assert_eq!(transport.name(), "grpc");
 
+    // The caller travels with the call; this test only cares that the adapter forwards it, so an
+    // empty context is enough.
+    let caller = agentos_capability_runtime::capability::CallerContext::new(agentos_core::SessionId::new());
+
     let output: Value = transport
-        .call(&endpoint, "echo", "1.0.0", json!({"text": "through the mesh"}), 2_000)
+        .call(&endpoint, "echo", "1.0.0", json!({"text": "through the mesh"}), &caller, 2_000)
         .await
         .expect("call succeeds");
     assert_eq!(output["text"], "through the mesh");
 
     // A mismatched endpoint is a programming error, not a transient failure.
-    let wrong = transport.call("http://127.0.0.1:1", "echo", "1.0.0", json!({}), 1_000).await;
+    let wrong = transport
+        .call("http://127.0.0.1:1", "echo", "1.0.0", json!({}), &caller, 1_000)
+        .await;
     let err = wrong.expect_err("endpoint mismatch is rejected");
     assert!(!err.is_retryable());
     shutdown.cancel();

@@ -528,23 +528,42 @@ pub async fn list_workspaces(
 ) -> ApiResult<Json<Value>> {
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
     let workspaces = state.kernel.sessions.list_workspaces().await?;
-    // Every workspace is listed, with the caller's own role on it. The list stays open for the same
-    // reason the session list does: a stranger who cannot see a workspace exists has nothing to ask
-    // about, and the role column says what they would actually be allowed to do.
     let sessions = state.kernel.sessions.list().await?;
-    let views: Vec<Value> = workspaces
-        .iter()
-        .map(|record| {
-            let count = sessions
-                .iter()
-                .filter(|session| session.workspace_id.as_ref() == Some(&record.id))
-                .count();
+    let session_count = |workspace_id: &agentos_core::WorkspaceId| {
+        sessions
+            .iter()
+            .filter(|session| session.workspace_id.as_ref() == Some(workspace_id))
+            .count()
+    };
+
+    // Two lists, and the split is the privacy boundary. `workspaces` are the ones this caller has a
+    // role in: the full record, including who else is a member and who has asked. `discoverable` is
+    // an index of the rest - a name, an owner and a session count - because a person cannot ask for
+    // access to something they cannot name. Neither list is a permission: every read, write and
+    // membership change is still decided by the guard.
+    let mut mine: Vec<Value> = Vec::new();
+    let mut discoverable: Vec<Value> = Vec::new();
+    for record in &workspaces {
+        let role = agentos_core::model::workspace_role(record, &me);
+        if role.is_some() || me.is_admin() {
             let mut view = workspace_view(record, &me);
-            view["session_count"] = json!(count);
-            view
-        })
-        .collect();
-    Ok(Json(json!({ "workspaces": views, "total": views.len() })))
+            view["session_count"] = json!(session_count(&record.id));
+            mine.push(view);
+        } else {
+            discoverable.push(json!({
+                "id": record.id,
+                "name": record.name,
+                "owner": record.owner,
+                "created_at": record.created_at,
+                "session_count": session_count(&record.id),
+            }));
+        }
+    }
+    Ok(Json(json!({
+        "workspaces": mine,
+        "discoverable": discoverable,
+        "total": mine.len(),
+    })))
 }
 
 pub async fn create_workspace(

@@ -1,16 +1,16 @@
 /**
- * What a session may use, and who else may take part.
+ * What a scope may use.
  *
- * Both halves answer the same question from two sides: capabilities are what the conversation may
- * reach, access requests are who gets to have the conversation. They live together because the
- * person who decides one is the person who decides the other.
+ * One editor for two scopes on purpose: the question - "what may this reach?" - is the same for a
+ * session and for a workspace, and the answer must not be. Who may take part is not here: since D20
+ * a role is held on a workspace, so membership is edited where the workspace is (the workspaces view)
+ * and this file only narrows capabilities.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../store';
 import { useI18n } from '../i18n';
-import { ApiErrorBanner, Badge } from '../components';
-import type { AccessRequest, SessionCapabilities } from '../api';
-import { formatDateTime } from '../format';
+import { ApiErrorBanner } from '../components';
+import type { SessionCapabilities } from '../api';
 
 /** What a scope narrows, normalized so one editor renders both a session and a workspace. */
 interface NarrowingView {
@@ -190,150 +190,3 @@ export function CapabilitiesEditor({
   );
 }
 
-/** Asking for access to a conversation that is not yours. */
-export function RequestAccessForm({ sessionId, onDone }: { sessionId: string; onDone: () => void }) {
-  const { t } = useI18n();
-  const { requestAccess, busy, actionError } = useApp();
-  const [role, setRole] = useState('participant');
-  const [note, setNote] = useState('');
-
-  const submit = async (): Promise<void> => {
-    const ok = await requestAccess(sessionId, role, note.trim().length === 0 ? undefined : note.trim());
-    if (ok) onDone();
-  };
-
-  return (
-    <div className="stack-tight">
-      <ApiErrorBanner error={actionError} scope="POST /v1/sessions/{id}/access-requests" />
-      <div className="form-grid form-grid-inline">
-        <label className="field">
-          <span>{t('access.askRole')}</span>
-          <select value={role} onChange={(event) => setRole(event.target.value)}>
-            <option value="viewer">{t('sessions.role.viewer')}</option>
-            <option value="participant">{t('sessions.role.participant')}</option>
-            <option value="editor">{t('sessions.role.editor')}</option>
-          </select>
-        </label>
-        <label className="field">
-          <span>{t('access.askNote')}</span>
-          <input
-            type="text"
-            value={note}
-            placeholder={t('access.askNotePlaceholder')}
-            onChange={(event) => setNote(event.target.value)}
-          />
-        </label>
-        <button type="button" className="btn btn-small" disabled={busy} onClick={() => void submit()}>
-          {t('access.askSubmit')}
-        </button>
-        <button type="button" className="btn btn-ghost btn-small" onClick={onDone}>
-          {t('common.cancel')}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** The requests on a session: the owner decides, a requester watches their own. */
-export function AccessRequests({ sessionId, focusRequest }: { sessionId: string; focusRequest?: boolean }) {
-  const { t } = useI18n();
-  const { loadAccessRequests, decideAccess, busy, actionError } = useApp();
-  const [requests, setRequests] = useState<AccessRequest[]>([]);
-  const [mayDecide, setMayDecide] = useState(false);
-  const [role, setRole] = useState<Record<string, string>>({});
-
-  const reload = useCallback(async (): Promise<void> => {
-    const response = await loadAccessRequests(sessionId);
-    setRequests(response?.requests ?? []);
-    setMayDecide(response?.may_decide ?? false);
-  }, [loadAccessRequests, sessionId]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload, focusRequest]);
-
-  const decide = async (id: string, approve: boolean): Promise<void> => {
-    const ok = await decideAccess(sessionId, id, approve, role[id]);
-    if (ok) await reload();
-  };
-
-  if (requests.length === 0) {
-    return <p className="muted small">{t('access.none')}</p>;
-  }
-
-  return (
-    <div className="stack-tight">
-      <ApiErrorBanner error={actionError} scope="access requests" onRetry={() => void reload()} />
-      <table className="table table-nested">
-        <thead>
-          <tr>
-            <th>{t('access.who')}</th>
-            <th>{t('access.asked')}</th>
-            <th>{t('common.state')}</th>
-            <th>{t('access.note')}</th>
-            {mayDecide ? <th /> : null}
-          </tr>
-        </thead>
-        <tbody>
-          {requests.map((request) => (
-            <tr key={request.id}>
-              <td className="mono">
-                {request.principal.node_id == null || request.principal.node_id === ''
-                  ? request.principal.user_id
-                  : request.principal.user_id + '@' + request.principal.node_id}
-              </td>
-              <td>{formatDateTime(request.created_at)}</td>
-              <td>
-                <Badge tone={request.state === 'pending' ? 'warn' : request.state === 'approved' ? 'ok' : 'muted'}>
-                  {t('access.state.' + request.state)}
-                </Badge>
-                {request.granted_role != null ? (
-                  <span className="muted small"> {t('sessions.role.' + request.granted_role)}</span>
-                ) : null}
-              </td>
-              <td className="muted small">{request.note ?? ''}</td>
-              {mayDecide ? (
-                <td className="cell-actions">
-                  {request.state === 'pending' ? (
-                    <>
-                      <select
-                        value={role[request.id] ?? request.role}
-                        onChange={(event) =>
-                          setRole((current) => ({ ...current, [request.id]: event.target.value }))
-                        }
-                      >
-                        <option value="viewer">{t('sessions.role.viewer')}</option>
-                        <option value="participant">{t('sessions.role.participant')}</option>
-                        <option value="editor">{t('sessions.role.editor')}</option>
-                      </select>
-                      <button
-                        type="button"
-                        className="btn btn-small"
-                        disabled={busy}
-                        onClick={() => void decide(request.id, true)}
-                      >
-                        {t('access.approve')}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-small"
-                        disabled={busy}
-                        onClick={() => void decide(request.id, false)}
-                      >
-                        {t('access.reject')}
-                      </button>
-                    </>
-                  ) : (
-                    <span className="muted small">
-                      {t('access.decidedBy', { who: request.decided_by ?? '?' })}
-                    </span>
-                  )}
-                </td>
-              ) : null}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}

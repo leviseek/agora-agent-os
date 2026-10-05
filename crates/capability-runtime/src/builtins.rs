@@ -560,6 +560,7 @@ impl Capability for RemoteCapability {
                 &self.descriptor.name,
                 &self.descriptor.version,
                 input,
+                &ctx.caller,
                 ctx.timeout_ms,
             )
             .await

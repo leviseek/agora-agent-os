@@ -401,6 +401,24 @@ export function SessionsView() {
                 capabilities: (detail.you?.can ?? []).join(', '),
               })}
             </p>
+            {/* Where that role comes from. Since D20 access is decided on the workspace, so saying
+                only "you are editor" would leave the person looking for a per-session grant that no
+                longer exists. */}
+            {detail.you?.workspace_id != null && detail.you.workspace_id !== '' ? (
+              <p className="muted small">
+                {t('sessions.workspaceLine', { name: workspaceName(detail.you.workspace_id) })}{' '}
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => {
+                    selectWorkspace(detail.you?.workspace_id ?? null);
+                    setView('workspaces');
+                  }}
+                >
+                  {t('sessions.workspaceOpen')}
+                </button>
+              </p>
+            ) : null}
             <CapabilitiesEditor
               sessionId={detail.session.id}
               canEdit={myRole === 'owner' || (detail.you?.can ?? []).includes('grant')}
