@@ -76,11 +76,20 @@ function templateFromSchema(schema: unknown): string {
 
 export function CapabilitiesView() {
   const { t, tState } = useI18n();
-  const { client } = useApp();
-  const [draftQuery, setDraftQuery] = useState({ q: '', tags: '' });
-  const [query, setQuery] = useState({ q: '', tags: '' });
-  const [selectedName, setSelectedName] = useState<string | null>(null);
-  const [inputText, setInputText] = useState('{\n}');
+  const { client, viewDrafts, updateViewDraft } = useApp();
+  // The query box, the applied query, the selection and the JSON body all live in the store: the
+  // invoke body is the single most annoying thing in this console to retype after a stray click.
+  const { q: draftQ, tags: draftTags, selected: selectedName, input: inputText } = viewDrafts.capabilities;
+  const draftQuery = { q: draftQ, tags: draftTags };
+  const setDraftQuery = (next: { q: string; tags: string }): void =>
+    updateViewDraft('capabilities', { q: next.q, tags: next.tags });
+  // The applied query is local on purpose: it is what the request was made with, not what is in the
+  // box. Keeping it in the store would make every keystroke a new dependency of the fetch effect.
+  const [applied, setApplied] = useState({ q: '', tags: '' });
+  const query = applied;
+  const setQuery = (next: { q: string; tags: string }): void => setApplied(next);
+  const setSelectedName = (next: string | null): void => updateViewDraft('capabilities', { selected: next });
+  const setInputText = (next: string): void => updateViewDraft('capabilities', { input: next });
   const [result, setResult] = useState<InvokeResponse | null>(null);
   const [invokeError, setInvokeError] = useState<ApiError | null>(null);
   const [invoking, setInvoking] = useState(false);

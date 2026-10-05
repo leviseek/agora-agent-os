@@ -125,6 +125,41 @@ export interface ComposerDraft {
 export const EMPTY_DRAFT: ComposerDraft = { goal: '', imagePaths: '', pending: [] };
 
 /**
+ * Unsent form state of a view, keyed by the view's own field names.
+ *
+ * Every view used to keep what the user had typed in component state, and App renders one view at
+ * a time - so a click on another tab unmounted the form and threw the typing away. The drafts live
+ * in the store instead: they survive a tab switch, and `persist` names the fields worth keeping
+ * across a reload (a user id, a filter - never a secret, because this is localStorage).
+ */
+export interface ViewDrafts {
+  sessions: { title: string; userId: string; renamingId: string | null; renameText: string };
+  events: { search: string };
+  capabilities: { q: string; tags: string; selected: string | null; input: string };
+  approvals: { reasons: Record<string, string> };
+  connection: { baseUrl: string; token: string };
+}
+
+export const EMPTY_VIEW_DRAFTS: ViewDrafts = {
+  sessions: { title: '', userId: 'operator', renamingId: null, renameText: '' },
+  events: { search: '' },
+  capabilities: { q: '', tags: '', selected: null, input: '{}' },
+  approvals: { reasons: {} },
+  connection: { baseUrl: '', token: '' },
+};
+
+/**
+ * The fields kept across a page reload, per view.
+ *
+ * Only low-risk values: a token or an API key must never be written to localStorage by this app.
+ */
+export const PERSISTED_DRAFT_FIELDS: { [K in keyof ViewDrafts]?: (keyof ViewDrafts[K])[] } = {
+  sessions: ['userId'],
+  events: ['search'],
+  capabilities: ['q', 'tags', 'input'],
+};
+
+/**
  * Fold one upload batch's outcome into a draft's queue, by identity.
  *
  * Two drops can be in flight at once, and the one that finishes last must not overwrite what the
@@ -236,6 +271,10 @@ export interface AppStoreValue {
   /** The unsent goal, image paths and staged attachments, per session. Survives a tab switch. */
   composerDrafts: Record<string, ComposerDraft>;
   updateComposerDraft: (sessionId: string, patch: Partial<ComposerDraft>) => void;
+  /** Unsent form state per view. A view reads its own entry; the store owns the lifetime. */
+  viewDrafts: ViewDrafts;
+  /** Patch one view's draft; string fields listed in PERSISTED_DRAFT_FIELDS also survive a reload. */
+  updateViewDraft: <K extends keyof ViewDrafts>(view: K, patch: Partial<ViewDrafts[K]>) => void;
   /** Apply one upload batch's outcome to a session's queue, by attachment key. */
   settleAttachments: (
     sessionId: string,
@@ -279,6 +318,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Unsent composer state, per session. Kept above the views so a tab switch cannot throw away
   // what somebody was about to send.
   const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
+  // View form drafts, same reason as the composer: a tab switch unmounts the view.
+  const [viewDrafts, setViewDrafts] = useState<ViewDrafts>(() => {
+    const initial: ViewDrafts = {
+      sessions: { ...EMPTY_VIEW_DRAFTS.sessions },
+      events: { ...EMPTY_VIEW_DRAFTS.events },
+      capabilities: { ...EMPTY_VIEW_DRAFTS.capabilities },
+      approvals: { ...EMPTY_VIEW_DRAFTS.approvals },
+      connection: { ...EMPTY_VIEW_DRAFTS.connection },
+    };
+    for (const [view, fields] of Object.entries(PERSISTED_DRAFT_FIELDS) as [
+      keyof ViewDrafts,
+      string[],
+    ][]) {
+      for (const field of fields) {
+        const stored = readStorage(`draft.${view}.${field}`);
+        if (stored === null) continue;
+        (initial[view] as Record<string, unknown>)[field] = stored;
+      }
+    }
+    return initial;
+  });
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [approvalsUnsupported, setApprovalsUnsupported] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
@@ -770,6 +830,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  /**
+   * Patch one view's draft. Persisted fields are also written to localStorage, so a reload keeps
+   * them too - the tab switch and the reload were the same complaint from different angles.
+   */
+  const updateViewDraft = useCallback(
+    <K extends keyof ViewDrafts>(view: K, patch: Partial<ViewDrafts[K]>): void => {
+      setViewDrafts((current) => ({ ...current, [view]: { ...current[view], ...patch } }));
+      const persisted = (PERSISTED_DRAFT_FIELDS[view] ?? []) as string[];
+      for (const [field, value] of Object.entries(patch)) {
+        if (!persisted.includes(field)) continue;
+        if (typeof value === 'string') writeStorage(`draft.${view}.${field}`, value);
+      }
+    },
+    [],
+  );
+
   const updateComposerDraft = useCallback(
     (sessionId: string, patch: Partial<ComposerDraft>): void => {
       if (sessionId.length === 0) return;
@@ -900,6 +976,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       uploadAttachments,
       composerDrafts,
       updateComposerDraft,
+      viewDrafts,
+      updateViewDraft,
       settleAttachments,
       clearComposerDraft,
       cancelRun,
@@ -957,6 +1035,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       uploadAttachments,
       composerDrafts,
       updateComposerDraft,
+      viewDrafts,
+      updateViewDraft,
       settleAttachments,
       clearComposerDraft,
       cancelRun,

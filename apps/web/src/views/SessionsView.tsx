@@ -43,13 +43,19 @@ export function SessionsView() {
     sessionQuery,
     setSessionQuery,
     renameSession,
+    viewDrafts,
+    updateViewDraft,
   } = useApp();
   const { setView } = useNav();
 
-  const [title, setTitle] = useState('');
-  const [userId, setUserId] = useState('operator');
-  // Renaming is inline rather than a prompt(): the draft lives here, the rename goes to the runtime.
-  const [draftTitle, setDraftTitle] = useState<string | null>(null);
+  // Everything typed here lives in the store, not in component state: App renders one view at a
+  // time, so a click on another tab unmounts this form. The user id also survives a reload.
+  const { title, userId, renamingId, renameText } = viewDrafts.sessions;
+  const setTitle = (next: string): void => updateViewDraft('sessions', { title: next });
+  const setUserId = (next: string): void => updateViewDraft('sessions', { userId: next });
+  const draftTitle = renamingId === null ? null : renameText;
+  const setDraftTitle = (next: string | null): void =>
+    updateViewDraft('sessions', { renamingId: next === null ? null : selectedSessionId, renameText: next ?? '' });
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {

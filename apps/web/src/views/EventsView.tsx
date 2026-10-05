@@ -70,14 +70,25 @@ function severityTone(severity: string): Tone {
 
 export function EventsView() {
   const { t, tSeverity } = useI18n();
-  const { clearEvents, selectedSessionId, autoReconnect, setAutoReconnect, pingSocket, wsStatus } = useApp();
+  const {
+    clearEvents,
+    selectedSessionId,
+    autoReconnect,
+    setAutoReconnect,
+    pingSocket,
+    wsStatus,
+    viewDrafts,
+    updateViewDraft,
+  } = useApp();
   const all = useAllEvents(400);
 
   const [paused, setPaused] = useState(false);
   const [frozen, setFrozen] = useState<EventRecord[]>([]);
   const [kinds, setKinds] = useState<string[]>([]);
   const [severity, setSeverity] = useState<SeverityFilter>('all');
-  const [search, setSearch] = useState('');
+  // The filter lives in the store, so switching tabs does not clear what somebody was looking for.
+  const { search } = viewDrafts.events;
+  const setSearch = (next: string): void => updateViewDraft('events', { search: next });
   const [sessionOnly, setSessionOnly] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
