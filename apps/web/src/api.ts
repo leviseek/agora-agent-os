@@ -327,6 +327,8 @@ export interface RunSummary {
   /** The provider this run was asked to prefer, and the thinking effort it was given. */
   model_hint?: string | null;
   reasoning_effort?: string | null;
+  /** Set when the answer came from a fallback: "mock answered after deepseek: HTTP 400 ...". */
+  degraded?: string | null;
   model: string | null;
   final_answer: string | null;
   error: string | null;
