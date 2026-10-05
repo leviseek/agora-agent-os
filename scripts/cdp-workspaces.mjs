@@ -159,9 +159,19 @@ const backAgain = await lines();
 console.log('--- workspaces page again ---');
 console.log(backAgain.slice(30, 70).join(' | '));
 
+// The access page now decides between a workspace and a (pre-workspace) session, so it has to render
+// with that distinction rather than falling over on an entry that has no session id.
+await step('nav access', () => clickByText('button', 'Access'));
+await sleep(700);
+const accessPage = await lines();
+console.log('--- access page ---');
+console.log(accessPage.slice(30, 70).join(' | '));
+const accessRendered = accessPage.some((line) => line.includes('Workspace or session'));
+
 const ok =
   workspacesPage.some((line) => line.includes(workspaceName)) &&
   landed &&
+  accessRendered &&
   findings.length === 0;
 console.log('--- findings ---');
 console.log(findings.length === 0 ? 'none' : findings.join('\n'));
