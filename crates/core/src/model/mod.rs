@@ -38,6 +38,6 @@ pub use event::{EventFilter, EventKind, EventRecord, EventSeverity, NewEvent};
 pub use memory::{MemoryKind, MemoryQuery, MemoryRecord};
 pub use message::{ContentPart, MessageRole, SessionMessage};
 pub use session::SessionRecord;
-pub use workspace::{workspace_role, WorkspaceRecord};
+pub use workspace::{decide_workspace, workspace_role, WorkspaceDenial, WorkspaceRecord};
 pub use task::{TaskGraphRecord, TaskKind, TaskNode, TaskPayload, TaskRecord};
 pub use worker::{WorkerCapacity, WorkerLoad, WorkerRecord};

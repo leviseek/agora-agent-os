@@ -712,22 +712,18 @@ async fn discovered_nodes_appear_in_the_gateway() {
 async fn images_are_verified_by_content_and_stored_as_artifacts() {
     use base64::Engine;
     let dir = std::env::temp_dir().join(format!("agentos-vision-{}", agentos_core::now_ms()));
-    let workspace = dir.join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
     // A real 1x1 PNG.
     let png = base64::engine::general_purpose::STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
         .unwrap();
-    std::fs::write(workspace.join("pixel.png"), &png).unwrap();
-    // The same name, the wrong content.
-    std::fs::write(workspace.join("liar.png"), "this is not an image").unwrap();
-    // Outside the workspace, however it is spelled.
+    // Outside the workspace root, however it is spelled.
     std::fs::write(dir.join("outside.png"), &png).unwrap();
 
     let mut config = RuntimeConfig::default();
     config.storage.backend = StoreBackend::Memory;
     config.storage.data_dir = dir.join("data");
-    config.policy.workspace_root = workspace.clone();
+    config.policy.workspace_root = dir.join("workspace");
     config.observability.log_level = "error".into();
     config.api.auth_token_env = "AGENTOS_TEST_VISION_TOKEN".into();
     std::env::remove_var("AGENTOS_TEST_VISION_TOKEN");
@@ -743,6 +739,14 @@ async fn images_are_verified_by_content_and_stored_as_artifacts() {
 
     let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "vision" })).await;
     let id = session["id"].as_str().unwrap().to_string();
+
+    // Files a session may reach live in its workspace directory (D20), so that is where the image
+    // and the impostor go. `liar.png` proves a name is not a type; `../outside.png` below proves the
+    // jail is the workspace, not the node root.
+    let jail = dir.join("workspace").join(session["workspace_id"].as_str().unwrap());
+    std::fs::create_dir_all(&jail).unwrap();
+    std::fs::write(jail.join("pixel.png"), &png).unwrap();
+    std::fs::write(jail.join("liar.png"), "this is not an image").unwrap();
 
     let (status, body) = h
         .post(
@@ -1747,16 +1751,12 @@ async fn dropped_turns_are_summarised_and_kept_as_memory() {
 #[tokio::test]
 async fn workspace_context_files_are_loaded_into_the_prompt() {
     let dir = std::env::temp_dir().join(format!("agentos-ctx-{}", agentos_core::now_ms()));
-    let workspace = dir.join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("AGENTS.md"), "Always answer in one sentence.").unwrap();
-    // A file outside the workspace must never be read, however it is configured.
-    std::fs::write(dir.join("secret.md"), "TOP SECRET").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
 
     let mut config = RuntimeConfig::default();
     config.storage.backend = StoreBackend::Memory;
     config.storage.data_dir = dir.join("data");
-    config.policy.workspace_root = workspace.clone();
+    config.policy.workspace_root = dir.join("workspace");
     config.observability.log_level = "error".into();
     config.api.auth_token_env = "AGENTOS_TEST_CONTEXT_TOKEN".into();
     config.policy.context_files = vec!["AGENTS.md".into(), "../secret.md".into()];
@@ -1773,6 +1773,13 @@ async fn workspace_context_files_are_loaded_into_the_prompt() {
 
     let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "ctx" })).await;
     let id = session["id"].as_str().unwrap().to_string();
+    // Project instructions live in the session's workspace directory (D20), and the file outside it
+    // is written too, so the configured `../secret.md` is proved refused rather than merely absent.
+    let jail = dir.join("workspace").join(session["workspace_id"].as_str().unwrap());
+    std::fs::create_dir_all(&jail).unwrap();
+    std::fs::write(jail.join("AGENTS.md"), "Always answer in one sentence.").unwrap();
+    std::fs::write(dir.join("secret.md"), "TOP SECRET").unwrap();
+
     let (status, _) = h
         .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "hello", "wait": true }))
         .await;
@@ -2013,8 +2020,11 @@ async fn a_granted_role_decides_what_a_person_may_do() {
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["session"]["grants"][0]["role"], "participant");
-    assert_eq!(body["session"]["grants"][0]["granted_by"], "alice@node-a");
+    // The grant landed on the session's workspace: since D20 a role is held in every session of it,
+    // so that is the record that changed.
+    assert_eq!(body["scope"], "workspace", "{body}");
+    assert_eq!(body["workspace"]["grants"][0]["role"], "participant");
+    assert_eq!(body["workspace"]["grants"][0]["granted_by"], "alice@node-a");
 
     // Now he can read and speak...
     let (status, body) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{id}")).await;
@@ -2701,8 +2711,9 @@ async fn the_access_inbox_gathers_what_is_waiting_on_you() {
     assert_eq!(body["to_decide"].as_array().unwrap().len(), 0, "{body}");
     assert_eq!(body["mine"].as_array().unwrap().len(), 0, "{body}");
 
-    // Bob asks. His inbox has his own request; Alice's has one waiting on her, with the title of
-    // the conversation in it so she can decide without opening anything.
+    // Bob asks. His inbox has his own request; Alice's has one waiting on her, naming the workspace
+    // it is about so she can decide without opening anything. Access is decided at the workspace
+    // since D20, so that - not the session - is what the entry names.
     let (_, asked) = h
         .post_as(
             Some("bob-token"),
@@ -2711,18 +2722,20 @@ async fn the_access_inbox_gathers_what_is_waiting_on_you() {
         )
         .await;
     let request_id = asked["request"]["id"].as_str().unwrap().to_string();
+    assert_eq!(asked["scope"], "workspace", "{asked}");
     let (_, bob_inbox) = h.get_as(Some("bob-token"), "/v1/access-requests").await;
     assert_eq!(bob_inbox["to_decide"].as_array().unwrap().len(), 0, "{bob_inbox}");
     let mine = bob_inbox["mine"].as_array().unwrap();
     assert_eq!(mine.len(), 1, "{bob_inbox}");
     assert_eq!(mine[0]["request"]["state"], "pending");
-    assert_eq!(mine[0]["session_title"], "inbox");
+    assert_eq!(mine[0]["workspace_id"], created["workspace_id"]);
+    assert_eq!(mine[0]["session_id"], json!(null));
 
     let (_, alice_inbox) = h.get_as(Some("alice-token"), "/v1/access-requests").await;
     let to_decide = alice_inbox["to_decide"].as_array().unwrap();
     assert_eq!(to_decide.len(), 1, "{alice_inbox}");
-    assert_eq!(to_decide[0]["session_id"], id);
-    assert_eq!(to_decide[0]["session_title"], "inbox");
+    assert_eq!(to_decide[0]["workspace_id"], created["workspace_id"]);
+    assert_eq!(to_decide[0]["workspace_name"], "alice's workspace");
     assert_eq!(to_decide[0]["session_owner"]["user_id"], "alice");
     assert_eq!(to_decide[0]["request"]["principal"]["user_id"], "bob");
 
@@ -2745,4 +2758,134 @@ async fn the_access_inbox_gathers_what_is_waiting_on_you() {
     let mine = bob_inbox["mine"].as_array().unwrap();
     assert_eq!(mine[0]["request"]["state"], "approved");
     assert_eq!(mine[0]["request"]["granted_role"], "viewer");
+}
+
+/// A workspace over HTTP: created by one person, shared by one decision, and the scope every
+/// session of it inherits its access and its capability narrowing from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
+    let h = Harness::start_with_principals().await;
+
+    let (status, created) = h
+        .post_as(Some("alice-token"), "/v1/workspaces", json!({ "name": "project" }))
+        .await;
+    assert_eq!(status, 200, "{created}");
+    let ws = created["workspace"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["workspace"]["owner"]["user_id"], "alice");
+
+    // The list carries the caller's own role, so a console can say what they may do.
+    let (_, list) = h.get_as(Some("alice-token"), "/v1/workspaces").await;
+    let mine = list["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["workspace"]["id"] == json!(ws))
+        .expect("the workspace is listed");
+    assert_eq!(mine["workspace_role"], "owner", "{list}");
+
+    // Bob has no role: he cannot look inside it...
+    let (status, _) = h.get_as(Some("bob-token"), &format!("/v1/workspaces/{ws}")).await;
+    assert_eq!(status, 403);
+    // ...nor start a conversation in it...
+    let (status, _) = h
+        .post_as(Some("bob-token"), &format!("/v1/workspaces/{ws}/sessions"), json!({ "title": "mine" }))
+        .await;
+    assert_eq!(status, 403);
+    // ...nor rename it.
+    let (status, _) = h
+        .send_as(
+            reqwest::Method::PATCH,
+            Some("bob-token"),
+            &format!("/v1/workspaces/{ws}"),
+            Some(json!({ "name": "hijacked" })),
+        )
+        .await;
+    assert_eq!(status, 403);
+
+    // Alice works in it. The session belongs to the workspace, not to the route it was created on.
+    let (status, session) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/workspaces/{ws}/sessions"),
+            json!({ "title": "in the workspace" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{session}");
+    assert_eq!(session["workspace_id"], json!(ws));
+    let sid = session["id"].as_str().unwrap().to_string();
+
+    // Bob asks through the session route, which delegates to the workspace: one grant covers every
+    // conversation in it, which is the point of moving access up a level.
+    let (status, asked) = h
+        .post_as(
+            Some("bob-token"),
+            &format!("/v1/sessions/{sid}/access-requests"),
+            json!({ "role": "participant" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{asked}");
+    assert_eq!(asked["scope"], "workspace");
+    let request = asked["request"]["id"].as_str().unwrap().to_string();
+    let (status, decided) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/workspaces/{ws}/access-requests/{request}/decide"),
+            json!({ "approve": true }),
+        )
+        .await;
+    assert_eq!(status, 200, "{decided}");
+    let (status, body) = h.get_as(Some("bob-token"), &format!("/v1/sessions/{sid}")).await;
+    assert_eq!(status, 200, "the approval handed out the workspace role: {body}");
+    assert_eq!(body["you"]["session_role"], "participant");
+    assert_eq!(body["you"]["workspace_id"], json!(ws));
+
+    // Demoted to viewer, he may still read and may no longer start a conversation.
+    let (status, _) = h
+        .post_as(
+            Some("alice-token"),
+            &format!("/v1/workspaces/{ws}/access"),
+            json!({ "user_id": "bob", "role": "viewer" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = h
+        .post_as(Some("bob-token"), &format!("/v1/workspaces/{ws}/sessions"), json!({ "title": "nope" }))
+        .await;
+    assert_eq!(status, 403, "a viewer may not speak: {body}");
+
+    // Narrowing the workspace narrows every session in it, and the session route says so.
+    let (status, _) = h
+        .send_as(
+            reqwest::Method::PUT,
+            Some("alice-token"),
+            &format!("/v1/workspaces/{ws}/capabilities"),
+            Some(json!({ "allow": ["clock"] })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, caps) = h.get_as(Some("alice-token"), &format!("/v1/sessions/{sid}/capabilities")).await;
+    assert_eq!(caps["scope"], "workspace", "{caps}");
+    assert_eq!(caps["workspace_id"], json!(ws));
+    assert_eq!(caps["session"]["allow"], json!(["clock"]), "{caps}");
+    let (status, body) = h
+        .post_as(
+            Some("alice-token"),
+            "/v1/capabilities/calculator/invoke",
+            json!({ "input": { "expression": "1+1" }, "session_id": sid }),
+        )
+        .await;
+    assert_eq!(status, 403, "the workspace's narrowing is enforced: {body}");
+
+    // Renaming is the owner's, and it does not move anything: the directory is the id.
+    let (status, renamed) = h
+        .send_as(
+            reqwest::Method::PATCH,
+            Some("alice-token"),
+            &format!("/v1/workspaces/{ws}"),
+            Some(json!({ "name": "renamed" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{renamed}");
+    assert_eq!(renamed["workspace"]["name"], "renamed");
+    assert_eq!(renamed["workspace"]["id"], json!(ws));
 }

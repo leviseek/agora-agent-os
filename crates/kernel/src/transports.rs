@@ -67,10 +67,10 @@ impl CapabilityHandler for KernelCapabilityHandler {
             session_id: session,
             actor_id: request.actor_id.clone(),
             task_id: None,
-            // A remote capability call carries no workspace: the wire contract has no field for one
-            // yet, so it lands in the node's legacy root. Phase 3 adds `workspace_id` to the gRPC
-            // request; until then this is the one path that is not workspace-scoped.
-            workspace: None,
+            // The workspace travels on the wire, so a remote capability call is jailed exactly like a
+            // local one. A caller that names no workspace lands in the node's legacy root, which is
+            // the same place a local caller with no workspace would.
+            workspace: request.workspace_id.clone(),
             correlation: agentos_core::telemetry::Correlation::new(),
             cancellation: CancellationToken::new(),
         };

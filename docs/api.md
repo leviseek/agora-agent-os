@@ -57,21 +57,51 @@ before any identity is sent, so a client knows whether to ask for one.
 | GET | `/v1/sessions` | `?q=` | sessions, optionally filtered by a case-insensitive substring of the title or user id |
 | PATCH | `/v1/sessions/{id}` | `{title}` | rename through the session actor, so the live record cannot drift from the stored one |
 | GET | `/v1/sessions` | - | `{sessions:[SessionSummary]}` |
-| POST | `/v1/sessions` | `{user_id?, title?}` | `SessionRecord` |
-| GET | `/v1/sessions/{id}` | - | `{session, runtime}` |
+| POST | `/v1/sessions` | `{user_id?, title?, workspace_id?}` | `SessionRecord`. Every session belongs to a workspace: one may be named, otherwise the target user's default workspace is used, created on first use |
+| GET | `/v1/sessions/{id}` | - | `{session, runtime, you:{session_role, workspace_id, can}}` |
 | DELETE | `/v1/sessions/{id}` | - | `{closed:true}` |
 | GET | `/v1/sessions/{id}/status` | - | runtime view: state, runs, graphs |
 | POST | `/v1/sessions/{id}/messages` | `{text, wait?}` | run result or `{accepted:true}` |
 | POST | `/v1/sessions/{id}/cancel` | - | `{cancelled}` |
 | GET | `/v1/sessions/{id}` | - | detail: session record + runtime summary; `runtime.usage` sums the runs' token totals |
 | GET | `/v1/sessions/{id}/export` | `?format=json\|markdown` | the conversation, the runs and the cost as a document or as data |
-| POST | `/v1/sessions/{id}/branch` | `{title?}` | fork: a new session inheriting the conversation with fresh identifiers; memory is not copied |
+| POST | `/v1/sessions/{id}/branch` | `{title?}` | fork: a new session inheriting the conversation and the workspace, with fresh identifiers; memory is not copied |
 | GET | `/v1/sessions/{id}/transcript` | `?limit` | `{messages:[TranscriptEntry], total, truncated}` - the conversation; how a client that posted with `wait:false` reads the reply |
 | GET | `/v1/sessions/{id}/events` | `?limit` | `{events:[EventRecord]}` |
 | GET | `/v1/sessions/{id}/graph` | - | `{graphs:[TaskGraphRecord]}` |
 | GET | `/v1/sessions/{id}/snapshot` | - | `Checkpoint` |
 | POST | `/v1/sessions/{id}/restore` | checkpoint (or `{checkpoint}`) | `{restored, session_id, actor_id}` |
 | POST | `/v1/sessions/{id}/migrate` | `{target_worker?}` | `MigrationReport` |
+
+### Workspaces
+
+A workspace owns sessions and their files; access is decided there and inherited by every session of
+it, and each workspace is a directory (`<workspace_root>/<ws_id>/`) that its sessions' filesystem
+capabilities are jailed to. `docs/decisions.md` D20 has the reasoning. The session-level access
+routes (`/v1/sessions/{id}/access`, `.../access-requests`, `.../capabilities`) still exist and
+**delegate to the session's workspace**, returning `scope: "workspace"` plus the workspace record that
+actually changed, so a client that asked about a session is told where the change landed.
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| GET | `/v1/workspaces` | - | `{workspaces:[{workspace, workspace_role, can, session_count}], total}` - every workspace, with the caller's own role |
+| POST | `/v1/workspaces` | `{name}` | `{workspace}` owned by the caller |
+| GET | `/v1/workspaces/{id}` | - | `{workspace, workspace_role, can, sessions:[SessionSummary]}`; `403` without a role |
+| PATCH | `/v1/workspaces/{id}` | `{name}` | `{workspace}` - rename; the directory is the id, so nothing moves |
+| GET | `/v1/workspaces/{id}/sessions` | - | `{workspace_id, sessions, total}` - the conversations in it |
+| POST | `/v1/workspaces/{id}/sessions` | `{user_id?, title?}` | the new `SessionRecord`; `403` for a viewer |
+| GET | `/v1/workspaces/{id}/capabilities` | - | `{runtime, workspace, effective}` |
+| PUT | `/v1/workspaces/{id}/capabilities` | `{allow?, deny?, approval_required?}` | `{workspace}` - narrows every session in it |
+| POST | `/v1/workspaces/{id}/access` | `{user_id, node_id?, role}` | `{workspace}` - one decision, in force in every session |
+| DELETE | `/v1/workspaces/{id}/access` | `{user_id, node_id?}` | `{workspace}` |
+| GET | `/v1/workspaces/{id}/access-requests` | - | `{may_decide, requests}` - the owner sees all, anyone else their own |
+| POST | `/v1/workspaces/{id}/access-requests` | `{role, note?}` | `{request}` - open to anyone authenticated, which is the point of asking |
+| POST | `/v1/workspaces/{id}/access-requests/{request_id}/decide` | `{approve, role?}` | `{request, workspace}`; approval hands out the role in the same step |
+
+`GET /v1/access-requests` is the cross-workspace inbox: `to_decide` are pending requests where the
+caller may grant, `mine` are their own requests whatever came of them. Each entry carries
+`workspace_id` / `workspace_name` (and `session_id` / `session_title` only for a request made on a
+record that predates workspaces).
 | GET | `/v1/capabilities` | `?q=&tags=&healthy_only=` | `{capabilities:[Descriptor]}` |
 | POST | `/v1/capabilities/{name}/invoke` | `{input, version?, session_id?}` | output + timing + attempts |
 | GET | `/v1/approvals` | - | capability calls waiting for an operator decision, with a bounded arguments preview |

@@ -11,7 +11,7 @@
 //! access through its workspace (see `effective_role`).
 
 use crate::ids::WorkspaceId;
-use crate::model::access::{Principal, PrincipalRef, SessionAccessRequest, SessionGrant, SessionRole};
+use crate::model::access::{role_allows, Principal, PrincipalRef, SessionAccessRequest, SessionAction, SessionCapabilities, SessionGrant, SessionRole};
 use crate::time::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -41,6 +41,13 @@ pub struct WorkspaceRecord {
     /// Free-form annotations kept with the workspace (a project, a repository, a note).
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// What this workspace narrowed about capabilities. Default means "whatever the runtime allows".
+    ///
+    /// Narrowing lives here rather than on the session because it is part of what a workspace *is*:
+    /// sharing a working unit should share its abilities, and a per-session copy would be the same
+    /// decision written N times, drifting one session at a time.
+    #[serde(default)]
+    pub capabilities: SessionCapabilities,
 }
 
 impl WorkspaceRecord {
@@ -56,6 +63,7 @@ impl WorkspaceRecord {
             grants: Vec::new(),
             access_requests: Vec::new(),
             metadata: BTreeMap::new(),
+            capabilities: SessionCapabilities::default(),
         }
     }
 
@@ -92,6 +100,58 @@ pub fn workspace_role(record: &WorkspaceRecord, principal: &Principal) -> Option
         .filter(|grant| grant.as_ref().matches(&me))
         .map(|grant| grant.role)
         .min()
+}
+
+/// Why an action on a workspace was refused, in words a person can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceDenial {
+    pub action: SessionAction,
+    pub workspace_id: WorkspaceId,
+    pub reason: String,
+}
+
+impl WorkspaceDenial {
+    pub fn message(&self) -> String {
+        format!(
+            "{} on workspace {} was refused: {}",
+            self.action.as_str(),
+            self.workspace_id.as_str(),
+            self.reason
+        )
+    }
+}
+
+/// May this principal act on this workspace?
+///
+/// The same shape as a session decision, and the same role table: the roles are the same four, and
+/// a workspace only adds the actions that belong to a whole working unit (creating a session in it,
+/// administering it) - they are mapped onto the existing table rather than given a second one, so
+/// the two can never disagree about what an editor may do.
+pub fn decide_workspace(
+    record: &WorkspaceRecord,
+    principal: &Principal,
+    action: SessionAction,
+) -> std::result::Result<(), WorkspaceDenial> {
+    if principal.is_admin() {
+        return Ok(());
+    }
+    let denial = |reason: String| WorkspaceDenial {
+        action,
+        workspace_id: record.id.clone(),
+        reason,
+    };
+    match workspace_role(record, principal) {
+        Some(role) if role_allows(role, action) => Ok(()),
+        Some(role) => Err(denial(format!(
+            "you are {} on this workspace, and {} is not part of that",
+            role.as_str(),
+            action.as_str()
+        ))),
+        None => Err(denial(format!(
+            "you have no role on this workspace; it belongs to {} - ask them for access",
+            record.owner
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -137,5 +197,28 @@ mod tests {
         workspace.name = "renamed".into();
         assert_eq!(workspace.directory_name(), before);
         assert!(before.starts_with("ws_"));
+    }
+
+    #[test]
+    fn a_stranger_may_look_but_only_a_member_may_work() {
+        let mut workspace = record("alice");
+        workspace.grants.push(SessionGrant::new("bob", None, SessionRole::Viewer));
+        let bob = principal("bob", &[]);
+        // A viewer reads the workspace, but does not create conversations in it.
+        assert!(decide_workspace(&workspace, &bob, SessionAction::Read).is_ok());
+        let denied = decide_workspace(&workspace, &bob, SessionAction::Chat).unwrap_err();
+        assert!(denied.reason.contains("viewer"), "{}", denied.reason);
+
+        let carol = principal("carol", &[]);
+        let stranger = decide_workspace(&workspace, &carol, SessionAction::Read).unwrap_err();
+        assert!(stranger.reason.contains("alice"), "{}", stranger.reason);
+
+        // Administering a workspace is the owner's: an editor works in it, they do not rename it or
+        // hand out membership.
+        workspace.grants.push(SessionGrant::new("dan", None, SessionRole::Editor));
+        let dan = principal("dan", &[]);
+        assert!(decide_workspace(&workspace, &dan, SessionAction::Chat).is_ok());
+        assert!(decide_workspace(&workspace, &dan, SessionAction::Grant).is_err());
+        assert!(decide_workspace(&workspace, &principal("alice", &[]), SessionAction::Grant).is_ok());
     }
 }

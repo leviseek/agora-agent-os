@@ -84,6 +84,36 @@ pub fn router(state: ApiState) -> Router {
             "/v1/sessions/{id}/access-requests/{request_id}/decide",
             post(handlers::decide_session_access),
         )
+        // Workspaces: the unit of ownership, sharing and filesystem isolation. Sessions and their
+        // access hang off one; see docs/decisions.md D20.
+        .route(
+            "/v1/workspaces",
+            get(handlers::list_workspaces).post(handlers::create_workspace),
+        )
+        .route(
+            "/v1/workspaces/{id}",
+            get(handlers::get_workspace).patch(handlers::rename_workspace),
+        )
+        .route(
+            "/v1/workspaces/{id}/sessions",
+            get(handlers::list_workspace_sessions).post(handlers::create_workspace_session),
+        )
+        .route(
+            "/v1/workspaces/{id}/capabilities",
+            get(handlers::workspace_capabilities).put(handlers::set_workspace_capabilities),
+        )
+        .route(
+            "/v1/workspaces/{id}/access",
+            post(handlers::grant_workspace_access).delete(handlers::revoke_workspace_access),
+        )
+        .route(
+            "/v1/workspaces/{id}/access-requests",
+            get(handlers::list_workspace_access).post(handlers::request_workspace_access),
+        )
+        .route(
+            "/v1/workspaces/{id}/access-requests/{request_id}/decide",
+            post(handlers::decide_workspace_access),
+        )
         // Archiving: a conversation out of the hot store and into one package.
         .route("/v1/sessions/{id}/archive", post(handlers::archive_session))
         .route("/v1/access-requests", get(handlers::access_inbox))

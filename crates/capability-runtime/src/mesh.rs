@@ -92,7 +92,7 @@ impl CapabilityMesh {
         self
     }
 
-    /// Install the source that answers "what did this session narrow?".
+    /// Install the source that answers "what did this session's scope narrow?".
     pub fn with_session_capabilities(
         mut self,
         source: Arc<dyn SessionCapabilitySource>,
@@ -242,7 +242,7 @@ impl CapabilityMesh {
         // The session's own narrowing, applied to what the node decided. Last, and only downward:
         // the node's policy is the ceiling, and a session grant that could lift it would make the
         // ceiling advisory.
-        let decision = match self.session_capabilities.for_session(&caller.session_id).await {
+        let decision = match self.session_capabilities.for_scope(&caller.session_id, caller.workspace.as_ref()).await {
             Some(narrowing) if !narrowing.is_unrestricted() => {
                 apply_session_narrowing(decision, &narrowing, name)
             }

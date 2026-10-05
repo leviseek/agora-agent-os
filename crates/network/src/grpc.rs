@@ -6,7 +6,7 @@
 
 use crate::rpc;
 use agentos_core::error::{ErrorKind, Result, RuntimeError};
-use agentos_core::{ActorId, SessionId, WorkerId};
+use agentos_core::{ActorId, SessionId, WorkerId, WorkspaceId};
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,6 +21,9 @@ pub struct RemoteInvocation {
     pub session_id: Option<SessionId>,
     pub actor_id: Option<ActorId>,
     pub task_id: Option<String>,
+    /// The caller's workspace. Part of the wire contract since D20: the jail is derived from it, so a
+    /// remote call cannot name a directory the caller has no workspace for.
+    pub workspace_id: Option<WorkspaceId>,
     pub timeout_ms: u64,
 }
 
@@ -218,6 +221,11 @@ impl rpc::capability_service_server::CapabilityService for CapabilitySvc {
             session_id: if req.session_id.is_empty() { None } else { Some(SessionId::from_raw(req.session_id)) },
             actor_id: if req.actor_id.is_empty() { None } else { Some(ActorId::from_raw(req.actor_id)) },
             task_id: if req.task_id.is_empty() { None } else { Some(req.task_id) },
+            workspace_id: if req.workspace_id.is_empty() {
+                None
+            } else {
+                Some(WorkspaceId::from_raw(req.workspace_id))
+            },
             timeout_ms: req.timeout_ms,
         };
         match self.inner.invoke(invocation).await {
@@ -578,6 +586,7 @@ impl GrpcCapabilityClient {
             task_id: invocation.task_id.unwrap_or_default(),
             correlation: None,
             timeout_ms: invocation.timeout_ms,
+            workspace_id: invocation.workspace_id.map(|w| w.into_string()).unwrap_or_default(),
         };
         let response = tokio::time::timeout(
             std::time::Duration::from_millis(if invocation.timeout_ms == 0 { 30_000 } else { invocation.timeout_ms + 1_000 }),

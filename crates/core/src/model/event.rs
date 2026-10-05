@@ -42,6 +42,8 @@ pub enum EventKind {
     /// The owner answered a request for a workspace.
     WorkspaceAccessDecided,
     WorkspaceArchived,
+    /// The owner narrowed (or widened back) what capabilities this workspace's sessions may use.
+    WorkspaceCapabilitiesChanged,
     SessionCreated,
     SessionClosed,
     /// A closed session was opened again: the record is active and an actor holds the conversation.
@@ -131,6 +133,7 @@ impl EventKind {
             EventKind::WorkspaceAccessRequested => "workspace_access_requested",
             EventKind::WorkspaceAccessDecided => "workspace_access_decided",
             EventKind::WorkspaceArchived => "workspace_archived",
+            EventKind::WorkspaceCapabilitiesChanged => "workspace_capabilities_changed",
             EventKind::SessionCreated => "session_created",
             EventKind::SessionClosed => "session_closed",
             EventKind::SessionOpened => "session_opened",

@@ -400,6 +400,215 @@ impl SessionManager {
         Ok(record)
     }
 
+    /// The workspace a principal falls back to when they create a session without naming one.
+    ///
+    /// One per owner, marked in metadata so it can be found without guessing at a name. It is a real
+    /// workspace in every other respect - listed, shared, isolated - which is what makes "every
+    /// session has a workspace" true without a special case anywhere else.
+    pub async fn ensure_default_workspace(&self, principal: &Principal) -> Result<WorkspaceRecord> {
+        let me = principal.as_ref();
+        for record in self.list_workspaces().await? {
+            if record.owner.matches(&me)
+                && record.metadata.get("default").map(|value| value == "true").unwrap_or(false)
+            {
+                return Ok(record);
+            }
+        }
+        let mut record = self
+            .create_workspace(&format!("{}'s workspace", principal.user_id), principal)
+            .await?;
+        record.metadata.insert("default".into(), "true".into());
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        Ok(record)
+    }
+
+    /// Replace a workspace's capability narrowing. Checked against what exists for the same reason a
+    /// session's is: an allow list naming a capability nobody registered is a typo that would take
+    /// the whole workspace down to nothing.
+    pub async fn set_workspace_capabilities(
+        &self,
+        workspace: &WorkspaceId,
+        capabilities: agentos_core::model::SessionCapabilities,
+        known: &[String],
+        by: &Principal,
+    ) -> Result<WorkspaceRecord> {
+        let Some(mut record) = self.get_workspace(workspace).await? else {
+            return Err(RuntimeError::not_found(format!("workspace {workspace} does not exist")));
+        };
+        let mut unknown: Vec<String> = Vec::new();
+        for name in capabilities
+            .allow
+            .iter()
+            .flatten()
+            .chain(capabilities.deny.iter())
+            .chain(capabilities.approval_required.iter())
+        {
+            let covered = match name.strip_suffix('*') {
+                Some(prefix) => known.iter().any(|capability| capability.starts_with(prefix)),
+                None => known.iter().any(|capability| capability == name),
+            };
+            if !covered {
+                unknown.push(name.clone());
+            }
+        }
+        if !unknown.is_empty() {
+            return Err(RuntimeError::invalid_input(format!(
+                "this runtime has no capability called {}; it has: {}",
+                unknown.join(", "),
+                known.join(", ")
+            ))
+            .with_detail("unknown", unknown.join(", ")));
+        }
+        record.capabilities = capabilities;
+        record.updated_at = now_ms();
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(
+                    EventKind::WorkspaceCapabilitiesChanged,
+                    "workspace capabilities changed",
+                )
+                .node(self.node_id.clone())
+                .payload(serde_json::json!({
+                    "workspace_id": record.id.as_str(),
+                    "allow": record.capabilities.allow,
+                    "deny": record.capabilities.deny,
+                    "approval_required": record.capabilities.approval_required,
+                    "by": by.as_ref().to_string(),
+                })),
+            )
+            .await?;
+        Ok(record)
+    }
+
+    /// Somebody asks for access to a workspace that is not theirs.
+    pub async fn request_workspace_access(
+        &self,
+        workspace: &WorkspaceId,
+        principal: &Principal,
+        role: SessionRole,
+        note: Option<String>,
+    ) -> Result<agentos_core::model::SessionAccessRequest> {
+        let Some(mut record) = self.get_workspace(workspace).await? else {
+            return Err(RuntimeError::not_found(format!("workspace {workspace} does not exist")));
+        };
+        if let Some(existing) = agentos_core::model::workspace_role(&record, principal) {
+            return Err(RuntimeError::conflict(format!(
+                "you already hold {} on this workspace",
+                existing.as_str()
+            )));
+        }
+        let me = principal.as_ref();
+        record.access_requests.retain(|request| {
+            !(request.principal.matches(&me)
+                && request.state == agentos_core::model::AccessRequestState::Pending)
+        });
+        let request = agentos_core::model::SessionAccessRequest {
+            id: format!("req_{}", agentos_core::now_ms()),
+            principal: me.clone(),
+            role,
+            note,
+            created_at: now_ms(),
+            state: agentos_core::model::AccessRequestState::Pending,
+            decided_by: None,
+            decided_at: None,
+            granted_role: None,
+        };
+        record.access_requests.push(request.clone());
+        record.updated_at = now_ms();
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        self.bus
+            .publish(
+                NewEvent::new(EventKind::WorkspaceAccessRequested, "workspace access requested")
+                    .node(self.node_id.clone())
+                    .payload(serde_json::json!({
+                        "workspace_id": record.id.as_str(),
+                        "request_id": request.id,
+                        "user_id": request.principal.user_id,
+                        "node_id": request.principal.node_id,
+                        "role": request.role.as_str(),
+                    })),
+            )
+            .await?;
+        Ok(request)
+    }
+
+    /// The owner decides a workspace request. Approving hands out the role in the same breath.
+    pub async fn decide_workspace_access_request(
+        &self,
+        workspace: &WorkspaceId,
+        request_id: &str,
+        approve: bool,
+        role: Option<SessionRole>,
+        by: &Principal,
+    ) -> Result<(WorkspaceRecord, agentos_core::model::SessionAccessRequest)> {
+        let Some(mut record) = self.get_workspace(workspace).await? else {
+            return Err(RuntimeError::not_found(format!("workspace {workspace} does not exist")));
+        };
+        let index = record
+            .access_requests
+            .iter()
+            .position(|request| request.id == request_id)
+            .ok_or_else(|| RuntimeError::not_found(format!("request {request_id} does not exist")))?;
+        let pending = record.access_requests[index].clone();
+        if pending.state != agentos_core::model::AccessRequestState::Pending {
+            return Err(RuntimeError::conflict(format!(
+                "request {request_id} was already {}",
+                pending.state.as_str()
+            )));
+        }
+        let granted = role.unwrap_or(pending.role);
+        record.access_requests[index].state = if approve {
+            agentos_core::model::AccessRequestState::Approved
+        } else {
+            agentos_core::model::AccessRequestState::Rejected
+        };
+        record.access_requests[index].decided_by = Some(by.as_ref().to_string());
+        record.access_requests[index].decided_at = Some(now_ms());
+        if approve {
+            record.access_requests[index].granted_role = Some(granted);
+        }
+        let decided = record.access_requests[index].clone();
+        record.updated_at = now_ms();
+        self.workspace_collection()
+            .save(self.store.as_ref(), record.id.as_str(), &record)
+            .await?;
+        if approve {
+            // Through the same door as a hand-written grant, so an approval is indistinguishable
+            // from one in what it produces.
+            let grant = SessionGrant::new(
+                decided.principal.user_id.clone(),
+                decided.principal.node_id.clone(),
+                granted,
+            );
+            record = self.grant_workspace(workspace, grant, by).await?;
+        }
+        self.bus
+            .publish(
+                NewEvent::new(
+                    EventKind::WorkspaceAccessDecided,
+                    if approve { "workspace access approved" } else { "workspace access rejected" },
+                )
+                .node(self.node_id.clone())
+                .payload(serde_json::json!({
+                    "workspace_id": record.id.as_str(),
+                    "request_id": decided.id,
+                    "user_id": decided.principal.user_id,
+                    "approved": approve,
+                    "role": decided.granted_role,
+                    "decided_by": decided.decided_by,
+                })),
+            )
+            .await?;
+        Ok((record, decided))
+    }
+
     /// The workspace a session belongs to, if it has one. Legacy records do not.
     pub async fn workspace_of(&self, session: &SessionRecord) -> Result<Option<WorkspaceRecord>> {
         match &session.workspace_id {
@@ -749,6 +958,14 @@ impl SessionManager {
         );
         // The owner travels with the conversation unless the caller claims it.
         restored.owner = owner.or(record.owner.clone()).or(restored.owner);
+        // A restored conversation is a new session on this node, so it belongs to a workspace on this
+        // node too: the owner's default one, created if this is the first thing they ever restored.
+        // Pointing at the archived session's workspace would be a dangling id whenever the package
+        // came from somewhere else.
+        if let Some(owner) = restored.owner.clone() {
+            let principal = Principal::new(owner.user_id, owner.node_id, Vec::new());
+            restored.workspace_id = Some(self.ensure_default_workspace(&principal).await?.id);
+        }
         restored.model_hint = record.model_hint.clone();
         restored.reasoning_effort = record.reasoning_effort;
         restored.metadata = record.metadata.clone();
@@ -1233,6 +1450,11 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
             source.user_id.clone(),
             title.unwrap_or_else(|| format!("{} (branch)", source.title)),
         );
+        // A fork lives where the original lived: leaving it workspace-less would put it in the legacy
+        // root and make it reachable only by an admin, which is not what "branch this conversation"
+        // means to anybody.
+        record.workspace_id = source.workspace_id.clone();
+        record.owner = source.owner.clone();
         record.state = record.state.transition(SessionState::Active).unwrap_or(record.state);
         state.session = record.clone();
         state.active_run = None;
@@ -1407,10 +1629,21 @@ impl StoreSessionCapabilities {
 
 #[async_trait::async_trait]
 impl agentos_capability_runtime::policy::SessionCapabilitySource for StoreSessionCapabilities {
-    async fn for_session(
+    async fn for_scope(
         &self,
         session: &SessionId,
+        workspace: Option<&WorkspaceId>,
     ) -> Option<agentos_core::model::SessionCapabilities> {
+        // A workspace's narrowing is what its sessions inherit; a session with no workspace keeps
+        // its own. Never both: two narrowing sources is one refactor away from disagreeing, and the
+        // safer reading of a disagreement is not obvious.
+        if let Some(workspace_id) = workspace {
+            let collection: Collection<WorkspaceRecord> = Collection::new(collections::WORKSPACES);
+            return match collection.load(self.store.as_ref(), workspace_id.as_str()).await {
+                Ok(Some(record)) if !record.capabilities.is_unrestricted() => Some(record.capabilities),
+                _ => None,
+            };
+        }
         let collection: Collection<SessionRecord> = Collection::new(collections::SESSIONS);
         match collection.load(self.store.as_ref(), session.as_str()).await {
             Ok(Some(record)) if !record.capabilities.is_unrestricted() => Some(record.capabilities),
@@ -1624,11 +1857,20 @@ impl SessionManager {
 // the access inbox: everything waiting on this person, across every session
 // ---------------------------------------------------------------------------------------------
 
-/// One request, with just enough about its session to act on it without opening the session.
+/// One request, with just enough about where it was made to act on it without opening anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessInboxEntry {
-    pub session_id: SessionId,
-    pub session_title: String,
+    /// The workspace the request is about: the scope access is decided at since D20.
+    #[serde(default)]
+    pub workspace_id: Option<WorkspaceId>,
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    /// The conversation, when the request was made on one. Present for records written before
+    /// workspaces existed, and for the session routes' own requests.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+    #[serde(default)]
+    pub session_title: Option<String>,
     #[serde(default)]
     pub session_owner: Option<agentos_core::model::PrincipalRef>,
     pub request: agentos_core::model::SessionAccessRequest,
@@ -1649,10 +1891,40 @@ impl SessionManager {
     /// A per-session walk would be N store reads for a page that exists to save the reader clicks;
     /// the whole collection is small by design (a session is one record) and is read at once here.
     pub async fn access_inbox(&self, principal: &agentos_core::model::Principal) -> Result<AccessInbox> {
-        let records = self.session_collection().list(self.store.as_ref(), 10_000).await?;
         let me = principal.as_ref();
         let mut inbox = AccessInbox::default();
-        for record in records {
+
+        // Workspaces first: that is where access is decided now, so that is where the requests are.
+        for workspace in self.workspace_collection().list(self.store.as_ref(), 10_000).await? {
+            let role = agentos_core::model::workspace_role(&workspace, principal);
+            let may_decide = principal.is_admin()
+                || role
+                    .map(|role| agentos_core::model::role_allows(role, agentos_core::model::SessionAction::Grant))
+                    .unwrap_or(false);
+            for request in &workspace.access_requests {
+                let entry = AccessInboxEntry {
+                    workspace_id: Some(workspace.id.clone()),
+                    workspace_name: Some(workspace.name.clone()),
+                    session_id: None,
+                    session_title: None,
+                    session_owner: Some(workspace.owner.clone()),
+                    request: request.clone(),
+                };
+                if request.principal.matches(&me) {
+                    inbox.mine.push(entry.clone());
+                }
+                if may_decide && request.state == agentos_core::model::AccessRequestState::Pending {
+                    inbox.to_decide.push(entry);
+                }
+            }
+        }
+
+        // Then the records that predate workspaces. They are the only ones that can still carry a
+        // session-level request, because the session routes delegate to the workspace.
+        for record in self.session_collection().list(self.store.as_ref(), 10_000).await? {
+            if record.workspace_id.is_some() || record.access_requests.is_empty() {
+                continue;
+            }
             let role = agentos_core::model::role_of(&record, principal);
             let may_decide = principal.is_admin()
                 || role
@@ -1660,21 +1932,22 @@ impl SessionManager {
                     .unwrap_or(false);
             for request in &record.access_requests {
                 let entry = AccessInboxEntry {
-                    session_id: record.id.clone(),
-                    session_title: record.title.clone(),
+                    workspace_id: None,
+                    workspace_name: None,
+                    session_id: Some(record.id.clone()),
+                    session_title: Some(record.title.clone()),
                     session_owner: record.owner.clone(),
                     request: request.clone(),
                 };
                 if request.principal.matches(&me) {
                     inbox.mine.push(entry.clone());
                 }
-                if may_decide
-                    && request.state == agentos_core::model::AccessRequestState::Pending
-                {
+                if may_decide && request.state == agentos_core::model::AccessRequestState::Pending {
                     inbox.to_decide.push(entry);
                 }
             }
         }
+
         // Newest first, in both lists: a request is only interesting while it is fresh.
         inbox.to_decide.sort_by(|a, b| b.request.created_at.cmp(&a.request.created_at));
         inbox.mine.sort_by(|a, b| b.request.created_at.cmp(&a.request.created_at));

@@ -47,12 +47,26 @@ impl RateLimiter {
     }
 }
 
-/// The action a request performs on a session, if it performs one.
+/// What a request acts on, for the ACL to check.
+///
+/// Two scopes, because access is decided at two levels and they must not be conflated: a session
+/// (read through its workspace) and a workspace itself (membership, capabilities, its own sessions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequiredAccess {
+    Session(agentos_core::SessionId, agentos_core::model::SessionAction),
+    Workspace(agentos_core::WorkspaceId, agentos_core::model::SessionAction),
+}
+
+/// The action a request performs, if it performs one.
 ///
 /// A pure function of method and path, so the mapping can be tested without a runtime and read in
 /// one place: an endpoint added without an entry here is an endpoint with no permission check, and
 /// that is worth being able to see at a glance.
-pub fn required_action(method: &axum::http::Method, path: &str) -> Option<(agentos_core::SessionId, agentos_core::model::SessionAction)> {
+pub fn required_access(method: &axum::http::Method, path: &str) -> Option<RequiredAccess> {
+    session_access(method, path).or_else(|| workspace_access(method, path))
+}
+
+fn session_access(method: &axum::http::Method, path: &str) -> Option<RequiredAccess> {
     use agentos_core::model::SessionAction;
     // /v1/sessions/{id}/... - the last segment decides, except for the detail routes.
     let rest = path.strip_prefix("/v1/sessions/")?;
@@ -96,7 +110,38 @@ pub fn required_action(method: &axum::http::Method, path: &str) -> Option<(agent
         // status - is a read.
         _ => SessionAction::Read,
     };
-    Some((session, action))
+    Some(RequiredAccess::Session(session, action))
+}
+
+fn workspace_access(method: &axum::http::Method, path: &str) -> Option<RequiredAccess> {
+    use agentos_core::model::SessionAction;
+    let rest = path.strip_prefix("/v1/workspaces/")?;
+    let mut segments = rest.split('/');
+    let id = segments.next()?;
+    if id.is_empty() {
+        // /v1/workspaces itself: listing and creating are not actions on an existing workspace.
+        return None;
+    }
+    let workspace = agentos_core::WorkspaceId::from_raw(id);
+    let tail = segments.next().unwrap_or("");
+    // The workspace actions are mapped onto the one role table rather than given a second one:
+    //   * reading it is Read (every role),
+    //   * creating a session in it is Chat (owner, editor, participant - a viewer may not speak),
+    //   * renaming it, narrowing it and handing out membership is Grant (owner only).
+    // Two tables is exactly how "an editor may do X here but not there" starts to drift.
+    let action = match (method.as_str(), tail) {
+        ("POST", "sessions") => SessionAction::Chat,
+        (_, "sessions") => SessionAction::Read,
+        ("PATCH", "") => SessionAction::Grant,
+        ("DELETE", "") => SessionAction::Delete,
+        (_, "capabilities") => SessionAction::Grant,
+        (_, "access") => SessionAction::Grant,
+        ("POST", "access-requests") if path.ends_with("/decide") => SessionAction::Grant,
+        // Asking is open here for the same reason it is open on a session.
+        (_, "access-requests") => return None,
+        _ => SessionAction::Read,
+    };
+    Some(RequiredAccess::Workspace(workspace, action))
 }
 
 /// How the principal on a request was established.
@@ -422,24 +467,71 @@ pub async fn guard(State(state): State<ApiState>, mut req: Request, next: Next) 
     // entry in required_action is a route nobody has thought about, which is why the mapping is a
     // pure function with a test.
     if let Some(principal) = &principal {
-        if let Some((session, action)) = required_action(req.method(), req.uri().path()) {
-            match state.kernel.sessions.get(&session).await {
-                Ok(Some(record)) => {
-                    if let Err(denial) = agentos_core::model::decide(&record, principal, action) {
-                        metrics().inc_by(metric_names::HTTP_REQUESTS, &[("status", "403")], 1);
-                        return crate::error::ApiError(
-                            RuntimeError::policy_denied(denial.message())
-                                .with_detail("action", action.as_str())
-                                .with_detail("session_id", session.as_str())
-                                .with_detail("owner", record.owner_label())
-                                .with_detail("user_id", principal.user_id.clone()),
-                        )
-                        .into_response();
+        if let Some(required) = required_access(req.method(), req.uri().path()) {
+            match required {
+                RequiredAccess::Session(session, action) => {
+                    match state.kernel.sessions.get(&session).await {
+                        Ok(Some(record)) => {
+                            // The session's access is its workspace's access (D20). Loading the
+                            // workspace here is what makes a grant on the workspace felt by every
+                            // session of it, without any session record changing.
+                            let workspace = state
+                                .kernel
+                                .sessions
+                                .workspace_of(&record)
+                                .await
+                                .ok()
+                                .flatten();
+                            if let Err(denial) = agentos_core::model::decide_in(
+                                &record,
+                                workspace.as_ref(),
+                                principal,
+                                action,
+                            ) {
+                                metrics().inc_by(metric_names::HTTP_REQUESTS, &[("status", "403")], 1);
+                                return crate::error::ApiError(
+                                    RuntimeError::policy_denied(denial.message())
+                                        .with_detail("action", action.as_str())
+                                        .with_detail("session_id", session.as_str())
+                                        .with_detail("owner", record.owner_label())
+                                        .with_detail(
+                                            "workspace_id",
+                                            record
+                                                .workspace_id
+                                                .as_ref()
+                                                .map(|id| id.as_str().to_string())
+                                                .unwrap_or_default(),
+                                        )
+                                        .with_detail("user_id", principal.user_id.clone()),
+                                )
+                                .into_response();
+                            }
+                        }
+                        // No record: the handler answers 404. Refusing here would turn "does not exist" into
+                        // "you may not", which is a lie that costs an hour of debugging.
+                        _ => {}
                     }
                 }
-                // No record: the handler answers 404. Refusing here would turn "does not exist" into
-                // "you may not", which is a lie that costs an hour of debugging.
-                _ => {}
+                RequiredAccess::Workspace(workspace_id, action) => {
+                    match state.kernel.sessions.get_workspace(&workspace_id).await {
+                        Ok(Some(record)) => {
+                            if let Err(denial) =
+                                agentos_core::model::decide_workspace(&record, principal, action)
+                            {
+                                metrics().inc_by(metric_names::HTTP_REQUESTS, &[("status", "403")], 1);
+                                return crate::error::ApiError(
+                                    RuntimeError::policy_denied(denial.message())
+                                        .with_detail("action", action.as_str())
+                                        .with_detail("workspace_id", workspace_id.as_str())
+                                        .with_detail("owner", record.owner_label())
+                                        .with_detail("user_id", principal.user_id.clone()),
+                                )
+                                .into_response();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }
@@ -553,26 +645,64 @@ mod tests {
             ),
         ];
         for (method, path, expected) in cases {
-            let (session, action) = required_action(&method, path)
-                .unwrap_or_else(|| panic!("{method} {path} maps to nothing"));
-            assert_eq!(session.as_str(), "ses_1");
-            assert_eq!(action, expected, "{method} {path}");
+            match required_access(&method, path) {
+                Some(RequiredAccess::Session(session, action)) => {
+                    assert_eq!(session.as_str(), "ses_1");
+                    assert_eq!(action, expected, "{method} {path}");
+                }
+                other => panic!("{method} {path} mapped to {other:?}"),
+            }
         }
     }
 
     #[test]
-    fn asking_for_access_is_outside_the_session_acl() {
+    fn every_workspace_route_maps_to_an_action() {
+        use agentos_core::model::SessionAction;
+        let cases = [
+            (Method::GET, "/v1/workspaces/ws_1", SessionAction::Read),
+            (Method::PATCH, "/v1/workspaces/ws_1", SessionAction::Grant),
+            // Creating a session in a workspace is speaking in it, so a viewer may not.
+            (Method::POST, "/v1/workspaces/ws_1/sessions", SessionAction::Chat),
+            (Method::GET, "/v1/workspaces/ws_1/sessions", SessionAction::Read),
+            (Method::PUT, "/v1/workspaces/ws_1/capabilities", SessionAction::Grant),
+            (Method::GET, "/v1/workspaces/ws_1/capabilities", SessionAction::Grant),
+            (Method::POST, "/v1/workspaces/ws_1/access", SessionAction::Grant),
+            (Method::DELETE, "/v1/workspaces/ws_1/access", SessionAction::Grant),
+            (
+                Method::POST,
+                "/v1/workspaces/ws_1/access-requests/req_1/decide",
+                SessionAction::Grant,
+            ),
+        ];
+        for (method, path, expected) in cases {
+            match required_access(&method, path) {
+                Some(RequiredAccess::Workspace(workspace, action)) => {
+                    assert_eq!(workspace.as_str(), "ws_1");
+                    assert_eq!(action, expected, "{method} {path}");
+                }
+                other => panic!("{method} {path} mapped to {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn asking_for_access_is_outside_the_acl() {
         // Deliberate: the endpoint exists for people who have no role, so it cannot require one. The
         // handler answers with the caller's own requests and refuses to decide anything.
-        assert!(required_action(&Method::POST, "/v1/sessions/ses_1/access-requests").is_none());
-        assert!(required_action(&Method::GET, "/v1/sessions/ses_1/access-requests").is_none());
+        assert!(required_access(&Method::POST, "/v1/sessions/ses_1/access-requests").is_none());
+        assert!(required_access(&Method::GET, "/v1/sessions/ses_1/access-requests").is_none());
+        assert!(required_access(&Method::POST, "/v1/workspaces/ws_1/access-requests").is_none());
+        assert!(required_access(&Method::GET, "/v1/workspaces/ws_1/access-requests").is_none());
     }
 
     #[test]
     fn creating_a_session_is_not_an_action_on_one() {
-        assert!(required_action(&Method::POST, "/v1/sessions").is_none());
-        assert!(required_action(&Method::GET, "/v1/sessions").is_none());
-        assert!(required_action(&Method::GET, "/v1/meta").is_none());
+        assert!(required_access(&Method::POST, "/v1/sessions").is_none());
+        assert!(required_access(&Method::GET, "/v1/sessions").is_none());
+        assert!(required_access(&Method::GET, "/v1/meta").is_none());
+        // Listing and creating workspaces are not actions on an existing workspace either.
+        assert!(required_access(&Method::POST, "/v1/workspaces").is_none());
+        assert!(required_access(&Method::GET, "/v1/workspaces").is_none());
     }
 
     #[test]

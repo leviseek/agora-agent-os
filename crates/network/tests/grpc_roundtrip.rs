@@ -96,6 +96,7 @@ async fn capability_service_round_trips_and_maps_errors() {
             session_id: Some(SessionId::new()),
             actor_id: None,
             task_id: None,
+            workspace_id: None,
             timeout_ms: 5_000,
         })
         .await
@@ -112,6 +113,7 @@ async fn capability_service_round_trips_and_maps_errors() {
             session_id: None,
             actor_id: None,
             task_id: None,
+            workspace_id: None,
             timeout_ms: 5_000,
         })
         .await
@@ -128,6 +130,7 @@ async fn capability_service_round_trips_and_maps_errors() {
             session_id: None,
             actor_id: None,
             task_id: None,
+            workspace_id: None,
             timeout_ms: 5_000,
         })
         .await

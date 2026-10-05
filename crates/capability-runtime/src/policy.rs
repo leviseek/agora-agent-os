@@ -64,10 +64,15 @@ impl CapabilityPolicy for AllowAllPolicy {
 /// widening direction - the only direction that matters.
 #[async_trait::async_trait]
 pub trait SessionCapabilitySource: Send + Sync + 'static {
-    /// None means the session narrows nothing, or is not known here.
-    async fn for_session(
+    /// None means the scope narrows nothing, or is not known here.
+    ///
+    /// `workspace` is where narrowing lives now: sharing a working unit should share its abilities.
+    /// A session with no workspace (a record written before workspaces existed) still answers from
+    /// its own narrowing, so an upgraded node keeps honouring what it already knew.
+    async fn for_scope(
         &self,
         session: &agentos_core::SessionId,
+        workspace: Option<&agentos_core::WorkspaceId>,
     ) -> Option<agentos_core::model::SessionCapabilities>;
 }
 
@@ -77,9 +82,10 @@ pub struct NoSessionNarrowing;
 
 #[async_trait::async_trait]
 impl SessionCapabilitySource for NoSessionNarrowing {
-    async fn for_session(
+    async fn for_scope(
         &self,
         _session: &agentos_core::SessionId,
+        _workspace: Option<&agentos_core::WorkspaceId>,
     ) -> Option<agentos_core::model::SessionCapabilities> {
         None
     }

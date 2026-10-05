@@ -22,6 +22,9 @@ message InvokeRequest {
   string task_id = 6;
   Correlation correlation = 7;
   uint64 timeout_ms = 8;
+  // The caller's workspace. The jail a capability may touch is derived from it, so a remote call
+  // cannot reach a workspace the caller is not in.
+  string workspace_id = 9;
 }
 
 message InvokeResponse {

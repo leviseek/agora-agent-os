@@ -170,7 +170,7 @@ pub async fn list_sessions(
     let mut mine = Vec::with_capacity(sessions.len());
     for session in sessions {
         let role = match state.kernel.sessions.get(&session.id).await? {
-            Some(record) => agentos_core::model::role_of(&record, &me),
+            Some(record) => state.kernel.sessions.role_on(&record, &me).await.unwrap_or(None),
             None => None,
         };
         let mut value = serde_json::to_value(&session)?;
@@ -247,6 +247,10 @@ pub struct CreateSessionRequest {
     pub user_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// The workspace to create the session in. Omitted, the caller's own default workspace is used,
+    /// created on first use - so every session has a workspace without a client having to know it.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 pub async fn create_session(
@@ -277,10 +281,58 @@ pub async fn create_session(
         _ => (me.user_id.clone(), me.as_ref()),
     };
     let title = body.title.unwrap_or_else(|| "untitled session".into());
+    // Every session belongs to a workspace (D20). One may be named; without one the caller gets
+    // their own default workspace, so "this is mine" and "this is in a workspace someone owns" are
+    // the same statement and no session is an orphan.
+    let workspace = match body.workspace_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        Some(raw) => {
+            let workspace_id = parse_workspace(raw)?;
+            let record = state.kernel.sessions.get_workspace(&workspace_id).await?.ok_or_else(|| {
+                ApiError(RuntimeError::not_found(format!("workspace {raw} does not exist")))
+            })?;
+            // Creating a session in someone else's workspace is speaking in it, so the same action
+            // that lets a participant chat lets them start a conversation.
+            if !me.is_admin() {
+                let allowed = agentos_core::model::workspace_role(&record, &me)
+                    .map(|role| {
+                        agentos_core::model::role_allows(
+                            role,
+                            agentos_core::model::SessionAction::Chat,
+                        )
+                    })
+                    .unwrap_or(false);
+                if !allowed {
+                    return Err(ApiError(
+                        RuntimeError::policy_denied(format!(
+                            "{} may not create sessions in workspace {}",
+                            me.user_id, record.name
+                        ))
+                        .with_detail("workspace_id", workspace_id.as_str())
+                        .with_detail("user_id", me.user_id.clone()),
+                    ));
+                }
+            }
+            workspace_id
+        }
+        // No workspace named: the session goes into the default workspace of whoever it is *for*.
+        // That is what keeps "create one for bob" meaning bob owns it - an admin doing this on
+        // somebody's behalf must not quietly make their own workspace the owner. The node is the
+        // caller's, because that is the node this request is happening on.
+        None => state
+            .kernel
+            .sessions
+            .ensure_default_workspace(&agentos_core::model::Principal::new(
+                user.clone(),
+                me.node_id.clone(),
+                Vec::new(),
+            ))
+            .await?
+            .id,
+    };
     let record = state
         .kernel
         .sessions
-        .create_session_for(&user, &title, Some(owner))
+        .create_session_in(&workspace, &user, &title, Some(owner))
         .await?;
     Ok(Json(json!(record)))
 }
@@ -299,9 +351,11 @@ pub async fn get_session(
         .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
     let status = state.kernel.sessions.status(&session).await.unwrap_or(Value::Null);
     // The caller's own role, so a console can show what this person may do here instead of
-    // repeating the permission table in TypeScript, where it would drift from the Rust one.
+    // repeating the permission table in TypeScript, where it would drift from the Rust one. Read
+    // through the workspace (D20): a role there is held in every session of it.
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
-    let my_role = agentos_core::model::role_of(&record, &me);
+    let workspace = state.kernel.sessions.workspace_of(&record).await?;
+    let my_role = agentos_core::model::effective_role(&record, workspace.as_ref(), &me);
     let my_actions: Vec<&'static str> = ALL_SESSION_ACTIONS
         .iter()
         .filter(|action| match my_role {
@@ -320,6 +374,7 @@ pub async fn get_session(
             "node_id": me.node_id,
             "roles": me.roles,
             "session_role": my_role,
+            "workspace_id": workspace.as_ref().map(|workspace| workspace.id.as_str().to_string()),
             "can": my_actions,
         },
     })))
@@ -349,6 +404,12 @@ pub struct AccessRequest {
 }
 
 /// Hand out a role on a session.
+///
+/// Since D20 access is decided at the workspace, so a session with one delegates: the grant lands on
+/// the workspace and is felt by every session of it. The response keeps `session` for a client that
+/// asked about a session and adds the workspace that actually changed, so nothing has to guess which
+/// one moved. A session with no workspace (a record written before workspaces existed) still takes a
+/// session-level grant.
 pub async fn grant_access(
     State(state): State<ApiState>,
     principal: Option<Principal>,
@@ -356,19 +417,36 @@ pub async fn grant_access(
     Json(body): Json<AccessRequest>,
 ) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
-    let role = agentos_core::model::SessionRole::parse(&body.role).ok_or_else(|| {
-        ApiError(RuntimeError::invalid_input(format!(
-            "unknown role {:?}: use owner, editor, participant or viewer",
-            body.role
-        )))
-    })?;
+    let role = parse_role(&body.role)?;
     if body.user_id.trim().is_empty() {
         return Err(ApiError(RuntimeError::invalid_input("user_id must not be empty")));
     }
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
     let grant = agentos_core::model::SessionGrant::new(body.user_id.trim(), body.node_id, role);
-    let record = state.kernel.sessions.grant(&session, grant, &me).await?;
-    Ok(Json(json!({ "session": record })))
+    let record = state
+        .kernel
+        .sessions
+        .get(&session)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
+    match state.kernel.sessions.workspace_of(&record).await? {
+        Some(workspace) => {
+            let workspace = state
+                .kernel
+                .sessions
+                .grant_workspace(&workspace.id, grant, &me)
+                .await?;
+            Ok(Json(json!({
+                "session": record,
+                "workspace": workspace,
+                "scope": "workspace",
+            })))
+        }
+        None => {
+            let record = state.kernel.sessions.grant(&session, grant, &me).await?;
+            Ok(Json(json!({ "session": record, "scope": "session" })))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -378,7 +456,8 @@ pub struct RevokeRequest {
     pub node_id: Option<String>,
 }
 
-/// Take a role away again.
+/// Take a role away again. The workspace's copy when the session has a workspace, for the same
+/// reason as `grant_access`.
 pub async fn revoke_access(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -386,8 +465,379 @@ pub async fn revoke_access(
 ) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
     let who = agentos_core::model::PrincipalRef::new(body.user_id.trim(), body.node_id);
-    let record = state.kernel.sessions.revoke(&session, &who).await?;
-    Ok(Json(json!({ "session": record })))
+    let record = state
+        .kernel
+        .sessions
+        .get(&session)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
+    match state.kernel.sessions.workspace_of(&record).await? {
+        Some(workspace) => {
+            let workspace = state.kernel.sessions.revoke_workspace(&workspace.id, &who).await?;
+            Ok(Json(json!({
+                "session": record,
+                "workspace": workspace,
+                "scope": "workspace",
+            })))
+        }
+        None => {
+            let record = state.kernel.sessions.revoke(&session, &who).await?;
+            Ok(Json(json!({ "session": record, "scope": "session" })))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// workspaces
+// ---------------------------------------------------------------------------------------------
+//
+// The unit of ownership, sharing and filesystem isolation (docs/decisions.md D20). Access is decided
+// here and inherited by every session of the workspace, which is why the session routes below
+// delegate: two places that write a role are two places that can disagree about it.
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameWorkspaceRequest {
+    pub name: String,
+}
+
+/// A workspace as the console needs it: the record, plus what this caller may do in it.
+fn workspace_view(
+    record: &agentos_core::model::WorkspaceRecord,
+    me: &agentos_core::model::Principal,
+) -> Value {
+    let role = agentos_core::model::workspace_role(record, me);
+    let can: Vec<&'static str> = ALL_SESSION_ACTIONS
+        .iter()
+        .filter(|action| match role {
+            Some(role) => agentos_core::model::role_allows(role, **action),
+            None => me.is_admin(),
+        })
+        .map(|action| action.as_str())
+        .collect();
+    json!({ "workspace": record, "workspace_role": role, "can": can })
+}
+
+pub async fn list_workspaces(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+) -> ApiResult<Json<Value>> {
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let workspaces = state.kernel.sessions.list_workspaces().await?;
+    // Every workspace is listed, with the caller's own role on it. The list stays open for the same
+    // reason the session list does: a stranger who cannot see a workspace exists has nothing to ask
+    // about, and the role column says what they would actually be allowed to do.
+    let sessions = state.kernel.sessions.list().await?;
+    let views: Vec<Value> = workspaces
+        .iter()
+        .map(|record| {
+            let count = sessions
+                .iter()
+                .filter(|session| session.workspace_id.as_ref() == Some(&record.id))
+                .count();
+            let mut view = workspace_view(record, &me);
+            view["session_count"] = json!(count);
+            view
+        })
+        .collect();
+    Ok(Json(json!({ "workspaces": views, "total": views.len() })))
+}
+
+pub async fn create_workspace(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Json(body): Json<CreateWorkspaceRequest>,
+) -> ApiResult<Json<Value>> {
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError(RuntimeError::invalid_input("a workspace name must not be empty")));
+    }
+    let record = state.kernel.sessions.create_workspace(name, &me).await?;
+    Ok(Json(json!({ "workspace": record })))
+}
+
+pub async fn get_workspace(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let record = state
+        .kernel
+        .sessions
+        .get_workspace(&workspace)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("workspace {id} does not exist"))))?;
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    // Every session in this workspace carries the workspace role: with a workspace, a per-session
+    // reading of access no longer exists.
+    let role = agentos_core::model::workspace_role(&record, &me);
+    let sessions: Vec<Value> = state
+        .kernel
+        .sessions
+        .list()
+        .await?
+        .into_iter()
+        .filter(|session| session.workspace_id.as_ref() == Some(&record.id))
+        .map(|session| {
+            let mut view = serde_json::to_value(&session).unwrap_or(Value::Null);
+            if let Some(object) = view.as_object_mut() {
+                object.insert("my_role".into(), json!(role));
+            }
+            view
+        })
+        .collect();
+    let mut view = workspace_view(&record, &me);
+    view["sessions"] = json!(sessions);
+    Ok(Json(view))
+}
+
+pub async fn rename_workspace(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameWorkspaceRequest>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let record = state.kernel.sessions.rename_workspace(&workspace, &body.name).await?;
+    Ok(Json(json!({ "workspace": record })))
+}
+
+/// The sessions of one workspace, newest first.
+pub async fn list_workspace_sessions(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let role = state
+        .kernel
+        .sessions
+        .get_workspace(&workspace)
+        .await?
+        .and_then(|record| agentos_core::model::workspace_role(&record, &me));
+    let sessions: Vec<Value> = state
+        .kernel
+        .sessions
+        .list()
+        .await?
+        .into_iter()
+        .filter(|session| session.workspace_id.as_ref() == Some(&workspace))
+        .map(|session| {
+            let mut view = serde_json::to_value(&session).unwrap_or(Value::Null);
+            if let Some(object) = view.as_object_mut() {
+                // Every session of a workspace carries the workspace role: there is no per-session
+                // reading of access any more, and saying otherwise in two columns invites drift.
+                object.insert("my_role".into(), json!(role));
+            }
+            view
+        })
+        .collect();
+    Ok(Json(json!({ "workspace_id": id, "sessions": sessions, "total": sessions.len() })))
+}
+
+/// Create a conversation inside a workspace. The owner of the session is the workspace's owner.
+pub async fn create_workspace_session(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    Json(body): Json<CreateSessionRequest>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let record = state
+        .kernel
+        .sessions
+        .get_workspace(&workspace)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("workspace {id} does not exist"))))?;
+    let user = body.user_id.unwrap_or_else(|| me.user_id.clone());
+    let title = body.title.unwrap_or_else(|| "untitled session".into());
+    let session = state
+        .kernel
+        .sessions
+        .create_session_in(&workspace, &user, &title, Some(record.owner.clone()))
+        .await?;
+    Ok(Json(json!(session)))
+}
+
+/// Grant a role on a workspace: in force in every session of it, now and later.
+pub async fn grant_workspace_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    Json(body): Json<AccessRequest>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let role = parse_role(&body.role)?;
+    if body.user_id.trim().is_empty() {
+        return Err(ApiError(RuntimeError::invalid_input("user_id must not be empty")));
+    }
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let grant = agentos_core::model::SessionGrant::new(body.user_id.trim(), body.node_id, role);
+    let record = state.kernel.sessions.grant_workspace(&workspace, grant, &me).await?;
+    Ok(Json(json!({ "workspace": record })))
+}
+
+pub async fn revoke_workspace_access(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(body): Json<RevokeRequest>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let who = agentos_core::model::PrincipalRef::new(body.user_id.trim(), body.node_id);
+    let record = state.kernel.sessions.revoke_workspace(&workspace, &who).await?;
+    Ok(Json(json!({ "workspace": record })))
+}
+
+/// What this workspace narrowed, next to what the runtime offers.
+pub async fn workspace_capabilities(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let record = state
+        .kernel
+        .sessions
+        .get_workspace(&workspace)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("workspace {id} does not exist"))))?;
+    let registered: Vec<String> = state
+        .kernel
+        .registry
+        .list()
+        .into_iter()
+        .map(|descriptor| descriptor.name)
+        .collect();
+    let effective: Vec<String> = registered
+        .iter()
+        .filter(|name| record.capabilities.permits(name).is_ok())
+        .cloned()
+        .collect();
+    Ok(Json(json!({
+        "workspace_id": id,
+        "runtime": registered,
+        "workspace": record.capabilities,
+        "effective": effective,
+    })))
+}
+
+pub async fn set_workspace_capabilities(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    Json(body): Json<CapabilitiesRequest>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let current = state
+        .kernel
+        .sessions
+        .get_workspace(&workspace)
+        .await?
+        .map(|record| record.capabilities)
+        .unwrap_or_default();
+    let next = agentos_core::model::SessionCapabilities {
+        allow: match body.allow {
+            Some(value) => value,
+            None => current.allow,
+        },
+        deny: body.deny,
+        approval_required: body.approval_required,
+    };
+    let known: Vec<String> = state
+        .kernel
+        .registry
+        .list()
+        .into_iter()
+        .map(|descriptor| descriptor.name)
+        .collect();
+    let record = state
+        .kernel
+        .sessions
+        .set_workspace_capabilities(&workspace, next, &known, &me)
+        .await?;
+    Ok(Json(json!({ "workspace": record })))
+}
+
+/// The pending requests for a workspace. Its owner sees all of them; anyone else sees their own.
+pub async fn list_workspace_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let record = state
+        .kernel
+        .sessions
+        .get_workspace(&workspace)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("workspace {id} does not exist"))))?;
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let may_decide = may_grant_on_workspace(&record, &me);
+    let requests: Vec<&agentos_core::model::SessionAccessRequest> = if may_decide {
+        record.access_requests.iter().collect()
+    } else {
+        record
+            .access_requests
+            .iter()
+            .filter(|request| request.principal.matches(&me.as_ref()))
+            .collect()
+    };
+    Ok(Json(json!({
+        "workspace_id": id,
+        "may_decide": may_decide,
+        "requests": requests,
+    })))
+}
+
+/// Ask the owner for access to a workspace. Open to anyone the gateway authenticated: asking is
+/// the point.
+pub async fn request_workspace_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path(id): Path<String>,
+    Json(body): Json<AccessRequestBody>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let role = parse_role(&body.role)?;
+    if role == agentos_core::model::SessionRole::Owner {
+        return Err(ApiError(RuntimeError::invalid_input(
+            "ownership is not granted on request: ask for editor, participant or viewer",
+        )));
+    }
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let request = state
+        .kernel
+        .sessions
+        .request_workspace_access(&workspace, &me, role, body.note)
+        .await?;
+    Ok(Json(json!({ "request": request })))
+}
+
+pub async fn decide_workspace_access(
+    State(state): State<ApiState>,
+    principal: Option<Principal>,
+    Path((id, request_id)): Path<(String, String)>,
+    Json(body): Json<DecisionBody>,
+) -> ApiResult<Json<Value>> {
+    let workspace = parse_workspace(&id)?;
+    let role = match body.role.as_deref() {
+        Some(raw) => Some(parse_role(raw)?),
+        None => None,
+    };
+    let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let (record, decided) = state
+        .kernel
+        .sessions
+        .decide_workspace_access_request(&workspace, &request_id, body.approve, role, &me)
+        .await?;
+    Ok(Json(json!({ "request": decided, "workspace": record })))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -519,7 +969,14 @@ pub async fn session_capabilities(
         .into_iter()
         .map(|descriptor| descriptor.name)
         .collect();
-    let narrowing = record.capabilities.clone();
+    // Narrowing lives on the workspace when the session has one (D20): sharing a working unit shares
+    // its abilities. `scope` says which record answered, so a caller never has to guess which one to
+    // write to when it wants a change.
+    let workspace = state.kernel.sessions.workspace_of(&record).await?;
+    let narrowing = match &workspace {
+        Some(workspace) => workspace.capabilities.clone(),
+        None => record.capabilities.clone(),
+    };
     let effective: Vec<String> = registered
         .iter()
         .filter(|name| narrowing.permits(name).is_ok())
@@ -527,7 +984,11 @@ pub async fn session_capabilities(
         .collect();
     Ok(Json(json!({
         "session_id": id,
+        "scope": if workspace.is_some() { "workspace" } else { "session" },
+        "workspace_id": workspace.as_ref().map(|workspace| workspace.id.as_str().to_string()),
         "runtime": registered,
+        // The narrowing in force for this session, whichever record holds it. The key name predates
+        // workspaces; `scope` is what a client should branch on.
         "session": narrowing,
         "effective": effective,
     })))
@@ -562,13 +1023,19 @@ pub async fn set_session_capabilities(
 ) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
-    let current = state
+    let record = state
         .kernel
         .sessions
         .get(&session)
         .await?
-        .map(|record| record.capabilities)
-        .unwrap_or_default();
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
+    let workspace = state.kernel.sessions.workspace_of(&record).await?;
+    // Read what is in force before writing, so an omitted `allow` means "keep the current list"
+    // rather than "clear it" - and read it from the same record the write will go to.
+    let current = match &workspace {
+        Some(workspace) => workspace.capabilities.clone(),
+        None => record.capabilities.clone(),
+    };
     let next = agentos_core::model::SessionCapabilities {
         allow: match body.allow {
             Some(value) => value,
@@ -584,12 +1051,28 @@ pub async fn set_session_capabilities(
         .into_iter()
         .map(|descriptor| descriptor.name)
         .collect();
-    let record = state
-        .kernel
-        .sessions
-        .set_capabilities(&session, next, &known, &me)
-        .await?;
-    Ok(Json(json!({ "session": record })))
+    match workspace {
+        Some(workspace) => {
+            let changed = state
+                .kernel
+                .sessions
+                .set_workspace_capabilities(&workspace.id, next, &known, &me)
+                .await?;
+            Ok(Json(json!({
+                "session": record,
+                "workspace": changed,
+                "scope": "workspace",
+            })))
+        }
+        None => {
+            let record = state
+                .kernel
+                .sessions
+                .set_capabilities(&session, next, &known, &me)
+                .await?;
+            Ok(Json(json!({ "session": record, "scope": "session" })))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -601,6 +1084,9 @@ pub struct AccessRequestBody {
 }
 
 /// Ask the owner for access. Open to anyone the gateway authenticated: asking is the point.
+///
+/// A session with a workspace asks for the workspace (D20): a role is held in every session of it,
+/// so that is the thing to be granted. A legacy session with none still takes a session request.
 pub async fn request_session_access(
     State(state): State<ApiState>,
     principal: Option<Principal>,
@@ -608,12 +1094,7 @@ pub async fn request_session_access(
     Json(body): Json<AccessRequestBody>,
 ) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
-    let role = agentos_core::model::SessionRole::parse(&body.role).ok_or_else(|| {
-        ApiError(RuntimeError::invalid_input(format!(
-            "unknown role {:?}: use owner, editor, participant or viewer",
-            body.role
-        )))
-    })?;
+    let role = parse_role(&body.role)?;
     if role == agentos_core::model::SessionRole::Owner {
         // Ownership is not handed out by asking for it. Transfer is a decision, not a request.
         return Err(ApiError(RuntimeError::invalid_input(
@@ -621,15 +1102,37 @@ pub async fn request_session_access(
         )));
     }
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
-    let request = state
+    let record = state
         .kernel
         .sessions
-        .request_access(&session, &me, role, body.note)
-        .await?;
-    Ok(Json(json!({ "request": request })))
+        .get(&session)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
+    match state.kernel.sessions.workspace_of(&record).await? {
+        Some(workspace) => {
+            let request = state
+                .kernel
+                .sessions
+                .request_workspace_access(&workspace.id, &me, role, body.note)
+                .await?;
+            Ok(Json(json!({
+                "request": request,
+                "workspace_id": workspace.id.as_str(),
+                "scope": "workspace",
+            })))
+        }
+        None => {
+            let request = state
+                .kernel
+                .sessions
+                .request_access(&session, &me, role, body.note)
+                .await?;
+            Ok(Json(json!({ "request": request, "scope": "session" })))
+        }
+    }
 }
 
-/// The pending requests for a session. The owner sees all of them; anyone else sees their own.
+/// The pending requests that govern a session. The owner sees all of them; anyone else sees their own.
 pub async fn list_session_access(
     State(state): State<ApiState>,
     principal: Option<Principal>,
@@ -643,13 +1146,33 @@ pub async fn list_session_access(
         .await?
         .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let workspace = state.kernel.sessions.workspace_of(&record).await?;
+    if let Some(workspace) = workspace {
+        let may_decide = may_grant_on_workspace(&workspace, &me);
+        // A requester sees their own request and nothing else: the list of who else wants in is the
+        // owner's business.
+        let requests: Vec<&agentos_core::model::SessionAccessRequest> = if may_decide {
+            workspace.access_requests.iter().collect()
+        } else {
+            workspace
+                .access_requests
+                .iter()
+                .filter(|request| request.principal.matches(&me.as_ref()))
+                .collect()
+        };
+        return Ok(Json(json!({
+            "session_id": id,
+            "workspace_id": workspace.id.as_str(),
+            "scope": "workspace",
+            "may_decide": may_decide,
+            "requests": requests,
+        })));
+    }
     let mine = agentos_core::model::role_of(&record, &me);
     let may_decide = me.is_admin()
         || mine
             .map(|role| agentos_core::model::role_allows(role, agentos_core::model::SessionAction::Grant))
             .unwrap_or(false);
-    // A requester sees their own request and nothing else: the list of who else wants in is the
-    // owner's business.
     let requests: Vec<&agentos_core::model::SessionAccessRequest> = if may_decide {
         record.access_requests.iter().collect()
     } else {
@@ -661,6 +1184,7 @@ pub async fn list_session_access(
     };
     Ok(Json(json!({
         "session_id": id,
+        "scope": "session",
         "may_decide": may_decide,
         "requests": requests,
     })))
@@ -683,20 +1207,39 @@ pub async fn decide_session_access(
 ) -> ApiResult<Json<Value>> {
     let session = parse_session(&id)?;
     let role = match body.role.as_deref() {
-        Some(raw) => Some(agentos_core::model::SessionRole::parse(raw).ok_or_else(|| {
-            ApiError(RuntimeError::invalid_input(format!(
-                "unknown role {raw:?}: use owner, editor, participant or viewer"
-            )))
-        })?),
+        Some(raw) => Some(parse_role(raw)?),
         None => None,
     };
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
-    let (record, decided) = state
+    let record = state
         .kernel
         .sessions
-        .decide_access_request(&session, &request_id, body.approve, role, &me)
-        .await?;
-    Ok(Json(json!({ "request": decided, "session": record })))
+        .get(&session)
+        .await?
+        .ok_or_else(|| ApiError(RuntimeError::not_found(format!("session {id} does not exist"))))?;
+    match state.kernel.sessions.workspace_of(&record).await? {
+        Some(workspace) => {
+            let (workspace, decided) = state
+                .kernel
+                .sessions
+                .decide_workspace_access_request(&workspace.id, &request_id, body.approve, role, &me)
+                .await?;
+            Ok(Json(json!({
+                "request": decided,
+                "session": record,
+                "workspace": workspace,
+                "scope": "workspace",
+            })))
+        }
+        None => {
+            let (record, decided) = state
+                .kernel
+                .sessions
+                .decide_access_request(&session, &request_id, body.approve, role, &me)
+                .await?;
+            Ok(Json(json!({ "request": decided, "session": record, "scope": "session" })))
+        }
+    }
 }
 /// Everything waiting on this person, across every session.
 ///
@@ -1358,7 +1901,16 @@ pub async fn invoke_capability(
         .session_id
         .map(SessionId::from_raw)
         .unwrap_or_else(SessionId::new);
-    let caller = agentos_capability_runtime::capability::CallerContext::new(session);
+    // The named session decides the jail and the narrowing, so a direct invoke is as scoped as the
+    // agent loop that would otherwise have made the call.
+    let workspace = state
+        .kernel
+        .sessions
+        .get(&session)
+        .await?
+        .and_then(|record| record.workspace_id);
+    let caller = agentos_capability_runtime::capability::CallerContext::new(session)
+        .with_workspace(workspace);
     let result = state
         .kernel
         .mesh
@@ -1465,6 +2017,29 @@ pub async fn metrics(State(state): State<ApiState>) -> ApiResult<String> {
 
 fn parse_session(id: &str) -> ApiResult<SessionId> {
     SessionId::parse(id).map_err(|e| ApiError(RuntimeError::invalid_input(e.to_string())))
+}
+
+fn parse_workspace(id: &str) -> ApiResult<agentos_core::WorkspaceId> {
+    agentos_core::WorkspaceId::parse(id).map_err(|e| ApiError(RuntimeError::invalid_input(e.to_string())))
+}
+
+/// Parse the wire spelling of a role once, so "unrecognised role" is one message everywhere.
+fn parse_role(raw: &str) -> ApiResult<agentos_core::model::SessionRole> {
+    agentos_core::model::SessionRole::parse(raw).ok_or_else(|| {
+        ApiError(RuntimeError::invalid_input(format!(
+            "unknown role {raw:?}: use owner, editor, participant or viewer"
+        )))
+    })
+}
+
+fn may_grant_on_workspace(
+    record: &agentos_core::model::WorkspaceRecord,
+    me: &agentos_core::model::Principal,
+) -> bool {
+    me.is_admin()
+        || agentos_core::model::workspace_role(record, me)
+            .map(|role| agentos_core::model::role_allows(role, agentos_core::model::SessionAction::Grant))
+            .unwrap_or(false)
 }
 
 fn parse_event_kind(kind: &str) -> Option<EventKind> {

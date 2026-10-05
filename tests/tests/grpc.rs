@@ -73,6 +73,7 @@ async fn a_remote_client_can_run_a_goal_and_invoke_a_capability() {
             session_id: Some(session.clone()),
             actor_id: None,
             task_id: None,
+            workspace_id: None,
             timeout_ms: 5_000,
         })
         .await
@@ -88,6 +89,7 @@ async fn a_remote_client_can_run_a_goal_and_invoke_a_capability() {
             session_id: Some(session.clone()),
             actor_id: None,
             task_id: None,
+            workspace_id: None,
             timeout_ms: 5_000,
         })
         .await

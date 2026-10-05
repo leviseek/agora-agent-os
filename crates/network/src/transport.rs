@@ -60,6 +60,10 @@ impl CapabilityTransport for GrpcCapabilityTransport {
                 session_id: None,
                 actor_id: None,
                 task_id: None,
+                // The transport seam carries no caller context today (not even a session id), so a
+                // remote call made through it lands in the node's legacy root. Set here from the
+                // caller once the seam is widened; the wire already has the field.
+                workspace_id: None,
                 timeout_ms,
             })
             .await?;

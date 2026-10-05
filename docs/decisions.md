@@ -267,3 +267,25 @@ directory; discovery shares knowledge, not state.
 `a_workspace_owns_its_sessions_and_shares_them_with_one_decision`（一条工作区授权 = 其内所有会话生效，
 含之后新建的会话）、`one_workspace_cannot_reach_another_workspace_files`（同一路径在 B 里 `not_found`，
 `../` 越界 `policy_denied`）。
+
+**后续（网关阶段，2026-10-05）。** 上述代价逐条收口：
+1. 网关每次建会话都必须落到一个工作区——没点名就用目标用户的**默认工作区**（首次自动建，`metadata.default=true`），
+   所以「每个会话都有工作区」从这一层起就是不变式，只剩升级前写入、`workspace_id` 为空的历史记录仍走根目录。
+   分支（`branch`）继承源会话的工作区；从归档恢复（`restore_archive`）落到恢复者/原主的默认工作区。
+2. gRPC 的 `InvokeRequest` 增加 `workspace_id`（field 9，向后兼容），`KernelCapabilityHandler` 据此设定
+   `CallerContext.workspace`，远程能力调用与本地同样受 jail 约束。仍有缺口：`CapabilityTransport::call`
+   这一层的签名根本不携带调用者（连 session 都没有），经它发起的能力调用仍落根目录——线上字段已备好，等这条
+   缝被拓宽。
+3. 能力收窄移到工作区：`WorkspaceRecord.capabilities` + `SessionCapabilitySource::for_scope(session, workspace)`，
+   网关新增 `PUT /v1/workspaces/{id}/capabilities`，会话级路由写的是工作区。会话记录上的旧 `capabilities` 仅对
+   无工作区的历史记录仍然生效。
+4. 会话级授权/申请路由改为**委派**工作区：`/v1/sessions/{id}/access`、`.../access-requests`、`.../capabilities`
+   照旧可用，响应带 `scope: "workspace"` 与真正变更的 `workspace` 记录；`decide` 通过 `grant_workspace` 落地，
+   所以审批与手写授权产出同一种东西。跨工作区收件箱 `/v1/access-requests` 同时汇总工作区与历史会话请求。
+5. 守卫的 ACL 改为两个域：`RequiredAccess::Session`（经 `decide_in` 读工作区）与 `RequiredAccess::Workspace`
+   （`decide_workspace`）。工作区动作复用同一张角色表——读=Read、在工作区建会话=Chat、改名/收窄/授权=Grant——
+   不为工作区再写第二张表，正是「同一角色在两处漂移」的源头。
+
+验证：`cargo test -p agentos-tests --test api` 覆盖工作区 HTTP 全链（建/列/授权/审批/降权/收窄/改名，
+40 passed）；`one_workspace_cannot_reach_another_workspace_files` 与
+`a_workspace_owns_its_sessions_and_shares_them_with_one_decision` 在 acceptance 层钉住目录隔离与一条授权生效。
