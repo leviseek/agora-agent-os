@@ -289,3 +289,11 @@ directory; discovery shares knowledge, not state.
 验证：`cargo test -p agentos-tests --test api` 覆盖工作区 HTTP 全链（建/列/授权/审批/降权/收窄/改名，
 40 passed）；`one_workspace_cannot_reach_another_workspace_files` 与
 `a_workspace_owns_its_sessions_and_shares_them_with_one_decision` 在 acceptance 层钉住目录隔离与一条授权生效。
+
+**后续（控制台阶段，2026-10-05）。** 新增 `工作区` 视图（列表/创建/切换、成员授权与撤销、能力收窄编辑），
+会话列表按选中工作区分组并显示 `工作区` 列，新建会话默认落到选中的工作区（未选则「我的默认工作区」），
+访问申请页改为按「工作区或会话」区分目标：审批走工作区路由，申请人的列表也按工作区展示。
+能力编辑器现在一个组件两种作用域（`sessionId` / `workspaceId`），并显式标明「这收窄的是整个工作区」。
+验证方式与仓库既有做法一致：真实浏览器（headless Chrome over CDP）跑一遍
+`scripts/cdp-workspaces.mjs`——连接 → 建工作区 → 在其中建会话 → 列表里该会话的「工作区」列显示该工作区，
+且无浏览器侧异常。

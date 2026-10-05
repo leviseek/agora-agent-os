@@ -24,6 +24,9 @@ import type {
   RuntimeMeta,
   SessionDetail,
   SessionSummary,
+  WorkspaceCapabilitiesResponse,
+  WorkspaceRecord,
+  WorkspaceSummary,
 } from './api';
 import { EventStream } from './ws';
 import type { ServerMessage, WsDetail, WsStatus } from './ws';
@@ -36,6 +39,9 @@ const AUTO_RECONNECT_KEY = 'agentos.wsAutoReconnect';
 // node it is the only thing that separates their sessions from somebody else's.
 const IDENTITY_USER_KEY = 'agentos.identity.user';
 const IDENTITY_NODE_KEY = 'agentos.identity.node';
+// The workspace the console is working in. Persisted because switching tabs or reloading must not
+// silently move somebody to another working unit.
+const WORKSPACE_KEY = 'agentos.workspace';
 
 /** Live events kept in memory; older ones are still available from /v1/events. */
 const EVENT_BUFFER_LIMIT = 1500;
@@ -224,6 +230,29 @@ export interface AppStoreValue {
   sessions: SessionSummary[];
   sessionsError: ApiError | null;
   sessionsLoading: boolean;
+  /** Every workspace, with the caller's own role on each. */
+  workspaces: WorkspaceSummary[];
+  workspacesError: ApiError | null;
+  workspacesLoading: boolean;
+  refreshWorkspaces: () => Promise<void>;
+  createWorkspace: (name: string) => Promise<string | null>;
+  renameWorkspace: (id: string, name: string) => Promise<boolean>;
+  /**
+   * The workspace this console is working in, or null for "all of them".
+   *
+   * A filter rather than a permission: the runtime decides what may be seen and done, and this only
+   * decides which of those the session list puts in front of you.
+   */
+  selectedWorkspaceId: string | null;
+  selectWorkspace: (id: string | null) => void;
+  grantWorkspaceAccess: (id: string, userId: string, nodeId: string | null, role: string) => Promise<boolean>;
+  revokeWorkspaceAccess: (id: string, userId: string, nodeId?: string | null) => Promise<boolean>;
+  loadWorkspaceCapabilities: (id: string) => Promise<WorkspaceCapabilitiesResponse | null>;
+  saveWorkspaceCapabilities: (id: string, allow: string[] | null) => Promise<boolean>;
+  requestWorkspaceAccess: (id: string, role: string, note?: string) => Promise<boolean>;
+  decideWorkspaceAccess: (id: string, requestId: string, approve: boolean, role?: string) => Promise<boolean>;
+  /** The workspace records themselves, for a view that needs the full record (members). */
+  workspaceById: (id: string | null) => WorkspaceRecord | null;
   /** Live answer text per run, replaced by the stored answer once the run finishes. */
   /**
    * The live preview of an answer still being written, per session.
@@ -283,7 +312,7 @@ export interface AppStoreValue {
   setSessionQuery: (next: string) => void;
   refreshSessions: () => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
-  createSession: (title: string, userId: string) => Promise<string | null>;
+  createSession: (title: string, userId: string, workspaceId?: string | null) => Promise<string | null>;
   selectSession: (id: string | null) => void;
   refreshDetail: (id?: string) => Promise<void>;
   closeSession: (id: string) => Promise<void>;
@@ -372,6 +401,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [login, setLogin] = useState<LoginResponse | null>(null);
 
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [workspacesError, setWorkspacesError] = useState<ApiError | null>(null);
+  const [workspacesLoading, setWorkspacesLoading] = useState(false);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
+    () => readStorage(WORKSPACE_KEY),
+  );
   const [sessionQuery, setSessionQueryState] = useState<string>('');
   // Live answer text per run, replaced by the stored answer when the run completes.
   const [streamed, setStreamed] = useState<Map<string, Map<string, string>>>(() => new Map());
@@ -551,6 +586,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (): Promise<void> => loadSessions(clientRef.current, queryRef.current),
     [loadSessions],
   );
+
+  /**
+   * Read the workspace list with a specific client, so `connect` can use the client it just built
+   * rather than waiting a render for `clientRef` to catch up.
+   */
+  const loadWorkspaces = useCallback(async (active: AgentOsClient): Promise<void> => {
+    setWorkspacesLoading(true);
+    try {
+      const response = await active.listWorkspaces();
+      setWorkspaces(response.workspaces);
+      setWorkspacesError(null);
+    } catch (cause) {
+      setWorkspacesError(toApiError(cause));
+    } finally {
+      setWorkspacesLoading(false);
+    }
+  }, []);
 
   const configureSession = useCallback(
     async (id: string, patch: { title?: string; model?: string; effort?: string }): Promise<void> => {
@@ -788,11 +840,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       setConnection('online');
       await loadSessions(active);
+      // Workspaces come with the connection: they are what the console groups sessions by, and a
+      // list that arrives after the first paint would flash the wrong grouping.
+      await loadWorkspaces(active);
     } catch (cause) {
       setConnectionError(toApiError(cause));
       setConnection('error');
     }
-  }, [baseUrl, token, identityUser, identityNode, loadSessions]);
+  }, [baseUrl, token, identityUser, identityNode, loadSessions, loadWorkspaces]);
 
   const disconnect = useCallback((): void => {
     stream.close();
@@ -812,13 +867,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [stream]);
 
   const createSession = useCallback(
-    async (title: string, userId: string): Promise<string | null> => {
+    async (title: string, userId: string, workspaceId?: string | null): Promise<string | null> => {
       setBusy(true);
       setActionError(null);
       try {
         const trimmedUser = userId.trim().length > 0 ? userId.trim() : 'anonymous';
         const trimmedTitle = title.trim().length > 0 ? title.trim() : 'untitled session';
-        const record = await clientRef.current.createSession(trimmedUser, trimmedTitle);
+        // Which workspace was chosen, or null for "the caller's own default". The runtime creates
+        // that default on first use, so a client that has never heard of workspaces still gets one.
+        const target = workspaceId === undefined ? selectedWorkspaceId : workspaceId;
+        const record = await clientRef.current.createSession(trimmedUser, trimmedTitle, target);
         await refreshSessions();
         setSelectedSessionId(record.id);
         await refreshDetail(record.id);
@@ -830,7 +888,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [refreshDetail, refreshSessions],
+    [refreshDetail, refreshSessions, selectedWorkspaceId],
   );
 
   const selectSession = useCallback(
@@ -960,6 +1018,169 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const getArchive = useCallback(
     async (id: string): Promise<ArchiveDetail> => clientRef.current.getArchive(id),
     [],
+  );
+
+  // ------------------------------------------------------------------ workspaces
+
+  const refreshWorkspaces = useCallback(
+    (): Promise<void> => loadWorkspaces(clientRef.current),
+    [loadWorkspaces],
+  );
+
+  const selectWorkspace = useCallback((id: string | null): void => {
+    setSelectedWorkspaceId(id);
+    writeStorage(WORKSPACE_KEY, id);
+  }, []);
+
+  const createWorkspace = useCallback(
+    async (name: string): Promise<string | null> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        const response = await clientRef.current.createWorkspace(name.trim());
+        await refreshWorkspaces();
+        // Creating one is also choosing it: a workspace you just made is where you are working.
+        selectWorkspace(response.workspace.id);
+        return response.workspace.id;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshWorkspaces, selectWorkspace],
+  );
+
+  const renameWorkspace = useCallback(
+    async (id: string, name: string): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.renameWorkspace(id, name.trim());
+        await refreshWorkspaces();
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshWorkspaces],
+  );
+
+  const grantWorkspaceAccess = useCallback(
+    async (id: string, userId: string, nodeId: string | null, role: string): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.grantWorkspaceAccess(id, userId.trim(), nodeId, role);
+        // A role on a workspace is a role in every session of it, so the session list moves too.
+        await refreshWorkspaces();
+        await refreshSessions();
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshSessions, refreshWorkspaces],
+  );
+
+  const revokeWorkspaceAccess = useCallback(
+    async (id: string, userId: string, nodeId?: string | null): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.revokeWorkspaceAccess(id, userId.trim(), nodeId);
+        await refreshWorkspaces();
+        await refreshSessions();
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshSessions, refreshWorkspaces],
+  );
+
+  const loadWorkspaceCapabilities = useCallback(
+    async (id: string): Promise<WorkspaceCapabilitiesResponse | null> => {
+      try {
+        return await clientRef.current.workspaceCapabilities(id);
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return null;
+      }
+    },
+    [],
+  );
+
+  const saveWorkspaceCapabilities = useCallback(
+    async (id: string, allow: string[] | null): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.setWorkspaceCapabilities(id, { allow });
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  const requestWorkspaceAccess = useCallback(
+    async (id: string, role: string, note?: string): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.requestWorkspaceAccess(id, role, note);
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  const decideWorkspaceAccess = useCallback(
+    async (id: string, requestId: string, approve: boolean, role?: string): Promise<boolean> => {
+      setBusy(true);
+      setActionError(null);
+      try {
+        await clientRef.current.decideWorkspaceAccess(id, requestId, approve, role);
+        // An approval changes who may do what, everywhere in the workspace.
+        await refreshWorkspaces();
+        await refreshSessions();
+        return true;
+      } catch (cause) {
+        setActionError(toApiError(cause));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshSessions, refreshWorkspaces],
+  );
+
+  const workspaceById = useCallback(
+    (id: string | null): WorkspaceRecord | null => {
+      if (id === null) return null;
+      return workspaces.find((entry) => entry.workspace.id === id)?.workspace ?? null;
+    },
+    [workspaces],
   );
 
   const loadCapabilities = useCallback(
@@ -1224,6 +1445,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessions,
       sessionsError,
       sessionsLoading,
+      workspaces,
+      workspacesError,
+      workspacesLoading,
+      refreshWorkspaces,
+      createWorkspace,
+      renameWorkspace,
+      selectedWorkspaceId,
+      selectWorkspace,
+      grantWorkspaceAccess,
+      revokeWorkspaceAccess,
+      loadWorkspaceCapabilities,
+      saveWorkspaceCapabilities,
+      requestWorkspaceAccess,
+      decideWorkspaceAccess,
+      workspaceById,
       streamed,
       approvals,
       approvalsUnsupported,
@@ -1304,6 +1540,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
       sessions,
       sessionsError,
       sessionsLoading,
+      workspaces,
+      workspacesError,
+      workspacesLoading,
+      refreshWorkspaces,
+      createWorkspace,
+      renameWorkspace,
+      selectedWorkspaceId,
+      selectWorkspace,
+      grantWorkspaceAccess,
+      revokeWorkspaceAccess,
+      loadWorkspaceCapabilities,
+      saveWorkspaceCapabilities,
+      requestWorkspaceAccess,
+      decideWorkspaceAccess,
+      workspaceById,
       streamed,
       approvals,
       approvalsUnsupported,

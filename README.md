@@ -55,6 +55,7 @@ acceptance suite and the demo run with no network. Add `DEEPSEEK_API_KEY` / `OPE
 | `GET /v1/sessions/{id}/export?format=markdown` | the whole conversation as a document, with what each run cost |
 | `POST /v1/sessions/{id}/branch` | fork a session: inherits the conversation, then lives its own life |
 | `node scripts/cdp-errors.mjs <cdp-endpoint> <console-url> <runtime-url>` | drives a headless browser through connect and the views, printing browser-side errors |
+| `node scripts/cdp-workspaces.mjs <cdp-endpoint> <console-url>` | a real browser connects, creates a workspace, creates a session inside it, and the session list reports that workspace as the session's column (prints the visible text and any browser-side error) |
 
 ---
 
@@ -382,8 +383,10 @@ absolute paths are rejected before any IO happens (`Workspace`).
 * libp2p (feature `p2p`): mDNS discovery, identify, ping and a gossipsub control channel.
   Deliberately not on the hot path.
 * CLI: `start`, `doctor`, `demo`, session/task/capability/worker/actor/agent subcommands.
-* Clients: React + React Flow web client (sessions, chat, agent state, task graph, capabilities,
-  topology, events, settings) and a Tauri 2 shell that reuses it.
+* Clients: React + React Flow web client (workspaces, sessions, chat, agent state, task graph,
+  capabilities, topology, events, settings) and a Tauri 2 shell that reuses it. The session list
+  groups by workspace and creates into the one that is selected; the workspaces view is where a
+  working unit is created, shared and narrowed.
 * Internationalisation: the console ships **English and Simplified Chinese**, switchable at runtime
   from the sidebar or Settings; the choice is remembered per browser and seeded from the browser
   language. Keys are typed from the English table, so a missing translation fails the build, and

@@ -49,6 +49,9 @@ export function SessionsView() {
     viewDrafts,
     updateViewDraft,
     meta,
+    workspaces,
+    selectedWorkspaceId,
+    selectWorkspace,
   } = useApp();
   const { setView } = useNav();
 
@@ -69,12 +72,25 @@ export function SessionsView() {
   const onCreate = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     setCreating(true);
-    const id = await createSession(title, userId);
+    // The session goes into the workspace this console is working in, or into the caller's own
+    // default one when none is chosen. The runtime never leaves a session without a workspace.
+    const id = await createSession(title, userId, selectedWorkspaceId);
     setCreating(false);
     if (id !== null) {
       setTitle('');
       setView('chat');
     }
+  };
+
+  // The chosen workspace is a filter, not a permission: the runtime already decided what this caller
+  // may see, and this only decides what the list puts in front of them.
+  const visible =
+    selectedWorkspaceId === null
+      ? sessions
+      : sessions.filter((session) => (session.workspace_id ?? null) === selectedWorkspaceId);
+  const workspaceName = (id: string | null | undefined): string => {
+    if (id === null || id === undefined || id === '') return t('sessions.noWorkspace');
+    return workspaces.find((entry) => entry.workspace.id === id)?.workspace.name ?? id;
   };
 
   const onSelect = (id: string): void => {
@@ -148,6 +164,20 @@ export function SessionsView() {
               onChange={(event) => setUserId(event.target.value)}
             />
           </label>
+          <label className="field">
+            <span>{t('workspaces.column')}</span>
+            <select
+              value={selectedWorkspaceId ?? ''}
+              onChange={(event) => selectWorkspace(event.target.value === '' ? null : event.target.value)}
+            >
+              <option value="">{t('sessions.defaultWorkspace')}</option>
+              {workspaces.map((entry) => (
+                <option key={entry.workspace.id} value={entry.workspace.id}>
+                  {entry.workspace.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <button type="submit" className="btn" disabled={creating || connection !== 'online'}>
             {creating ? t('common.creating') : t('sessions.create')}
           </button>
@@ -156,12 +186,26 @@ export function SessionsView() {
 
       <Panel
         title={t('sessions.title')}
-        subtitle={t('sessions.count', { n: sessions.length })}
+        subtitle={
+          selectedWorkspaceId === null
+            ? t('sessions.count', { n: sessions.length })
+            : t('sessions.countInWorkspace', {
+                n: visible.length,
+                name: workspaceName(selectedWorkspaceId),
+              })
+        }
         flush
         actions={
-          <button type="button" className="btn btn-ghost btn-small" onClick={() => void refreshSessions()}>
-            {sessionsLoading ? t('common.refreshing') : t('common.refresh')}
-          </button>
+          <>
+            {selectedWorkspaceId !== null ? (
+              <button type="button" className="btn btn-ghost btn-small" onClick={() => selectWorkspace(null)}>
+                {t('workspaces.showAll')}
+              </button>
+            ) : null}
+            <button type="button" className="btn btn-ghost btn-small" onClick={() => void refreshSessions()}>
+              {sessionsLoading ? t('common.refreshing') : t('common.refresh')}
+            </button>
+          </>
         }
       >
         <ApiErrorBanner error={sessionsError} scope="GET /v1/sessions" onRetry={() => void refreshSessions()} />
@@ -181,7 +225,7 @@ export function SessionsView() {
           ) : null}
         </div>
 
-        {sessions.length === 0 ? (
+        {visible.length === 0 ? (
           sessionsLoading ? (
             <Loading label={t('sessions.loading')} />
           ) : (
@@ -192,7 +236,7 @@ export function SessionsView() {
             <thead>
               <tr>
                 <th>{t('sessions.sessionTitle')}</th>
-                <th>{t('sessions.sessionId')}</th>
+                <th>{t('workspaces.column')}</th>
                 <th>{t('common.state')}</th>
                 <th>{t('sessions.owner')}</th>
                 <th>{t('sessions.msgs')}</th>
@@ -201,16 +245,14 @@ export function SessionsView() {
               </tr>
             </thead>
             <tbody>
-              {sessions.map((session) => (
+              {visible.map((session) => (
                 <tr
                   key={session.id}
                   className={session.id === selectedSessionId ? 'row-selected' : undefined}
                   onClick={() => selectSession(session.id)}
                 >
                   <td>{session.title}</td>
-                  <td>
-                    <Mono title={session.id}>{session.id}</Mono>
-                  </td>
+                  <td className="muted small">{workspaceName(session.workspace_id)}</td>
                   <td>
                     <Badge tone={stateTone(session.state)}>{tState(session.state)}</Badge>
                   </td>

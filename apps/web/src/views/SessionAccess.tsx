@@ -9,28 +9,79 @@ import { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../store';
 import { useI18n } from '../i18n';
 import { ApiErrorBanner, Badge } from '../components';
-import type { AccessRequest, SessionCapabilitiesResponse } from '../api';
+import type { AccessRequest, SessionCapabilities } from '../api';
 import { formatDateTime } from '../format';
 
-/** The runtime's capabilities, with the session's narrowing on top. */
-export function CapabilitiesEditor({ sessionId, canEdit }: { sessionId: string; canEdit: boolean }) {
+/** What a scope narrows, normalized so one editor renders both a session and a workspace. */
+interface NarrowingView {
+  runtime: string[];
+  narrowing: SessionCapabilities;
+  effective: string[];
+  /** Which record answered, so the page can say where the change will land. */
+  scope: 'session' | 'workspace';
+}
+
+/**
+ * The runtime's capabilities, with this scope's narrowing on top.
+ *
+ * One component for two scopes because the question is the same and the answer must not be: pass
+ * `workspaceId` to change what the whole working unit may use (which every session in it inherits),
+ * or `sessionId` to read the narrowing in force for one conversation.
+ */
+export function CapabilitiesEditor({
+  sessionId,
+  workspaceId,
+  canEdit,
+}: {
+  sessionId?: string;
+  workspaceId?: string;
+  canEdit: boolean;
+}) {
   const { t } = useI18n();
-  const { loadCapabilities, saveCapabilities, busy, actionError } = useApp();
-  const [state, setState] = useState<SessionCapabilitiesResponse | null>(null);
+  const {
+    loadCapabilities,
+    saveCapabilities,
+    loadWorkspaceCapabilities,
+    saveWorkspaceCapabilities,
+    busy,
+    actionError,
+  } = useApp();
+  const [state, setState] = useState<NarrowingView | null>(null);
   const [narrowing, setNarrowing] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
 
   const reload = useCallback(async (): Promise<void> => {
-    const response = await loadCapabilities(sessionId);
+    let response: NarrowingView | null = null;
+    if (workspaceId !== undefined) {
+      const raw = await loadWorkspaceCapabilities(workspaceId);
+      if (raw !== null) {
+        response = {
+          runtime: raw.runtime,
+          narrowing: raw.workspace,
+          effective: raw.effective,
+          scope: 'workspace',
+        };
+      }
+    } else if (sessionId !== undefined) {
+      const raw = await loadCapabilities(sessionId);
+      if (raw !== null) {
+        response = {
+          runtime: raw.runtime,
+          narrowing: raw.session,
+          effective: raw.effective,
+          scope: raw.scope ?? 'session',
+        };
+      }
+    }
     setState(response);
-    if (response !== null && response.session.allow !== null) {
+    if (response !== null && response.narrowing.allow !== null) {
       setNarrowing(true);
-      setPicked(response.session.allow);
+      setPicked(response.narrowing.allow);
     } else {
       setNarrowing(false);
       setPicked([]);
     }
-  }, [loadCapabilities, sessionId]);
+  }, [loadCapabilities, loadWorkspaceCapabilities, sessionId, workspaceId]);
 
   useEffect(() => {
     void reload();
@@ -39,7 +90,13 @@ export function CapabilitiesEditor({ sessionId, canEdit }: { sessionId: string; 
   const save = async (): Promise<void> => {
     // null is "whatever the runtime allows": the way back from a narrowing is to clear it, not to
     // tick everything, which would freeze today's list as a permanent allow list.
-    const ok = await saveCapabilities(sessionId, narrowing ? picked : null);
+    const allow = narrowing ? picked : null;
+    const ok =
+      workspaceId !== undefined
+        ? await saveWorkspaceCapabilities(workspaceId, allow)
+        : sessionId !== undefined
+          ? await saveCapabilities(sessionId, allow)
+          : false;
     if (ok) await reload();
   };
 
@@ -49,7 +106,20 @@ export function CapabilitiesEditor({ sessionId, canEdit }: { sessionId: string; 
 
   return (
     <div className="stack-tight">
-      <ApiErrorBanner error={actionError} scope="PUT /v1/sessions/{id}/capabilities" onRetry={() => void reload()} />
+      <ApiErrorBanner
+        error={actionError}
+        scope={
+          state.scope === 'workspace'
+            ? 'PUT /v1/workspaces/{id}/capabilities'
+            : 'PUT /v1/sessions/{id}/capabilities'
+        }
+        onRetry={() => void reload()}
+      />
+      <p className="muted small">
+        {state.scope === 'workspace'
+          ? t('access.scope.workspace')
+          : t('access.scope.session')}
+      </p>
       <fieldset className="fieldset">
         <legend>{t('access.narrowing')}</legend>
         <label className="check">
@@ -97,14 +167,14 @@ export function CapabilitiesEditor({ sessionId, canEdit }: { sessionId: string; 
       <p className="muted small">
         {t('access.effective', { n: state.effective.length, list: state.effective.join(', ') })}
       </p>
-      {state.session.deny.length > 0 ? (
+      {state.narrowing.deny.length > 0 ? (
         <p className="muted small">
-          {t('access.denied', { list: state.session.deny.join(', ') })}
+          {t('access.denied', { list: state.narrowing.deny.join(', ') })}
         </p>
       ) : null}
-      {state.session.approval_required.length > 0 ? (
+      {state.narrowing.approval_required.length > 0 ? (
         <p className="muted small">
-          {t('access.needsApproval', { list: state.session.approval_required.join(', ') })}
+          {t('access.needsApproval', { list: state.narrowing.approval_required.join(', ') })}
         </p>
       ) : null}
       {canEdit ? (

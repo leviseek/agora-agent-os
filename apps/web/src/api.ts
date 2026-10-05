@@ -442,6 +442,9 @@ export interface SessionAccess {
 /** What a session may use, and what the runtime offers. */
 export interface SessionCapabilitiesResponse {
   session_id: string;
+  /** Which record holds the narrowing: the session, or its workspace (D20). */
+  scope?: 'session' | 'workspace';
+  workspace_id?: string | null;
   runtime: string[];
   session: SessionCapabilities;
   effective: string[];
@@ -466,10 +469,14 @@ export interface AccessRequest {
   granted_role?: string | null;
 }
 
-/** One request, with enough about its session to act on it without opening it. */
+/** One request, naming whatever it is about: a workspace, or a pre-workspace session. */
 export interface AccessInboxEntry {
-  session_id: string;
-  session_title: string;
+  /** The workspace the request is about, since access is decided there. */
+  workspace_id?: string | null;
+  workspace_name?: string | null;
+  /** The conversation, for a request made before workspaces existed. */
+  session_id?: string | null;
+  session_title?: string | null;
   session_owner?: { user_id: string; node_id?: string | null } | null;
   request: AccessRequest;
 }
@@ -483,10 +490,60 @@ export interface AccessInboxResponse {
 }
 
 export interface AccessRequestsResponse {
-  session_id: string;
+  session_id?: string;
+  workspace_id?: string;
+  scope?: 'session' | 'workspace';
   /** True when the caller may answer them. */
   may_decide: boolean;
   requests: AccessRequest[];
+}
+
+/** A role handed out on a workspace: in force in every session of it. */
+export interface WorkspaceGrant {
+  user_id: string;
+  node_id?: string | null;
+  role: string;
+  granted_by?: string | null;
+  granted_at?: number | null;
+}
+
+/** The durable workspace record. */
+export interface WorkspaceRecord {
+  id: string;
+  name: string;
+  owner: { user_id: string; node_id?: string | null };
+  created_at: number;
+  updated_at: number;
+  archived_at?: number | null;
+  grants: WorkspaceGrant[];
+  access_requests: AccessRequest[];
+  metadata?: Record<string, string>;
+  capabilities?: SessionCapabilities;
+}
+
+/** A workspace as a list renders it: the record plus what the caller may do in it. */
+export interface WorkspaceSummary {
+  workspace: WorkspaceRecord;
+  workspace_role: string | null;
+  can: string[];
+  session_count?: number;
+}
+
+export interface WorkspacesResponse {
+  workspaces: WorkspaceSummary[];
+  total: number;
+}
+
+export interface WorkspaceDetail extends WorkspaceSummary {
+  sessions: SessionSummary[];
+}
+
+/** What a workspace narrowed, which is what every session in it inherits. */
+export interface WorkspaceCapabilitiesResponse {
+  workspace_id: string;
+  runtime: string[];
+  workspace: SessionCapabilities;
+  effective: string[];
 }
 
 /** What an archive package says about itself. */
@@ -987,11 +1044,116 @@ export class AgentOsClient {
     return this.request<SessionsResponse>('/v1/sessions', { method: 'GET' });
   }
 
-  createSession(userId: string, title: string): Promise<SessionRecord> {
-    return this.request<SessionRecord>('/v1/sessions', {
+  createSession(userId: string, title: string, workspaceId?: string | null): Promise<SessionRecord> {
+    const json: Record<string, unknown> = { user_id: userId, title };
+    // Named, the session goes into that workspace; omitted, the runtime uses the caller's own
+    // default one. Either way the session has a workspace, which is what access is decided on.
+    if (workspaceId !== undefined && workspaceId !== null && workspaceId.length > 0) {
+      json.workspace_id = workspaceId;
+    }
+    return this.request<SessionRecord>('/v1/sessions', { method: 'POST', json });
+  }
+
+  // --- workspaces ------------------------------------------------------------------------
+
+  listWorkspaces(): Promise<WorkspacesResponse> {
+    return this.request<WorkspacesResponse>('/v1/workspaces', { method: 'GET' });
+  }
+
+  createWorkspace(name: string): Promise<{ workspace: WorkspaceRecord }> {
+    return this.request('/v1/workspaces', { method: 'POST', json: { name } });
+  }
+
+  getWorkspace(id: string): Promise<WorkspaceDetail> {
+    return this.request<WorkspaceDetail>('/v1/workspaces/' + encodeURIComponent(id), { method: 'GET' });
+  }
+
+  renameWorkspace(id: string, name: string): Promise<{ workspace: WorkspaceRecord }> {
+    return this.request('/v1/workspaces/' + encodeURIComponent(id), { method: 'PATCH', json: { name } });
+  }
+
+  listWorkspaceSessions(id: string): Promise<{ workspace_id: string; sessions: SessionSummary[]; total: number }> {
+    return this.request('/v1/workspaces/' + encodeURIComponent(id) + '/sessions', { method: 'GET' });
+  }
+
+  /** Create a conversation inside a workspace. The session's owner is the workspace's owner. */
+  createWorkspaceSession(id: string, userId: string, title: string): Promise<SessionRecord> {
+    return this.request<SessionRecord>('/v1/workspaces/' + encodeURIComponent(id) + '/sessions', {
       method: 'POST',
       json: { user_id: userId, title },
     });
+  }
+
+  workspaceCapabilities(id: string): Promise<WorkspaceCapabilitiesResponse> {
+    return this.request<WorkspaceCapabilitiesResponse>(
+      '/v1/workspaces/' + encodeURIComponent(id) + '/capabilities',
+      { method: 'GET' },
+    );
+  }
+
+  setWorkspaceCapabilities(
+    id: string,
+    body: { allow: string[] | null; deny?: string[]; approval_required?: string[] },
+  ): Promise<{ workspace: WorkspaceRecord }> {
+    return this.request('/v1/workspaces/' + encodeURIComponent(id) + '/capabilities', {
+      method: 'PUT',
+      json: body,
+    });
+  }
+
+  /** Grant a role on a workspace: one decision, in force in every session of it. */
+  grantWorkspaceAccess(
+    id: string,
+    userId: string,
+    nodeId: string | null,
+    role: string,
+  ): Promise<{ workspace: WorkspaceRecord }> {
+    const json: Record<string, unknown> = { user_id: userId, role };
+    if (nodeId !== null && nodeId.length > 0) json.node_id = nodeId;
+    return this.request('/v1/workspaces/' + encodeURIComponent(id) + '/access', { method: 'POST', json });
+  }
+
+  revokeWorkspaceAccess(id: string, userId: string, nodeId?: string | null): Promise<{ workspace: WorkspaceRecord }> {
+    const json: Record<string, unknown> = { user_id: userId };
+    if (nodeId !== undefined && nodeId !== null && nodeId.length > 0) json.node_id = nodeId;
+    return this.request('/v1/workspaces/' + encodeURIComponent(id) + '/access', {
+      method: 'DELETE',
+      json,
+    });
+  }
+
+  workspaceAccessRequests(id: string): Promise<AccessRequestsResponse> {
+    return this.request<AccessRequestsResponse>(
+      '/v1/workspaces/' + encodeURIComponent(id) + '/access-requests',
+      { method: 'GET' },
+    );
+  }
+
+  requestWorkspaceAccess(
+    id: string,
+    role: string,
+    note?: string,
+  ): Promise<{ request: AccessRequest; workspace_id?: string }> {
+    return this.request('/v1/workspaces/' + encodeURIComponent(id) + '/access-requests', {
+      method: 'POST',
+      json: note === undefined ? { role } : { role, note },
+    });
+  }
+
+  decideWorkspaceAccess(
+    id: string,
+    requestId: string,
+    approve: boolean,
+    role?: string,
+  ): Promise<{ request: AccessRequest; workspace: WorkspaceRecord }> {
+    return this.request(
+      '/v1/workspaces/' +
+        encodeURIComponent(id) +
+        '/access-requests/' +
+        encodeURIComponent(requestId) +
+        '/decide',
+      { method: 'POST', json: role === undefined ? { approve } : { approve, role } },
+    );
   }
 
   getSession(id: string): Promise<SessionDetail> {
@@ -1064,7 +1226,7 @@ export class AgentOsClient {
     requestId: string,
     approve: boolean,
     role?: string,
-  ): Promise<{ request: AccessRequest; session: SessionRecord }> {
+  ): Promise<{ request: AccessRequest; session?: SessionRecord; workspace?: WorkspaceRecord; scope?: string }> {
     return this.request(
       '/v1/sessions/' + encodeURIComponent(id) + '/access-requests/' + encodeURIComponent(requestId) + '/decide',
       { method: 'POST', json: role === undefined ? { approve } : { approve, role } },

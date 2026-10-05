@@ -7,6 +7,7 @@ import { AppProvider, useApp } from './store';
 import { ShellSwitches } from './switches';
 import { ThemeProvider } from './theme';
 import { ConnectionView } from './views/ConnectionView';
+import { WorkspacesView } from './views/WorkspacesView';
 import { SessionsView } from './views/SessionsView';
 import { ChatView } from './views/ChatView';
 import { AgentStateView } from './views/AgentStateView';
@@ -156,6 +157,8 @@ function renderView(view: string) {
   switch (view) {
     case 'connection':
       return <ConnectionView />;
+    case 'workspaces':
+      return <WorkspacesView />;
     case 'sessions':
       return <SessionsView />;
     case 'chat':

@@ -14,6 +14,7 @@ import type { MessageKey } from './i18n';
 
 export type ViewKey =
   | 'connection'
+  | 'workspaces'
   | 'sessions'
   | 'chat'
   | 'agent'
@@ -34,6 +35,7 @@ export interface ViewDefinition {
 
 export const VIEWS: ViewDefinition[] = [
   { key: 'connection', labelKey: 'nav.connection', hintKey: 'nav.connection.hint' },
+  { key: 'workspaces', labelKey: 'nav.workspaces', hintKey: 'nav.workspaces.hint' },
   { key: 'sessions', labelKey: 'nav.sessions', hintKey: 'nav.sessions.hint' },
   { key: 'chat', labelKey: 'nav.chat', hintKey: 'nav.chat.hint' },
   { key: 'agent', labelKey: 'nav.agent', hintKey: 'nav.agent.hint' },
