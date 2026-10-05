@@ -107,9 +107,11 @@ export function WorkspacesView() {
   const pickWithExplorer = async (): Promise<void> => {
     if (nativePicker === undefined) return;
     try {
-      const picked = await nativePicker('pick_directory', {
-        defaultPath: directory.trim().length > 0 ? directory.trim() : (picker?.root ?? ''),
-      });
+      // Open where workspaces actually live rather than wherever the OS was left last: one cheap
+      // listing says which root that is.
+      const listing = picker ?? (await browseWorkspaceDirectories());
+      const start = directory.trim().length > 0 ? directory.trim() : (listing?.root ?? '');
+      const picked = await nativePicker('pick_directory', { defaultPath: start });
       if (typeof picked === 'string' && picked.length > 0) chooseDirectory(picked);
     } catch {
       // A cancelled dialog is not an error, and a shell too old to know the command should not stop
