@@ -9,3 +9,7 @@
 
 # 多实例运行目录（scripts/instances.ps1）：每个实例带自己的 data/workspace/bin/run
 /instances
+
+# The markdown/diagram harness is scaffolding: written, run and deleted, never committed.
+apps/web/mdcheck
+apps/web/mdcheck-dist
