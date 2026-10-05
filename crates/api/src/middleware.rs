@@ -99,34 +99,181 @@ pub fn required_action(method: &axum::http::Method, path: &str) -> Option<(agent
     Some((session, action))
 }
 
-/// Resolve the presented token into a principal.
+/// How the principal on a request was established.
 ///
-/// Returns Ok(None) when the runtime has no principals at all (an open runtime, where every request
-/// is the operator). With a table, an unrecognised token is refused rather than defaulted - the one
-/// thing a permission model must never do is guess.
+/// Carried alongside the principal so a console can say "you are the operator because this node has
+/// no token" instead of leaving somebody to infer it from the fact that permissions feel wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentitySource {
+    /// A bearer token matched the configured principal table.
+    Token,
+    /// The node has nothing to authenticate against: the caller declared who it is.
+    Asserted,
+    /// The node has nothing to authenticate against and nobody declared anything: the operator.
+    Operator,
+}
+
+impl IdentitySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Token => "token",
+            Self::Asserted => "asserted",
+            Self::Operator => "operator",
+        }
+    }
+}
+
+/// A caller-declared identity, before validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssertedIdentity {
+    pub user_id: String,
+    pub node_id: Option<String>,
+}
+
+/// Why resolving an identity refused a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityError {
+    /// Nothing identified the caller and this node requires it: 401. Carries the sentence to show.
+    Missing(String),
+    /// Something was declared but is not usable, with the reason to show: 400.
+    Invalid(String),
+}
+
+/// A principal and how it was established.
+#[derive(Debug, Clone)]
+pub struct ResolvedIdentity {
+    pub principal: agentos_core::model::Principal,
+    pub source: IdentitySource,
+}
+
+/// The role an asserted identity carries. Named `creator` and not `admin` on purpose: on an open
+/// node a name nobody checked can create and own things, but it cannot act as the operator.
+pub const ASSERTED_ROLE: &str = "creator";
+
+fn operator_identity() -> ResolvedIdentity {
+    ResolvedIdentity { principal: agentos_core::model::Principal::operator(), source: IdentitySource::Operator }
+}
+
+/// Names are written into records, matched in grants and displayed as `user@node`, so the alphabet
+/// is fixed and `@` is not in it: a name that could contain the separator would be ambiguous.
+fn valid_asserted_name(value: &str, field: &str) -> std::result::Result<String, IdentityError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(IdentityError::Invalid(format!("{field} must not be empty")));
+    }
+    if trimmed.len() > 64 {
+        return Err(IdentityError::Invalid(format!("{field} must be at most 64 characters")));
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(IdentityError::Invalid(format!(
+            "{field} may only contain letters, digits, dot, underscore or dash"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Resolve the request's identity.
+///
+/// Two regimes, and the boundary between them is `has_authenticated_identities`:
+///   * a node with a principal table or a static token derives identity **only** from the presented
+///     token - an unrecognised token is refused rather than defaulted, and a declared identity is
+///     ignored entirely, because honouring it would make the table decorative;
+///   * a node with neither is open, and there `asserted_identity` decides between one shared
+///     operator and a name the caller declares.
+///
+/// Guessing is the one thing a permission model must never do, so every refusal here is explicit:
+/// a wrong token gives `Missing`, a malformed name gives `Invalid` with the reason.
 pub fn resolve_principal(
     config: &agentos_core::config::ApiConfig,
     presented: Option<&str>,
-) -> std::result::Result<Option<agentos_core::model::Principal>, ()> {
-    let table = config.resolved_principals();
-    if table.is_empty() {
-        return Ok(Some(agentos_core::model::Principal::operator()));
-    }
-    let Some(presented) = presented else {
-        // A tokenless request against a runtime that has no tokenless principal.
-        let open = table.iter().any(|(token, _)| token.is_empty());
-        return if open {
-            Ok(Some(table[0].1.clone()))
-        } else {
-            Err(())
-        };
-    };
-    for (token, principal) in &table {
-        if !token.is_empty() && constant_time_eq(presented.as_bytes(), token.as_bytes()) {
-            return Ok(Some(principal.clone()));
+    asserted: Option<&AssertedIdentity>,
+) -> std::result::Result<ResolvedIdentity, IdentityError> {
+    use agentos_core::config::AssertedIdentityMode;
+
+    if config.has_authenticated_identities() {
+        let table = config.resolved_principals();
+        // A table whose entries all lack a token resolves to nobody. That used to fall through to the
+        // operator; keep that, because a misconfigured table turning a node open would be the worse
+        // failure - but the operator path is taken explicitly, and the declared identity still does
+        // not get a say.
+        if table.is_empty() {
+            return Ok(operator_identity());
         }
+        let Some(presented) = presented else {
+            // A tokenless request against a runtime that has no tokenless principal.
+            let open = table.iter().any(|(token, _)| token.is_empty());
+            return if open {
+                Ok(ResolvedIdentity { principal: table[0].1.clone(), source: IdentitySource::Token })
+            } else {
+                Err(IdentityError::Missing("missing or invalid bearer token".into()))
+            };
+        };
+        for (token, principal) in &table {
+            if !token.is_empty() && constant_time_eq(presented.as_bytes(), token.as_bytes()) {
+                return Ok(ResolvedIdentity { principal: principal.clone(), source: IdentitySource::Token });
+            }
+        }
+        return Err(IdentityError::Missing("missing or invalid bearer token".into()));
     }
-    Err(())
+
+    match config.asserted_identity {
+        AssertedIdentityMode::Off => Ok(operator_identity()),
+        mode => match asserted {
+            Some(asserted) => {
+                let user_id = valid_asserted_name(&asserted.user_id, "user_id")?;
+                if user_id.eq_ignore_ascii_case("operator") {
+                    // Otherwise asserting the node's own name would hand out the operator's identity,
+                    // and every record and grant written before would start matching a stranger.
+                    return Err(IdentityError::Invalid(
+                        "user_id \"operator\" is reserved for the node itself".into(),
+                    ));
+                }
+                let node_id = match &asserted.node_id {
+                    Some(node) if !node.trim().is_empty() => Some(valid_asserted_name(node, "node_id")?),
+                    _ => None,
+                };
+                Ok(ResolvedIdentity {
+                    principal: agentos_core::model::Principal::new(
+                        user_id,
+                        node_id,
+                        vec![ASSERTED_ROLE.into()],
+                    ),
+                    source: IdentitySource::Asserted,
+                })
+            }
+            None if mode == AssertedIdentityMode::Required => Err(IdentityError::Missing(
+                "this node requires a caller identity: send X-Agora-User (or ?user=) to say who you are"
+                    .into(),
+            )),
+            None => Ok(operator_identity()),
+        },
+    }
+}
+
+/// Read a caller-declared identity from the request, header first and query second.
+///
+/// The query form exists for the WebSocket handshake, where a browser cannot set a header. Both are
+/// the same claim, so they must not be allowed to disagree: the header wins, and a request that
+/// carries both is the header's reading.
+fn asserted_identity<T>(req: &axum::http::Request<T>) -> Option<AssertedIdentity> {
+    let header = |name: &str| {
+        req.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let query = |name: &str| {
+        req.uri().query().and_then(|q| {
+            q.split('&')
+                .find_map(|p| p.strip_prefix(&format!("{name}=")))
+                .map(|v| v.to_string())
+                .filter(|v| !v.is_empty())
+        })
+    };
+    let user_id = header("x-agora-user").or_else(|| query("user"))?;
+    let node_id = header("x-agora-node").or_else(|| query("node"));
+    Some(AssertedIdentity { user_id, node_id })
 }
 
 /// The resolved caller, as an axum extractor.
@@ -244,16 +391,25 @@ pub async fn guard(State(state): State<ApiState>, mut req: Request, next: Next) 
                 .map(|v| v.to_string())
         });
 
+    let asserted = asserted_identity(&req);
     let principal = if open_without_token {
         None
     } else {
-        match resolve_principal(&state.config.api, presented.as_deref()) {
-            Ok(principal) => principal,
-            Err(()) => {
+        match resolve_principal(&state.config.api, presented.as_deref(), asserted.as_ref()) {
+            Ok(identity) => {
+                req.extensions_mut().insert(identity.source);
+                Some(identity.principal)
+            }
+            Err(IdentityError::Missing(reason)) => {
                 metrics().inc_by(metric_names::HTTP_REQUESTS, &[("status", "401")], 1);
-                return crate::error::ApiError(RuntimeError::unauthorized(
-                    "missing or invalid bearer token",
-                ))
+                return crate::error::ApiError(RuntimeError::unauthorized(reason)).into_response();
+            }
+            Err(IdentityError::Invalid(reason)) => {
+                metrics().inc_by(metric_names::HTTP_REQUESTS, &[("status", "400")], 1);
+                return crate::error::ApiError(
+                    RuntimeError::invalid_input(format!("unusable caller identity: {reason}"))
+                        .with_detail("field", "identity"),
+                )
                 .into_response();
             }
         }
@@ -424,9 +580,10 @@ mod tests {
         let mut config = agentos_core::config::ApiConfig::default();
         config.auth_token_env = "AGENTOS_TEST_UNSET_TOKEN_VAR".into();
         std::env::remove_var("AGENTOS_TEST_UNSET_TOKEN_VAR");
-        let principal = resolve_principal(&config, None).unwrap().unwrap();
-        assert!(principal.is_admin());
-        assert_eq!(principal.user_id, "operator");
+        let identity = resolve_principal(&config, None, None).unwrap();
+        assert!(identity.principal.is_admin());
+        assert_eq!(identity.principal.user_id, "operator");
+        assert_eq!(identity.source, IdentitySource::Operator);
     }
 
     #[test]
@@ -439,13 +596,14 @@ mod tests {
             token_env: None,
             token: Some("alice-token".into()),
         }];
-        let alice = resolve_principal(&config, Some("alice-token")).unwrap().unwrap();
-        assert_eq!(alice.user_id, "alice");
-        assert_eq!(alice.node_id.as_deref(), Some("node-a"));
+        let alice = resolve_principal(&config, Some("alice-token"), None).unwrap();
+        assert_eq!(alice.principal.user_id, "alice");
+        assert_eq!(alice.principal.node_id.as_deref(), Some("node-a"));
+        assert_eq!(alice.source, IdentitySource::Token);
         // A wrong token is refused, not downgraded to the operator. Guessing is the one thing a
         // permission model must never do.
-        assert!(resolve_principal(&config, Some("bob-token")).is_err());
-        assert!(resolve_principal(&config, None).is_err());
+        assert!(resolve_principal(&config, Some("bob-token"), None).is_err());
+        assert!(resolve_principal(&config, None, None).is_err());
     }
 
     #[test]
@@ -465,7 +623,114 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert!(resolve_principal(&config, None).is_err());
-        assert!(resolve_principal(&config, Some("")).is_err());
+        assert!(resolve_principal(&config, None, None).is_err());
+        assert!(resolve_principal(&config, Some(""), None).is_err());
+    }
+
+    fn open_config(mode: agentos_core::config::AssertedIdentityMode) -> agentos_core::config::ApiConfig {
+        let mut config = agentos_core::config::ApiConfig::default();
+        config.auth_token_env = "AGENTOS_TEST_UNSET_TOKEN_VAR".into();
+        std::env::remove_var("AGENTOS_TEST_UNSET_TOKEN_VAR");
+        config.asserted_identity = mode;
+        config
+    }
+
+    fn claimed(user: &str, node: Option<&str>) -> AssertedIdentity {
+        AssertedIdentity { user_id: user.into(), node_id: node.map(|n| n.to_string()) }
+    }
+
+    #[test]
+    fn an_open_node_honours_a_declared_identity_but_never_makes_it_admin() {
+        let config = open_config(agentos_core::config::AssertedIdentityMode::Optional);
+        let identity = resolve_principal(&config, None, Some(&claimed("bob", Some("node-b")))).unwrap();
+        assert_eq!(identity.principal.user_id, "bob");
+        assert_eq!(identity.principal.node_id.as_deref(), Some("node-b"));
+        assert_eq!(identity.source, IdentitySource::Asserted);
+        // Declared identities can create and own, but they are not the operator: a name nobody
+        // checked must not widen what everyone else may do.
+        assert!(!identity.principal.is_admin());
+        assert!(identity.principal.roles.iter().any(|r| r == ASSERTED_ROLE));
+    }
+
+    #[test]
+    fn optional_identity_stays_the_operator_when_nothing_is_declared() {
+        let config = open_config(agentos_core::config::AssertedIdentityMode::Optional);
+        let identity = resolve_principal(&config, None, None).unwrap();
+        assert_eq!(identity.principal.user_id, "operator");
+        assert_eq!(identity.source, IdentitySource::Operator);
+    }
+
+    #[test]
+    fn off_ignores_a_declared_identity_entirely() {
+        let config = open_config(agentos_core::config::AssertedIdentityMode::Off);
+        let identity = resolve_principal(&config, None, Some(&claimed("bob", None))).unwrap();
+        assert_eq!(identity.principal.user_id, "operator");
+        assert_eq!(identity.source, IdentitySource::Operator);
+    }
+
+    #[test]
+    fn a_node_that_requires_identity_refuses_a_silent_request() {
+        let config = open_config(agentos_core::config::AssertedIdentityMode::Required);
+        assert!(matches!(
+            resolve_principal(&config, None, None),
+            Err(IdentityError::Missing(_))
+        ));
+        assert!(resolve_principal(&config, None, Some(&claimed("bob", None))).is_ok());
+    }
+
+    #[test]
+    fn a_declared_identity_is_ignored_when_the_node_has_a_principal_table() {
+        // The whole point of the table: a node that can prove identity must not also accept a claim.
+        // Otherwise anybody could present a name and skip the token check.
+        let mut config = agentos_core::config::ApiConfig::default();
+        config.principals = vec![agentos_core::config::PrincipalConfig {
+            user_id: "alice".into(),
+            token: Some("alice-token".into()),
+            ..Default::default()
+        }];
+        let identity = resolve_principal(&config, Some("alice-token"), Some(&claimed("mallory", None))).unwrap();
+        assert_eq!(identity.principal.user_id, "alice");
+        assert_eq!(identity.source, IdentitySource::Token);
+        // And a tokenless request cannot smuggle one in either.
+        assert!(resolve_principal(&config, None, Some(&claimed("mallory", None))).is_err());
+    }
+
+    #[test]
+    fn an_unusable_declared_name_is_refused_with_a_reason() {
+        let config = open_config(agentos_core::config::AssertedIdentityMode::Optional);
+        // Reserved: it is the node's own name, and matching it would reach the operator's records.
+        assert!(matches!(
+            resolve_principal(&config, None, Some(&claimed("Operator", None))),
+            Err(IdentityError::Invalid(_))
+        ));
+        // `@` is the separator in `user@node`, so a name that contains it is ambiguous.
+        assert!(resolve_principal(&config, None, Some(&claimed("a@b", None))).is_err());
+        assert!(resolve_principal(&config, None, Some(&claimed("  ", None))).is_err());
+        assert!(resolve_principal(&config, None, Some(&claimed(&"x".repeat(65), None))).is_err());
+        assert!(resolve_principal(&config, None, Some(&claimed("bob", Some("a@b")))).is_err());
+    }
+
+    #[test]
+    fn a_declared_identity_can_travel_in_the_query_for_the_socket() {
+        // A browser cannot set a header on a WebSocket handshake, so the same claim also has to be
+        // readable from the query string. The header wins when both are present: they must not be
+        // allowed to disagree.
+        let query_only = axum::http::Request::builder()
+            .uri("/v1/ws?user=alice&node=node-a")
+            .body(())
+            .unwrap();
+        let claimed = asserted_identity(&query_only).unwrap();
+        assert_eq!(claimed.user_id, "alice");
+        assert_eq!(claimed.node_id.as_deref(), Some("node-a"));
+
+        let both = axum::http::Request::builder()
+            .uri("/v1/ws?user=query-name")
+            .header("x-agora-user", "header-name")
+            .body(())
+            .unwrap();
+        assert_eq!(asserted_identity(&both).unwrap().user_id, "header-name");
+
+        let neither = axum::http::Request::builder().uri("/v1/ws").body(()).unwrap();
+        assert!(asserted_identity(&neither).is_none());
     }
 }

@@ -24,12 +24,36 @@ Open routes (no token, still rate limited): `GET /healthz`, `GET /readyz`, `GET 
 Everything else under `/v1` requires `Authorization: Bearer <token>` when the node has
 `AGENTOS_AUTH_TOKEN` set. The WebSocket accepts `?token=` for browsers.
 
+### Who is asking
+
+A node with a principal table or a static token derives identity **only** from the token: an
+unrecognised token is refused, and `X-Agora-User` / `?user=` is ignored there on purpose, because
+honouring it would be a way around the token.
+
+A node with neither is open, and `api.asserted_identity` (`AGENTOS_ASSERTED_IDENTITY`) decides what
+a declared name means:
+
+| value | behaviour |
+|---|---|
+| `off` | the header is ignored; every request is the operator |
+| `optional` (default) | `X-Agora-User` is honoured when present; a request without it is the operator |
+| `required` | the header is required; a request without it is `401` |
+
+A declared name rides in `X-Agora-User` (and optionally `X-Agora-Node`); the WebSocket handshake,
+where a browser cannot set headers, uses `?user=` / `?node=`. It is letters, digits, dot,
+underscore or dash, at most 64 characters, and not `operator`. A declared identity carries the
+`creator` role - it can create and own, never act as the operator. It is a name, not a password:
+it separates people who are telling the truth, and a node that needs more should be given a
+principal table. `GET /v1/meta` reports the mode (`identity.authenticated`, `identity.asserted`)
+before any identity is sent, so a client knows whether to ask for one.
+
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | `/healthz` | - | `{status, service, domain_version}` |
 | GET | `/readyz` | - | `{status, health}` (503 when storage is unhealthy) |
-| GET | `/v1/meta` | - | node, versions, backends, limits, workspace root |
+| GET | `/v1/meta` | - | node, versions, backends, limits, workspace root, and the identity mode (`identity.authenticated`, `identity.asserted`, `identity.separation`) |
 | POST | `/v1/auth/login` | `{token}` | `{ok, auth_required}` |
+| GET | `/v1/auth/whoami` | - | `{user_id, node_id, roles, admin, source}` - `source` is `token`, `asserted` or `operator` |
 | GET | `/v1/sessions` | `?q=` | sessions, optionally filtered by a case-insensitive substring of the title or user id |
 | PATCH | `/v1/sessions/{id}` | `{title}` | rename through the session actor, so the live record cannot drift from the stored one |
 | GET | `/v1/sessions` | - | `{sessions:[SessionSummary]}` |

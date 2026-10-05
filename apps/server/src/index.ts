@@ -45,6 +45,13 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 async function proxy(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
   const headers: Record<string, string> = { "content-type": req.headers["content-type"] ?? "application/json" };
   if (TOKEN) headers.authorization = "Bearer " + TOKEN;
+  // A declared identity is the caller's, so it is forwarded as-is. Dropping it here made the
+  // proxied console talk as the operator while the direct one did not - the same request, two
+  // answers, depending on which port it left through.
+  for (const name of ["x-agora-user", "x-agora-node"]) {
+    const value = req.headers[name];
+    if (typeof value === "string" && value.length > 0) headers[name] = value;
+  }
   const body =
     req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req).catch(() => undefined);
   try {

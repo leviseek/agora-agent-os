@@ -236,6 +236,11 @@ export interface RuntimeMeta {
   identity?: {
     mode: 'single-principal' | 'principals';
     principals: number;
+    /** False only on a node with no token and no principal table: there a declared name is the only
+     *  thing that can tell two people apart. */
+    authenticated?: boolean;
+    /** What a declared name does here: a mode on an open node, `ignored` wherever a token exists. */
+    asserted?: 'off' | 'optional' | 'required' | 'ignored';
     separation: string;
   };
   store_backend: string;
@@ -526,6 +531,8 @@ export interface Whoami {
   node_id: string | null;
   roles: string[];
   admin: boolean;
+  /** How this identity was established: token, asserted or operator. */
+  source?: 'token' | 'asserted' | 'operator';
 }
 
 export interface SessionsResponse {
@@ -761,6 +768,10 @@ export interface ClientConfig {
   /** Empty string means same-origin (the dev server proxies /v1 and /healthz). */
   baseUrl: string;
   token: string | null;
+  /** Who this console says it is, on a node that has no token to identify it. */
+  user?: string | null;
+  /** The node that user is on, when the identity is pinned to one. */
+  node?: string | null;
 }
 
 type QueryValue = string | number | boolean | null | undefined;
@@ -768,18 +779,30 @@ type QueryValue = string | number | boolean | null | undefined;
 export class AgentOsClient {
   readonly baseUrl: string;
   readonly token: string | null;
+  readonly user: string | null;
+  readonly node: string | null;
 
   constructor(config: ClientConfig) {
     this.baseUrl = config.baseUrl;
     this.token = config.token;
+    this.user = config.user ?? null;
+    this.node = config.node ?? null;
   }
 
   withToken(token: string | null): AgentOsClient {
-    return new AgentOsClient({ baseUrl: this.baseUrl, token });
+    return new AgentOsClient({ baseUrl: this.baseUrl, token, user: this.user, node: this.node });
   }
 
   withBaseUrl(baseUrl: string): AgentOsClient {
-    return new AgentOsClient({ baseUrl, token: this.token });
+    return new AgentOsClient({ baseUrl, token: this.token, user: this.user, node: this.node });
+  }
+
+  /** The identity headers, for callers that build their own request (uploads). */
+  identityHeaders(): Headers {
+    const headers = new Headers();
+    if (this.user !== null && this.user.length > 0) headers.set('X-Agora-User', this.user);
+    if (this.node !== null && this.node.length > 0) headers.set('X-Agora-Node', this.node);
+    return headers;
   }
 
   /** Absolute http(s) URL for a gateway path. */
@@ -808,8 +831,13 @@ export class AgentOsClient {
     const normalised = path.startsWith('/') ? path : '/' + path;
     const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.href;
     const base = this.baseUrl.trim();
-    const query =
-      this.token !== null && this.token.length > 0 ? '?token=' + encodeURIComponent(this.token) : '';
+    const params: string[] = [];
+    if (this.token !== null && this.token.length > 0) params.push('token=' + encodeURIComponent(this.token));
+    // The socket is guarded like every other /v1 route, and a browser cannot set a header on the
+    // handshake, so the declared identity travels in the query - the second form the runtime reads.
+    if (this.user !== null && this.user.length > 0) params.push('user=' + encodeURIComponent(this.user));
+    if (this.node !== null && this.node.length > 0) params.push('node=' + encodeURIComponent(this.node));
+    const query = params.length > 0 ? '?' + params.join('&') : '';
     if (base.length > 0) {
       const parsed = new URL(base, origin);
       parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -836,6 +864,9 @@ export class AgentOsClient {
     headers.set('Accept', 'application/json');
     if (this.token !== null && this.token.length > 0) {
       headers.set('Authorization', 'Bearer ' + this.token);
+    }
+    for (const [key, value] of this.identityHeaders()) {
+      headers.set(key, value);
     }
     let body: BodyInit | undefined;
     if (init.json !== undefined) {
@@ -879,6 +910,9 @@ export class AgentOsClient {
     const headers = new Headers({ Accept: 'text/plain' });
     if (this.token !== null && this.token.length > 0) {
       headers.set('Authorization', 'Bearer ' + this.token);
+    }
+    for (const [key, value] of this.identityHeaders()) {
+      headers.set(key, value);
     }
     let response: Response;
     try {
@@ -1121,6 +1155,9 @@ export class AgentOsClient {
     const headers = new Headers({ Accept: 'application/json' });
     if (this.token !== null && this.token.length > 0) {
       headers.set('Authorization', 'Bearer ' + this.token);
+    }
+    for (const [key, value] of this.identityHeaders()) {
+      headers.set(key, value);
     }
     headers.set('Content-Type', file.type.length > 0 ? file.type : 'application/octet-stream');
     // Non-ASCII file names have to survive the trip; the runtime strips any path part.

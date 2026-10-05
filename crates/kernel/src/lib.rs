@@ -106,6 +106,17 @@ impl Kernel {
     pub async fn bootstrap(mut config: RuntimeConfig) -> Result<Arc<Self>> {
         config.validate()?;
         config.ensure_dirs()?;
+        // A declared-identity switch on a node that authenticates with a token does nothing, by
+        // design. Saying so is the difference between "I turned it on" and "I turned it on and it is
+        // inert because the token path wins".
+        if config.api.has_authenticated_identities()
+            && config.api.asserted_identity != agentos_core::config::AssertedIdentityMode::Off
+        {
+            tracing::warn!(
+                "api.asserted_identity is ignored: this node has a token or a principal table, and a \
+                 declared identity never overrides a token"
+            );
+        }
         // Identity before anything else: every plane below stamps the resolved id, and discovery
         // cannot tell two nodes apart without it.
         let node_identity = config.resolve_node_identity()?;

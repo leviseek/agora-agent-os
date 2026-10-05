@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { ApiErrorBanner, Badge, JsonBlock, KeyValue, Panel } from '../components';
-import type { NodeListResponse, NodeSummary } from '../api';
+import type { NodeListResponse, NodeSummary, Whoami } from '../api';
 import { formatUptime, maskToken } from '../format';
 import { useI18n } from '../i18n';
 import { useApp } from '../store';
@@ -14,6 +14,10 @@ export function ConnectionView() {
     token,
     setBaseUrl,
     setToken,
+    identityUser,
+    identityNode,
+    setIdentityUser,
+    setIdentityNode,
     connect,
     disconnect,
     connection,
@@ -26,7 +30,12 @@ export function ConnectionView() {
 
   const [draftBaseUrl, setDraftBaseUrl] = useState(baseUrl);
   const [draftToken, setDraftToken] = useState(token);
+  const [draftIdentityUser, setDraftIdentityUser] = useState(identityUser);
+  const [draftIdentityNode, setDraftIdentityNode] = useState(identityNode);
   const [revealToken, setRevealToken] = useState(false);
+  // What the runtime makes of the identity we are sending. Fetched rather than assumed: on a node
+  // with a principal table the name below is inert, and the answer says so.
+  const [me, setMe] = useState<Whoami | null>(null);
 
   // Discovery: other runtimes the connected node can see. Polled rather than pushed because the
   // advertisement TTL is seconds - a poll every few seconds is simpler than a second socket, and
@@ -89,15 +98,49 @@ export function ConnectionView() {
   useEffect(() => {
     setDraftToken(token);
   }, [token]);
+  useEffect(() => {
+    setDraftIdentityUser(identityUser);
+  }, [identityUser]);
+  useEffect(() => {
+    setDraftIdentityNode(identityNode);
+  }, [identityNode]);
+
+  // Re-read who we are whenever the connection or the declared name changes: the runtime decides
+  // what a name means, and this is where it says so.
+  useEffect(() => {
+    if (connection !== 'online') {
+      setMe(null);
+      return undefined;
+    }
+    let cancelled = false;
+    void client
+      .whoami()
+      .then((response) => {
+        if (!cancelled) setMe(response);
+      })
+      .catch(() => {
+        if (!cancelled) setMe(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connection, client, identityUser, identityNode]);
 
   const applyDrafts = (): void => {
     setBaseUrl(draftBaseUrl.trim());
     setToken(draftToken);
+    setIdentityUser(draftIdentityUser);
+    setIdentityNode(draftIdentityNode);
   };
 
   const onConnect = (): void => {
     applyDrafts();
-    void connect({ baseUrl: draftBaseUrl.trim(), token: draftToken });
+    void connect({
+      baseUrl: draftBaseUrl.trim(),
+      token: draftToken,
+      user: draftIdentityUser,
+      node: draftIdentityNode,
+    });
   };
 
   const onDisconnect = (): void => {
@@ -154,7 +197,30 @@ export function ConnectionView() {
               </button>
             </div>
           </label>
+          <label className="field">
+            <span>{t('connection.identityUser')}</span>
+            <input
+              type="text"
+              value={draftIdentityUser}
+              placeholder={t('connection.identityUserPlaceholder')}
+              onChange={(event) => setDraftIdentityUser(event.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>{t('connection.identityNode')}</span>
+            <input
+              type="text"
+              value={draftIdentityNode}
+              placeholder={t('connection.identityNodePlaceholder')}
+              onChange={(event) => setDraftIdentityNode(event.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
         </div>
+        <p className="muted small">{t('connection.identityHint')}</p>
         <p className="muted small">
           {t('connection.storageNote', { tokenKey: 'agentos.token', baseUrlKey: 'agentos.baseUrl' })}
         </p>
@@ -171,6 +237,43 @@ export function ConnectionView() {
               </Badge>
               {login.note !== undefined ? <span className="banner-scope">{login.note}</span> : null}
             </div>
+          </div>
+        ) : null}
+
+        {meta?.identity !== undefined ? (
+          <div
+            className={'banner ' + (meta.identity.authenticated === true ? 'banner-ok' : 'banner-warn')}
+          >
+            <div className="banner-head">
+              <Badge
+                tone={
+                  meta.identity.authenticated === true
+                    ? 'ok'
+                    : meta.identity.asserted === 'required'
+                      ? 'warn'
+                      : 'info'
+                }
+              >
+                {t(
+                  'connection.identityMode.' +
+                    (meta.identity.authenticated === true
+                      ? 'authenticated'
+                      : (meta.identity.asserted ?? 'optional')),
+                )}
+              </Badge>
+              <span className="banner-scope">{meta.identity.separation}</span>
+            </div>
+            {me !== null ? (
+              <p className="muted small">
+                {t('connection.identityResolved', {
+                  user: me.node_id === null || me.node_id === '' ? me.user_id : me.user_id + '@' + me.node_id,
+                  source: me.source ?? 'operator',
+                })}
+              </p>
+            ) : null}
+            {meta.identity.authenticated !== true && meta.identity.asserted !== 'required' ? (
+              <p className="muted small">{t('connection.identityOpen')}</p>
+            ) : null}
           </div>
         ) : null}
       </Panel>

@@ -11,7 +11,8 @@
     "auth_token_env": "AGENTOS_AUTH_TOKEN",
     "rate_limit_per_minute": 600,
     "cors_allow_origin": "*",
-    "request_timeout_ms": 30000
+    "request_timeout_ms": 30000,
+    "asserted_identity": "optional"
   },
   "storage": {
     "backend": "file",

@@ -171,6 +171,54 @@ pub struct ApiConfig {
     /// before principals existed relies on: one token, full rights. Naming principals is how a
     /// second person joins - each gets a token, a user id, a node and a set of global roles.
     pub principals: Vec<PrincipalConfig>,
+    /// How a caller may say who it is on a node that has nothing to authenticate against.
+    ///
+    /// A node with a principal table or a static token derives identity from the token only, and
+    /// this setting is inert there - if it were honoured it would turn the table into a suggestion.
+    /// On an open node there is no token to check, so the choice is between one shared operator and
+    /// a name the caller asserts. Asserting is not authenticating: it separates people who are
+    /// telling the truth, and a public node that needs more should be given a principal table.
+    pub asserted_identity: AssertedIdentityMode,
+}
+
+/// What an open node (no token, no principal table) does with a caller-declared identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssertedIdentityMode {
+    /// Ignore it. Every request is the operator, which is how this runtime behaved before the
+    /// switch existed and is the right answer for a single-user machine.
+    Off,
+    /// Honour it when present; without it the request is the operator. The default, because it
+    /// costs a node that never sends the header nothing.
+    Optional,
+    /// Honour it, and refuse a request that does not carry it. What a node that expects several
+    /// people should run, since `optional` leaves "omit the header" as a way to be the operator.
+    Required,
+}
+
+impl Default for AssertedIdentityMode {
+    fn default() -> Self {
+        Self::Optional
+    }
+}
+
+impl AssertedIdentityMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Optional => "optional",
+            Self::Required => "required",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "disabled" => Some(Self::Off),
+            "optional" | "on" => Some(Self::Optional),
+            "required" | "require" => Some(Self::Required),
+            _ => None,
+        }
+    }
 }
 
 /// One identity the gateway accepts.
@@ -225,6 +273,16 @@ impl ApiConfig {
     }
     pub fn auth_required(&self) -> bool {
         self.auth_token().is_some()
+    }
+
+    /// Does this node establish identity from a token at all?
+    ///
+    /// False only when there is neither a principal table nor a static token. That is the single
+    /// case where a client-asserted identity is considered, and the reason it has to be asked as one
+    /// question: "is there anything to authenticate against?" - the two ways of authenticating must
+    /// not drift apart in separate checks.
+    pub fn has_authenticated_identities(&self) -> bool {
+        self.auth_required() || !self.principals.is_empty()
     }
 
     /// The identities this gateway accepts, as (token, principal) pairs.
@@ -511,6 +569,7 @@ impl Default for ApiConfig {
             cors_allow_origin: "*".into(),
             request_timeout_ms: 30_000,
             principals: Vec::new(),
+            asserted_identity: AssertedIdentityMode::default(),
         }
     }
 }
@@ -755,6 +814,16 @@ impl RuntimeConfig {
                          this runtime keeps its previous identity configuration"
                     ));
                 }
+            }
+        }
+        // Only meaningful on a node with no token; setting it elsewhere is reported and ignored
+        // rather than silently overriding the token path.
+        if let Some(v) = Self::env_str("AGENTOS_ASSERTED_IDENTITY") {
+            match AssertedIdentityMode::parse(&v) {
+                Some(mode) => self.api.asserted_identity = mode,
+                None => self.warnings.push(format!(
+                    "AGENTOS_ASSERTED_IDENTITY={v} is not off, optional or required; ignored"
+                )),
             }
         }
         if let Some(v) = Self::env_str("AGENTOS_RATE_LIMIT") {

@@ -121,6 +121,36 @@ impl Harness {
         (status, parsed)
     }
 
+    /// The same requests, declaring who is asking. On a node with nothing to authenticate against
+    /// this is the only thing that makes two people different.
+    async fn get_declaring(&self, user: &str, path: &str) -> (u16, Value) {
+        let response = self
+            .client
+            .get(self.url(path))
+            .header("x-agora-user", user)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    async fn post_declaring(&self, user: &str, path: &str, body: Value) -> (u16, Value) {
+        let response = self
+            .client
+            .post(self.url(path))
+            .header("x-agora-user", user)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        let parsed = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+        (status, parsed)
+    }
+
     /// Upload raw bytes the way a browser does: the body is the file, not JSON.
     async fn upload(&self, path: &str, name: &str, content_type: &str, bytes: &[u8]) -> (u16, Value) {
         let response = self
@@ -219,6 +249,50 @@ async fn health_meta_and_error_shape() {
     let (status, body) = h.get("/v1/sessions/not-an-id/status").await;
     assert_eq!(status, 400);
     assert_eq!(body["error"]["code"], "invalid_input");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declared_identity_separates_people_on_an_open_node() {
+    let h = Harness::start(None, 0).await;
+
+    // meta answers "what would identity even mean here?" before any identity is sent, which is how a
+    // console knows whether to bother asking the user for a name.
+    let (status, meta) = h.get("/v1/meta").await;
+    assert_eq!(status, 200);
+    assert_eq!(meta["identity"]["authenticated"], false);
+    assert_eq!(meta["identity"]["asserted"], "optional");
+
+    // alice declares herself and creates a session that is hers.
+    let (status, alice) = h.post_declaring("alice", "/v1/sessions", json!({"title":"alice's"})).await;
+    assert_eq!(status, 200, "{alice}");
+    assert_eq!(alice["owner"]["user_id"], "alice");
+
+    // whoami says not only who but on what basis.
+    let (status, who) = h.get_declaring("alice", "/v1/auth/whoami").await;
+    assert_eq!(status, 200);
+    assert_eq!(who["user_id"], "alice");
+    assert_eq!(who["source"], "asserted");
+    assert_eq!(who["admin"], false, "a declared name must not become the operator");
+
+    let session_id = alice["id"].as_str().unwrap().to_string();
+
+    // bob cannot reach alice's conversation...
+    let (status, denied) = h.get_declaring("bob", &format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 403, "{denied}");
+    assert_eq!(denied["error"]["code"], "policy_denied");
+    // ...alice can...
+    let (status, _) = h.get_declaring("alice", &format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 200);
+    // ...and a request that declares nothing is still the operator. That is the honest reading of an
+    // open node, not a bug: `asserted_identity = required` is what closes it.
+    let (status, _) = h.get(&format!("/v1/sessions/{session_id}")).await;
+    assert_eq!(status, 200);
+
+    // A name that would collide with the node's own identity is refused rather than silently
+    // becoming a grant to the operator's records.
+    let (status, refused) = h.post_declaring("operator", "/v1/sessions", json!({"title":"mine"})).await;
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["error"]["code"], "invalid_input");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1834,6 +1908,27 @@ impl Harness {
         }
     }
 
+    /// An open node that will not take an anonymous request: what a node expecting several people
+    /// runs, and the only setting under which a declared name is enforced rather than offered.
+    async fn start_asserting_required() -> Self {
+        let dir = std::env::temp_dir().join(format!("agentos-api-assert-{}", agentos_core::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = RuntimeConfig::default();
+        config.storage.backend = StoreBackend::Memory;
+        config.storage.data_dir = dir.join("data");
+        config.policy.workspace_root = dir.join("workspace");
+        config.observability.log_level = "error".into();
+        config.api.asserted_identity = agentos_core::config::AssertedIdentityMode::Required;
+        let kernel = Kernel::bootstrap(config).await.unwrap();
+        let (addr, shutdown) = agentos_api::serve_test(kernel.clone()).await.unwrap();
+        Self {
+            base: format!("http://{addr}"),
+            _kernel: kernel,
+            shutdown,
+            client: reqwest::Client::new(),
+        }
+    }
+
     /// Send a request as somebody. `None` sends no token at all.
     async fn send_as(
         &self,
@@ -2564,15 +2659,32 @@ async fn the_runtime_says_which_identity_mode_it_is_in() {
     let (_, meta) = h.get("/v1/meta").await;
     assert_eq!(meta["identity"]["mode"], "principals", "{meta}");
     assert_eq!(meta["identity"]["principals"], 3, "{meta}");
+    assert_eq!(meta["identity"]["authenticated"], true, "{meta}");
+    // A declared name never overrides a token, and the answer says so rather than letting a console
+    // believe that typing a name changed anything.
+    assert_eq!(meta["identity"]["asserted"], "ignored", "{meta}");
 
-    // Without one: every request is the same operator, and the runtime says so rather than
-    // leaving two consoles to discover it by reading each other's conversations.
+    // Without one: a name may be declared, and declaring none is still the operator. The runtime
+    // says so rather than leaving two consoles to discover it by reading each other's conversations.
     let plain = Harness::start(None, 0).await;
     let (_, meta) = plain.get("/v1/meta").await;
     assert_eq!(meta["identity"]["mode"], "single-principal", "{meta}");
     assert_eq!(meta["identity"]["principals"], 0, "{meta}");
+    assert_eq!(meta["identity"]["authenticated"], false, "{meta}");
+    assert_eq!(meta["identity"]["asserted"], "optional", "{meta}");
     let separation = meta["identity"]["separation"].as_str().unwrap_or_default();
-    assert!(separation.contains("separates nobody"), "{separation}");
+    assert!(separation.contains("declare"), "{separation}");
+
+    // A node that will not take an anonymous request has to be readable before one is sent: /v1/meta
+    // answers without an identity, and every guarded route does not.
+    let strict = Harness::start_asserting_required().await;
+    let (status, meta) = strict.get("/v1/meta").await;
+    assert_eq!(status, 200, "{meta}");
+    assert_eq!(meta["identity"]["asserted"], "required", "{meta}");
+    let (status, denied) = strict.get("/v1/sessions").await;
+    assert_eq!(status, 401, "{denied}");
+    let (status, _) = strict.get_declaring("alice", "/v1/sessions").await;
+    assert_eq!(status, 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -3,7 +3,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::ApiState;
 use agentos_core::error::RuntimeError;
-use crate::middleware::Principal;
+use crate::middleware::{IdentitySource, Principal};
 use agentos_core::model::{EventFilter, EventKind, TaskGraphRecord, TaskRecord};
 use agentos_core::{now_ms, SessionId};
 use agentos_storage::store::{collections, Collection};
@@ -47,10 +47,27 @@ pub async fn meta(State(state): State<ApiState>) -> ApiResult<Json<Value>> {
         "identity": {
             "mode": if cfg.api.principals.is_empty() { "single-principal" } else { "principals" },
             "principals": cfg.api.principals.len(),
-            "separation": if cfg.api.principals.is_empty() {
-                "every request is the same operator: ownership is recorded but separates nobody"
+            // Whether this node proves identity at all. False is the open case, and the only one
+            // where a declared name is considered.
+            "authenticated": cfg.api.has_authenticated_identities(),
+            // What a declared name does here: a mode on an open node, and "ignored" wherever a token
+            // exists - because there it would be a way around the token.
+            "asserted": if cfg.api.has_authenticated_identities() {
+                "ignored"
             } else {
-                "each request carries a configured principal: ownership and grants separate people"
+                cfg.api.asserted_identity.as_str()
+            },
+            "separation": if cfg.api.has_authenticated_identities() {
+                "each request presents a configured token: ownership and grants separate people"
+            } else {
+                match cfg.api.asserted_identity {
+                    agentos_core::config::AssertedIdentityMode::Off =>
+                        "every request is the same operator: ownership is recorded but separates nobody",
+                    agentos_core::config::AssertedIdentityMode::Optional =>
+                        "a caller may declare who it is; a request that declares nothing is the operator",
+                    agentos_core::config::AssertedIdentityMode::Required =>
+                        "a caller must declare who it is; the name is declared, not authenticated",
+                }
             },
         },
         "store_backend": state.kernel.store.backend_name(),
@@ -700,13 +717,20 @@ pub async fn access_inbox(
 /// Who the gateway thinks this caller is.
 ///
 /// The console shows it, and it is the fastest way to tell a wrong token from a missing permission.
-pub async fn whoami(principal: Option<Principal>) -> ApiResult<Json<Value>> {
+pub async fn whoami(
+    principal: Option<Principal>,
+    source: Option<axum::Extension<IdentitySource>>,
+) -> ApiResult<Json<Value>> {
     let principal = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
+    let source = source.map(|value| value.0).unwrap_or(IdentitySource::Operator);
     Ok(Json(json!({
         "user_id": principal.user_id,
         "node_id": principal.node_id,
         "roles": principal.roles,
         "admin": principal.is_admin(),
+        // Where this identity came from. A console that shows it can explain why two people see the
+        // same thing on an open node instead of leaving them to guess.
+        "source": source.as_str(),
     })))
 }
 

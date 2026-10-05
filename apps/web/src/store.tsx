@@ -32,6 +32,10 @@ import { tGlobal } from './i18n';
 const TOKEN_KEY = 'agentos.token';
 const BASE_URL_KEY = 'agentos.baseUrl';
 const AUTO_RECONNECT_KEY = 'agentos.wsAutoReconnect';
+// Who this console says it is. Not a secret: it is the name a person works under, and on an open
+// node it is the only thing that separates their sessions from somebody else's.
+const IDENTITY_USER_KEY = 'agentos.identity.user';
+const IDENTITY_NODE_KEY = 'agentos.identity.node';
 
 /** Live events kept in memory; older ones are still available from /v1/events. */
 const EVENT_BUFFER_LIMIT = 1500;
@@ -266,8 +270,13 @@ export interface AppStoreValue {
 
   setBaseUrl: (next: string) => void;
   setToken: (next: string) => void;
+  /** The name this console declares on a node that has no token to identify it. */
+  identityUser: string;
+  identityNode: string;
+  setIdentityUser: (next: string) => void;
+  setIdentityNode: (next: string) => void;
   setAutoReconnect: (next: boolean) => void;
-  connect: (overrides?: { baseUrl?: string; token?: string }) => Promise<void>;
+  connect: (overrides?: { baseUrl?: string; token?: string; user?: string; node?: string }) => Promise<void>;
   disconnect: () => void;
   /** Search term applied to the session list; empty means no filter. */
   sessionQuery: string;
@@ -353,6 +362,8 @@ export function useApp(): AppStoreValue {
 export function AppProvider({ children }: { children: ReactNode }) {
   const [baseUrl, setBaseUrlState] = useState<string>(() => readStorage(BASE_URL_KEY) ?? '');
   const [token, setTokenState] = useState<string>(() => readStorage(TOKEN_KEY) ?? '');
+  const [identityUser, setIdentityUserState] = useState<string>(() => readStorage(IDENTITY_USER_KEY) ?? '');
+  const [identityNode, setIdentityNodeState] = useState<string>(() => readStorage(IDENTITY_NODE_KEY) ?? '');
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [meta, setMeta] = useState<RuntimeMeta | null>(null);
@@ -421,7 +432,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [actionError, setActionError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const client = useMemo(() => new AgentOsClient({ baseUrl, token }), [baseUrl, token]);
+  const client = useMemo(
+    () => new AgentOsClient({ baseUrl, token, user: identityUser, node: identityNode }),
+    [baseUrl, token, identityUser, identityNode],
+  );
 
   const clientRef = useRef(client);
   clientRef.current = client;
@@ -724,19 +738,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     writeStorage(TOKEN_KEY, next.length > 0 ? next : null);
   }, []);
 
+  const setIdentityUser = useCallback((next: string): void => {
+    setIdentityUserState(next);
+    writeStorage(IDENTITY_USER_KEY, next.trim().length > 0 ? next.trim() : null);
+  }, []);
+
+  const setIdentityNode = useCallback((next: string): void => {
+    setIdentityNodeState(next);
+    writeStorage(IDENTITY_NODE_KEY, next.trim().length > 0 ? next.trim() : null);
+  }, []);
+
   const setAutoReconnect = useCallback((next: boolean): void => {
     setAutoReconnectState(next);
     writeStorage(AUTO_RECONNECT_KEY, next ? 'true' : 'false');
   }, []);
 
-  const connect = useCallback(async (overrides?: { baseUrl?: string; token?: string }): Promise<void> => {
+  const connect = useCallback(async (overrides?: { baseUrl?: string; token?: string; user?: string; node?: string }): Promise<void> => {
     const activeBaseUrl = overrides?.baseUrl ?? baseUrl;
     const activeToken = overrides?.token ?? token;
+    // An override exists so Connect can apply freshly typed values in the same click that reads them:
+    // the state setter above has not re-rendered yet, and the closure would still hold the old name.
+    const activeUser = overrides?.user ?? identityUser;
+    const activeNode = overrides?.node ?? identityNode;
     setConnection('connecting');
     setConnectionError(null);
     const active = new AgentOsClient({
       baseUrl: activeBaseUrl,
       token: activeToken.length > 0 ? activeToken : null,
+      user: activeUser,
+      node: activeNode,
     });
     try {
       const healthResponse = await active.healthz();
@@ -762,7 +792,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setConnectionError(toApiError(cause));
       setConnection('error');
     }
-  }, [baseUrl, token, loadSessions]);
+  }, [baseUrl, token, identityUser, identityNode, loadSessions]);
 
   const disconnect = useCallback((): void => {
     stream.close();
@@ -1183,6 +1213,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => ({
       baseUrl,
       token,
+      identityUser,
+      identityNode,
       health,
       meta,
       connection,
@@ -1216,6 +1248,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       busy,
       setBaseUrl,
       setToken,
+      setIdentityUser,
+      setIdentityNode,
       setAutoReconnect,
       connect,
       disconnect,
@@ -1259,6 +1293,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [
       baseUrl,
       token,
+      identityUser,
+      identityNode,
       health,
       meta,
       connection,
@@ -1292,6 +1328,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       busy,
       setBaseUrl,
       setToken,
+      setIdentityUser,
+      setIdentityNode,
       setAutoReconnect,
       connect,
       disconnect,

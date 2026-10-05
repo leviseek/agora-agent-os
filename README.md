@@ -331,6 +331,8 @@ carries its key, and the key is read at call time.
 | `AGENTOS_DATA_DIR`, `AGENTOS_STORE_BACKEND` (`memory`/`file`/`redb`) | storage |
 | `AGENTOS_WORKSPACE_ROOT` | the only directory filesystem capabilities may touch |
 | `AGENTOS_AUTH_TOKEN` | gateway bearer token (unset = open, for local development) |
+| `AGENTOS_PRINCIPALS` | who this node accepts, as a JSON array: `[{"user_id":"alice","token_env":"ALICE_TOKEN"}]`. A named principal is how a second person joins; with a table configured, identity comes only from the token and a declared name is ignored |
+| `AGENTOS_ASSERTED_IDENTITY` | what `X-Agora-User` means on a node with **no** token and no principal table: `off` (ignore it; every request is the operator), `optional` (default: honour it when present, otherwise the operator) or `required` (refuse a request that declares nothing). It is a name, not a password - a node that needs real authentication wants `AGENTOS_PRINCIPALS` |
 | `AGENTOS_ALLOWED_CAPABILITIES`, `AGENTOS_DENIED_CAPABILITIES` | policy lists (comma separated) |
 | `AGENTOS_MODEL_DEFAULT` | default provider |
 | `AGENTOS_MODEL_<NAME>_MODEL` / `_BASE_URL` / `_ENABLED` | per-provider overrides |
