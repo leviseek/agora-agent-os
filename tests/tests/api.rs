@@ -2112,6 +2112,14 @@ async fn archiving_writes_a_package_and_restoring_brings_it_back() {
     // The record is now a tombstone: archived, and no longer taking goals.
     let (_, detail) = h.get(&format!("/v1/sessions/{id}")).await;
     assert_eq!(detail["session"]["state"], "archived", "{detail}");
+    // And it is out of the live list. A tombstone in the list people pick work from is a row that
+    // answers "no" to everything; the archive page is where it belongs.
+    let (_, listed) = h.get("/v1/sessions").await;
+    assert_eq!(
+        listed["sessions"].as_array().unwrap().len(),
+        0,
+        "an archived conversation is not in the session list: {listed}"
+    );
     let (status, body) = h
         .post(&format!("/v1/sessions/{id}/messages"), json!({ "text": "anyone there?", "wait": true }))
         .await;
@@ -2140,6 +2148,10 @@ async fn archiving_writes_a_package_and_restoring_brings_it_back() {
     assert_eq!(status, 200, "{body}");
     let restored_id = body["session"]["id"].as_str().unwrap().to_string();
     assert_ne!(restored_id, id, "a restore never overwrites the original");
+    let (_, listed) = h.get("/v1/sessions").await;
+    let rows = listed["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "the restored conversation is the one listed: {listed}");
+    assert_eq!(rows[0]["id"], restored_id);
     assert_eq!(body["session"]["title"], "archived talk (restored)");
     // Restored open, and live: the actor is up, so its status comes from the actor rather than from
     // the durable rebuild. "Restored" means a conversation you can carry on with, not a record.
@@ -2227,8 +2239,9 @@ async fn a_damaged_package_is_refused_rather_than_half_restored() {
         message.contains("checksum") || message.contains("damaged"),
         "the refusal says why: {message}"
     );
-    // Nothing was restored: the store has the archived session and no other.
+    // Nothing was restored. The archived conversation is not in the live list either: it lives in
+    // its package now, and the archive page is where it is found.
     let (_, list) = h.get("/v1/sessions").await;
-    assert_eq!(list["sessions"].as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(list["sessions"].as_array().unwrap().len(), 0, "{list}");
     std::fs::remove_dir_all(&root).ok();
 }

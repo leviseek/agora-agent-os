@@ -963,7 +963,20 @@ async fn rebuild_state(&self, session: &SessionId) -> Result<Option<SessionActor
         }
     }
 
+    /// The live view of the store: every session someone might work on.
+    ///
+    /// Archived conversations are deliberately absent. An archived one lives in its package; a row
+    /// for it here would be a tombstone in the list people pick work from, and every action on it
+    /// answers "no" or "close it first". The archive page is where it belongs, and `list_all` is
+    /// there for the operator views that really do want the whole store.
     pub async fn list(&self) -> Result<Vec<SessionSummary>> {
+        let mut summaries = self.list_all().await?;
+        summaries.retain(|session| session.state != SessionState::Archived);
+        Ok(summaries)
+    }
+
+    /// Everything in the store, archived records included.
+    pub async fn list_all(&self) -> Result<Vec<SessionSummary>> {
         let mut records = self.session_collection().list(self.store.as_ref(), 10_000).await?;
         records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(records.iter().map(SessionSummary::from).collect())
