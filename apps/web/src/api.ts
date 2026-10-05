@@ -513,6 +513,9 @@ export interface WorkspaceGrant {
 export interface WorkspaceRecord {
   id: string;
   name: string;
+  /** The folder this workspace works in, under the node's workspace root. Chosen at creation and
+   *  never derived from the name, so renaming never moves a file. */
+  directory?: string | null;
   owner: { user_id: string; node_id?: string | null };
   created_at: number;
   updated_at: number;
@@ -1079,8 +1082,11 @@ export class AgentOsClient {
     return this.request<WorkspacesResponse>('/v1/workspaces', { method: 'GET' });
   }
 
-  createWorkspace(name: string): Promise<{ workspace: WorkspaceRecord }> {
-    return this.request('/v1/workspaces', { method: 'POST', json: { name } });
+  /** Create a workspace. The directory is required; the name defaults to the folder it points at. */
+  createWorkspace(directory: string, name?: string): Promise<{ workspace: WorkspaceRecord }> {
+    const json: Record<string, unknown> = { directory };
+    if (name !== undefined && name.trim().length > 0) json.name = name.trim();
+    return this.request('/v1/workspaces', { method: 'POST', json });
   }
 
   getWorkspace(id: string): Promise<WorkspaceDetail> {

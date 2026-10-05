@@ -108,7 +108,11 @@ const waitFor = async (check, timeoutMs, intervalMs = 250) => {
   }
 };
 
-const workspaceName = 'cdp workspace ' + Date.now().toString().slice(-5);
+// A workspace is created by choosing its directory; the name defaults to the folder. The directory is
+// unique per run so a repeated run does not collide on "one directory, one workspace".
+const suffix = Date.now().toString().slice(-5);
+const workspaceDirectory = 'cdp/' + suffix;
+const workspaceName = suffix;
 
 await send('Page.navigate', { url: pageUrl });
 await sleep(1800);
@@ -123,8 +127,14 @@ await sleep(1500);
 
 await step('nav workspaces', () => clickByText('button', 'Workspaces'));
 await sleep(600);
-await step('create form', () => setInput('input[placeholder="e.g. sprite rework"]', workspaceName));
-await sleep(200);
+await step('directory form', () =>
+  setInput('input[placeholder="under the workspace root, e.g. games/sprite-rework"]', workspaceDirectory),
+);
+await sleep(300);
+const autoName = await evaluate(
+  "(()=>{const el=document.querySelector('input[placeholder=\"defaults to the folder name\"]');return el?el.value:'<no name field>'})()",
+);
+console.log('[name follows the folder] ' + autoName);
 await step('create workspace', () => clickByText('button', 'Create workspace'));
 await sleep(1500);
 
@@ -169,7 +179,8 @@ console.log(accessPage.slice(30, 70).join(' | '));
 const accessRendered = accessPage.some((line) => line.includes('Workspace or session'));
 
 const ok =
-  workspacesPage.some((line) => line.includes(workspaceName)) &&
+  autoName === workspaceName &&
+  workspacesPage.some((line) => line.includes(workspaceDirectory)) &&
   landed &&
   accessRendered &&
   findings.length === 0;

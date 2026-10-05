@@ -31,6 +31,7 @@ use agentos_storage::store::{collections, Collection, Store};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -277,12 +278,65 @@ impl SessionManager {
     }
 
     /// Create a workspace. Ownership is the creator's, on this node unless they named another.
-    pub async fn create_workspace(&self, name: &str, owner: &Principal) -> Result<WorkspaceRecord> {
+    ///
+    /// The directory is required and is *chosen*, not derived from the name: a rename must never
+    /// move files, and the path a session was handed must keep pointing at the same place. It must
+    /// be inside the node's workspace root - a workspace rooted at the root itself, or outside it,
+    /// would be able to read every other workspace's files.
+    pub async fn create_workspace(
+        &self,
+        name: &str,
+        directory: &str,
+        owner: &Principal,
+    ) -> Result<WorkspaceRecord> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RuntimeError::invalid_input("a workspace name must not be empty"));
+        }
+        let directory = directory.trim();
+        if directory.is_empty() {
+            return Err(RuntimeError::invalid_input(
+                "a workspace needs a directory: name the folder under the workspace root (or an absolute \
+                 path inside it)",
+            )
+            .with_detail("field", "directory"));
+        }
+        let resolved = self.resolve_workspace_directory(directory).await?;
+
+        // One directory, one workspace. Two workspaces sharing a jail would be one workspace's files
+        // reachable from the other, which is precisely what workspaces exist to prevent - and which
+        // nothing later in the runtime would catch, because both records look legitimate.
+        for existing in self.list_workspaces().await? {
+            if existing.directory_name() == directory {
+                return Err(RuntimeError::conflict(format!(
+                    "workspace {} already works in {directory}",
+                    existing.name
+                ))
+                .with_detail("workspace_id", existing.id.as_str()));
+            }
+            let other = PathBuf::from(existing.directory_name());
+            let other = if other.is_absolute() {
+                other
+            } else {
+                self.deps.workspace_root.join(other)
+            };
+            if let Ok(canonical) = tokio::fs::canonicalize(&other).await {
+                if canonical == resolved {
+                    return Err(RuntimeError::conflict(format!(
+                        "workspace {} already works in {} - one directory, one workspace",
+                        existing.name,
+                        resolved.display()
+                    ))
+                    .with_detail("workspace_id", existing.id.as_str()));
+                }
+            }
+        }
+
         let owner_ref = PrincipalRef::new(
             owner.user_id.clone(),
             owner.node_id.clone().or_else(|| Some(self.node_id.clone())),
         );
-        let record = WorkspaceRecord::new(owner_ref, name.trim());
+        let record = WorkspaceRecord::new_in(owner_ref, name, Some(directory.to_string()));
         self.workspace_collection()
             .save(self.store.as_ref(), record.id.as_str(), &record)
             .await?;
@@ -293,11 +347,68 @@ impl SessionManager {
                     .payload(serde_json::json!({
                         "workspace_id": record.id.as_str(),
                         "name": record.name,
+                        "directory": directory,
                         "owner": record.owner_label(),
                     })),
             )
             .await?;
         Ok(record)
+    }
+
+    /// Turn a chosen directory into the path that must exist behind it.
+    ///
+    /// Creates it if it is not there (naming a folder is as good as making one), then refuses
+    /// anything that is not a strict descendant of the node root. The refusal is checked after
+    /// canonicalisation, so a symlink out of the root is caught too.
+    async fn resolve_workspace_directory(&self, directory: &str) -> Result<PathBuf> {
+        let requested = Path::new(directory);
+        if requested
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(RuntimeError::invalid_input(format!(
+                "a workspace directory may not climb out of the workspace root: {directory}"
+            ))
+            .with_detail("field", "directory"));
+        }
+        let root = tokio::fs::canonicalize(&self.deps.workspace_root).await.map_err(|error| {
+            RuntimeError::unavailable(format!(
+                "workspace root {} is unusable: {error}",
+                self.deps.workspace_root.display()
+            ))
+        })?;
+        let target = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
+        };
+        tokio::fs::create_dir_all(&target).await.map_err(|error| {
+            RuntimeError::invalid_input(format!(
+                "cannot create workspace directory {}: {error}",
+                target.display()
+            ))
+        })?;
+        let canonical = tokio::fs::canonicalize(&target).await.map_err(|error| {
+            RuntimeError::invalid_input(format!(
+                "workspace directory {} is unusable: {error}",
+                target.display()
+            ))
+        })?;
+        if canonical == root {
+            return Err(RuntimeError::invalid_input(
+                "a workspace directory must be inside the workspace root, not the root itself",
+            )
+            .with_detail("directory", directory));
+        }
+        if !canonical.starts_with(&root) {
+            return Err(RuntimeError::invalid_input(format!(
+                "a workspace directory must live under {}: {}",
+                root.display(),
+                canonical.display()
+            ))
+            .with_detail("directory", directory));
+        }
+        Ok(canonical)
     }
 
     pub async fn get_workspace(&self, id: &WorkspaceId) -> Result<Option<WorkspaceRecord>> {
@@ -415,13 +526,32 @@ impl SessionManager {
             }
         }
         let mut record = self
-            .create_workspace(&format!("{}'s workspace", principal.user_id), principal)
+            .create_workspace(
+                &format!("{}'s workspace", principal.user_id),
+                &self.default_workspace_directory(principal).to_string_lossy(),
+                principal,
+            )
             .await?;
         record.metadata.insert("default".into(), "true".into());
         self.workspace_collection()
             .save(self.store.as_ref(), record.id.as_str(), &record)
             .await?;
         Ok(record)
+    }
+
+    /// Where a caller's default workspace lives: a folder named after them, under the node root.
+    ///
+    /// The default has to pick a directory without asking, and it must not collide between two
+    /// people on one node - so it is their user id, sanitised to something a filesystem accepts.
+    fn default_workspace_directory(&self, principal: &Principal) -> PathBuf {
+        let slug: String = principal
+            .user_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect();
+        let slug = slug.trim_matches('-').to_string();
+        let slug = if slug.is_empty() { "default".to_string() } else { slug };
+        PathBuf::from(format!("{slug}-workspace"))
     }
 
     /// Replace a workspace's capability narrowing. Checked against what exists for the same reason a

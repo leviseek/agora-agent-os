@@ -238,7 +238,7 @@ export interface AppStoreValue {
   workspacesError: ApiError | null;
   workspacesLoading: boolean;
   refreshWorkspaces: () => Promise<void>;
-  createWorkspace: (name: string) => Promise<string | null>;
+  createWorkspace: (directory: string, name: string) => Promise<string | null>;
   renameWorkspace: (id: string, name: string) => Promise<boolean>;
   /**
    * The workspace this console is working in, or null for "all of them".
@@ -1038,11 +1038,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const createWorkspace = useCallback(
-    async (name: string): Promise<string | null> => {
+    async (directory: string, name: string): Promise<string | null> => {
       setBusy(true);
       setActionError(null);
       try {
-        const response = await clientRef.current.createWorkspace(name.trim());
+        const response = await clientRef.current.createWorkspace(directory.trim(), name);
         await refreshWorkspaces();
         // Creating one is also choosing it: a workspace you just made is where you are working.
         selectWorkspace(response.workspace.id);

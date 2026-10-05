@@ -22,6 +22,14 @@ pub struct WorkspaceRecord {
     pub id: WorkspaceId,
     /// What a human reads. Editable, and never used as a path.
     pub name: String,
+    /// The directory this workspace works in, relative to the node's workspace root (or absolute,
+    /// inside it). Chosen at creation and **never** derived from the name: a rename must not move
+    /// files, and a path the model was ever handed must keep pointing at the same place.
+    ///
+    /// `None` means "the workspace id", which is where workspaces created before this field existed
+    /// already live - an upgrade moves nobody's files.
+    #[serde(default)]
+    pub directory: Option<String>,
     /// Who created it, and who decides about it afterwards. Transferable only by its owner.
     pub owner: PrincipalRef,
     pub created_at: Timestamp,
@@ -52,10 +60,16 @@ pub struct WorkspaceRecord {
 
 impl WorkspaceRecord {
     pub fn new(owner: PrincipalRef, name: impl Into<String>) -> Self {
+        Self::new_in(owner, name, None)
+    }
+
+    /// A workspace whose files live in `directory` (relative to the node's workspace root).
+    pub fn new_in(owner: PrincipalRef, name: impl Into<String>, directory: Option<String>) -> Self {
         let now = crate::now_ms();
         Self {
             id: WorkspaceId::new(),
             name: name.into(),
+            directory,
             owner,
             created_at: now,
             updated_at: now,
@@ -75,13 +89,10 @@ impl WorkspaceRecord {
         self.archived_at.is_some()
     }
 
-    /// The leaf directory name for this workspace.
-    ///
-    /// Deliberately the id and not the display name. A name is editable, and a directory that moved
-    /// when somebody renamed a workspace would break every path the model had ever been handed -
-    /// and, worse, could silently point a session at a sibling's files.
+    /// The leaf directory name for this workspace: what was chosen at creation, or the id for a
+    /// record written before directories were a choice.
     pub fn directory_name(&self) -> &str {
-        self.id.as_str()
+        self.directory.as_deref().unwrap_or(self.id.as_str())
     }
 }
 
@@ -191,12 +202,23 @@ mod tests {
     }
 
     #[test]
-    fn the_directory_is_the_id_so_renaming_never_moves_files() {
-        let mut workspace = record("alice");
-        let before = workspace.directory_name().to_string();
+    fn the_directory_is_the_choice_not_the_name() {
+        // A rename must not move files, and the chosen directory must not be re-derived from a name.
+        let mut workspace = WorkspaceRecord::new_in(
+            PrincipalRef::new("alice", Some("node-a".into())),
+            "sprite rework",
+            Some("games/sprite-rework".into()),
+        );
+        assert_eq!(workspace.directory_name(), "games/sprite-rework");
         workspace.name = "renamed".into();
-        assert_eq!(workspace.directory_name(), before);
-        assert!(before.starts_with("ws_"));
+        assert_eq!(workspace.directory_name(), "games/sprite-rework");
+    }
+
+    #[test]
+    fn a_workspace_without_a_chosen_directory_keeps_the_id_it_always_had() {
+        // Records written before the directory was a choice live in a directory named after the id.
+        let workspace = record("alice");
+        assert_eq!(workspace.directory_name(), workspace.id.as_str());
     }
 
     #[test]

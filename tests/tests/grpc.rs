@@ -98,8 +98,13 @@ async fn a_remote_client_can_run_a_goal_and_invoke_a_capability() {
 
     // The caller's workspace travels on the wire, so a remote capability is jailed exactly like a
     // local one: naming it reaches the file that lives there...
-    let workspace = agentos_core::WorkspaceId::new();
-    let jail = kernel.policy.workspace_root().join(workspace.as_str());
+    let owner = agentos_core::model::Principal::new("remote-user", None, vec![]);
+    let workspace = kernel
+        .sessions
+        .create_workspace("remote project", "projects/remote", &owner)
+        .await
+        .expect("workspace created on the far node");
+    let jail = kernel.policy.workspace_root().join("projects/remote");
     std::fs::create_dir_all(&jail).unwrap();
     std::fs::write(jail.join("only-here.txt"), "remote workspace").unwrap();
     let read = capabilities
@@ -110,7 +115,7 @@ async fn a_remote_client_can_run_a_goal_and_invoke_a_capability() {
             session_id: Some(session.clone()),
             actor_id: None,
             task_id: None,
-            workspace_id: Some(workspace.clone()),
+            workspace_id: Some(workspace.id.clone()),
             timeout_ms: 5_000,
         })
         .await

@@ -53,7 +53,11 @@ export function WorkspacesView() {
     actionError,
   } = useApp();
 
+  const [directory, setDirectory] = useState('');
   const [name, setName] = useState('');
+  // The name follows the folder until somebody types their own: the common case is one field, and a
+  // name that kept overwriting a deliberate edit would be worse than a name that starts empty.
+  const [nameTouched, setNameTouched] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
   const [memberUser, setMemberUser] = useState('');
@@ -71,11 +75,22 @@ export function WorkspacesView() {
       ? []
       : sessions.filter((session) => (session.workspace_id ?? null) === selected.workspace.id);
 
+  const folderName = (path: string): string => {
+    const trimmed = path.trim().replace(/[/\\]+$/, '');
+    const parts = trimmed.split(/[/\\]/);
+    return parts[parts.length - 1] ?? trimmed;
+  };
+
   const onCreate = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (name.trim().length === 0) return;
-    const id = await createWorkspace(name);
-    if (id !== null) setName('');
+    if (directory.trim().length === 0) return;
+    const chosen = nameTouched && name.trim().length > 0 ? name.trim() : folderName(directory);
+    const id = await createWorkspace(directory, chosen);
+    if (id !== null) {
+      setDirectory('');
+      setName('');
+      setNameTouched(false);
+    }
   };
 
   const onRename = async (id: string): Promise<void> => {
@@ -132,15 +147,31 @@ export function WorkspacesView() {
       >
         <form className="form-grid form-grid-inline" onSubmit={(event) => void onCreate(event)}>
           <label className="field">
+            <span>{t('workspaces.directory')}</span>
+            <input
+              type="text"
+              value={directory}
+              placeholder={t('workspaces.directoryPlaceholder')}
+              onChange={(event) => {
+                setDirectory(event.target.value);
+                if (!nameTouched) setName(folderName(event.target.value));
+              }}
+              spellCheck={false}
+            />
+          </label>
+          <label className="field">
             <span>{t('workspaces.newName')}</span>
             <input
               type="text"
               value={name}
               placeholder={t('workspaces.newNamePlaceholder')}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                setNameTouched(true);
+                setName(event.target.value);
+              }}
             />
           </label>
-          <button type="submit" className="btn" disabled={busy || name.trim().length === 0}>
+          <button type="submit" className="btn" disabled={busy || directory.trim().length === 0}>
             {t('workspaces.create')}
           </button>
         </form>
@@ -157,6 +188,7 @@ export function WorkspacesView() {
             <thead>
               <tr>
                 <th>{t('workspaces.name')}</th>
+                <th>{t('workspaces.directory')}</th>
                 <th>{t('workspaces.owner')}</th>
                 <th>{t('workspaces.myRole')}</th>
                 <th>{t('workspaces.sessions')}</th>
@@ -183,6 +215,7 @@ export function WorkspacesView() {
                       ) : null}
                       <div className="muted small mono">{workspace.id}</div>
                     </td>
+                    <td className="mono">{workspace.directory ?? workspace.id}</td>
                     <td className="mono">
                       {workspace.owner.node_id == null || workspace.owner.node_id === ''
                         ? workspace.owner.user_id
@@ -236,6 +269,8 @@ export function WorkspacesView() {
             <thead>
               <tr>
                 <th>{t('workspaces.name')}</th>
+                {/* The index deliberately carries no directory: a stranger learns a name to ask about,
+                    not the node's folder layout. */}
                 <th>{t('workspaces.owner')}</th>
                 <th>{t('workspaces.sessions')}</th>
                 <th>{t('workspaces.created')}</th>
@@ -289,6 +324,11 @@ export function WorkspacesView() {
           }
         >
           <div className="stack-tight">
+            <p className="muted small">
+              {t('workspaces.directoryLine', {
+                directory: selected.workspace.directory ?? selected.workspace.id,
+              })}
+            </p>
             {selected.can.includes('grant') ? (
               <div className="form-grid form-grid-inline">
                 <label className="field">

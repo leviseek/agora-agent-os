@@ -224,7 +224,7 @@ impl CapabilityMesh {
         let descriptor = registered.descriptor_with_load();
         // Resolve the caller's jail before anything else: policy, the capability context and the
         // audit all describe the same directory, and they must not be able to disagree about it.
-        let workspace = self.workspaces.resolve(caller.workspace.as_ref())?;
+        let workspace = self.workspaces.resolve(caller.workspace.as_ref()).await?;
 
         // --- policy gate -------------------------------------------------------------
         let decision = self.policy.evaluate(&PolicyRequest {

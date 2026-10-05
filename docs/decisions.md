@@ -318,3 +318,21 @@ directory; discovery shares knowledge, not state.
 3. **控制台不再有会话级授权入口**：删掉未被引用的 `RequestAccessForm` / `AccessRequests`
    （它们按会话口径写文案，留着迟早被接上去），会话详情新增一行「此角色来自工作区 X / 打开工作区」，
    成员编辑只在工作区视图。
+
+**后续（目录成为创建时的选择，2026-10-05）。** 工作区目录从「自动生成 `<root>/<ws_id>/`」改为
+**创建时必须指定**：`POST /v1/workspaces {directory, name?}`，名称默认取目录末段、可改。
+- `directory` 是相对 `policy.workspace_root` 的路径（或位于其中的绝对路径），不存在就创建（命名即创建）；
+  `..` 与任何落在根外的路径被拒——工作区不该能读到别人的目录，而根本身就是"所有工作区"。
+- **一个目录只能有一个工作区**：两条记录指向同一目录，等于一个工作区的文件从另一个工作区可达，
+  而且运行时的其他地方都看不出问题（两条记录都合法）。创建时直接 `409`。
+- `WorkspaceRecord.directory: Option<String>`，`None` = 「就用 id」——这是本条落地之前创建的记录所在的位置，
+  所以升级不搬任何文件。名称与目录从此刻意分离：改名永不移动文件（D20 的原则不变）。
+- jail 解析改为**按目录**缓存（原来按 id 缓存）：目录才是 jail 的身份；同一个 id 配上一个不同目录时，
+  按 id 缓存会安静地返回别人的文件夹。调用方（mesh）只给 id，注册表自己从 store 把 id 翻成目录并记住；
+  有 store 时一个不存在的 id 直接 `not_found`，而不是回落到某个目录。
+- 默认工作区（未点名工作区时自动创建）用 `<user_id>-workspace`：必须在无人指定目录的前提下选一个，
+  且两个人共用一个节点时不能撞车。
+- 验证：核心 `directory_name()` 的两条单测；注册表「A/B 各自 jail、`../` 与 `.` 被拒」；
+  acceptance `one_workspace_cannot_reach_another_workspace_files` 增加「同一目录 `Conflict`、`../outside` `InvalidInput`」；
+  HTTP `a_workspace_is_created_shared_and_narrows_its_sessions_over_http` 增加「无目录 400、名称取自目录、同目录 409、越界 400」。
+  既有两条写文件类测试（图像、AGENTS.md）改为从 `GET /v1/workspaces/{id}` 读回目录再落盘——顺带钉住 jail 跟的是所选目录。

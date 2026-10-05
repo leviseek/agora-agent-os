@@ -104,6 +104,10 @@ pub struct SessionDeps {
     /// Where this session's files live. Resolved per call from the session's workspace, because one
     /// node serves sessions from many workspaces and the jail must follow the session, not the node.
     pub workspaces: Arc<dyn WorkspaceResolver>,
+    /// The node's workspace root. Every workspace directory lives inside it, and a chosen directory is
+    /// resolved against it; kept here as well as inside the resolver because creating a workspace has
+    /// to check the choice against the same boundary the resolver enforces.
+    pub workspace_root: std::path::PathBuf,
     pub spec: AgentSpec,
     pub node_id: String,
     pub run_timeout_ms: u64,
@@ -182,10 +186,11 @@ impl SessionActor {
 
     /// The directory this session may touch. Derived from the record's workspace every time, so a
     /// session can never be pointed at a jail its record does not name.
-    fn jail(&self) -> Result<Arc<Workspace>> {
+    async fn jail(&self) -> Result<Arc<Workspace>> {
         self.deps
             .workspaces
             .resolve(self.state.session.workspace_id.as_ref())
+            .await
     }
 
     pub fn state_ref(&self) -> &SessionActorState {
@@ -410,7 +415,7 @@ impl SessionActor {
         // Attachments are resolved before the run starts, so a bad path or an id nobody stored
         // fails the goal immediately instead of mid-run. Images come from the workspace or an
         // upload; text files come from an upload, and the two are told apart by content.
-        let attach_jail = self.jail()?;
+        let attach_jail = self.jail().await?;
         let attached = crate::images::attach_images(
             &attach_jail,
             &self.deps.artifacts,
@@ -599,7 +604,7 @@ impl SessionActor {
 
         // Project instructions, read fresh at the start of every run so editing AGENTS.md takes
         // effect on the next goal rather than the next restart.
-        let jail = self.jail()?;
+        let jail = self.jail().await?;
         let workspace_context =
             load_workspace_context(&jail, &self.deps.context_files, self.deps.context_files_chars);
         if let Some(loaded) = &workspace_context {

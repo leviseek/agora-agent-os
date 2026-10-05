@@ -740,10 +740,15 @@ async fn images_are_verified_by_content_and_stored_as_artifacts() {
     let (_, session) = h.post("/v1/sessions", json!({ "user_id": "u1", "title": "vision" })).await;
     let id = session["id"].as_str().unwrap().to_string();
 
-    // Files a session may reach live in its workspace directory (D20), so that is where the image
-    // and the impostor go. `liar.png` proves a name is not a type; `../outside.png` below proves the
-    // jail is the workspace, not the node root.
-    let jail = dir.join("workspace").join(session["workspace_id"].as_str().unwrap());
+    // Files a session may reach live in its workspace's directory (D20), so that is where the image
+    // and the impostor go: the directory the workspace chose, read back from the runtime rather than
+    // assumed. `liar.png` proves a name is not a type; `../outside.png` below proves the jail is the
+    // workspace, not the node root.
+    let workspace_id = session["workspace_id"].as_str().unwrap().to_string();
+    let (_, workspace) = h.get(&format!("/v1/workspaces/{workspace_id}")).await;
+    let jail = dir
+        .join("workspace")
+        .join(workspace["workspace"]["directory"].as_str().unwrap());
     std::fs::create_dir_all(&jail).unwrap();
     std::fs::write(jail.join("pixel.png"), &png).unwrap();
     std::fs::write(jail.join("liar.png"), "this is not an image").unwrap();
@@ -1775,7 +1780,11 @@ async fn workspace_context_files_are_loaded_into_the_prompt() {
     let id = session["id"].as_str().unwrap().to_string();
     // Project instructions live in the session's workspace directory (D20), and the file outside it
     // is written too, so the configured `../secret.md` is proved refused rather than merely absent.
-    let jail = dir.join("workspace").join(session["workspace_id"].as_str().unwrap());
+    let workspace_id = session["workspace_id"].as_str().unwrap().to_string();
+    let (_, workspace) = h.get(&format!("/v1/workspaces/{workspace_id}")).await;
+    let jail = dir
+        .join("workspace")
+        .join(workspace["workspace"]["directory"].as_str().unwrap());
     std::fs::create_dir_all(&jail).unwrap();
     std::fs::write(jail.join("AGENTS.md"), "Always answer in one sentence.").unwrap();
     std::fs::write(dir.join("secret.md"), "TOP SECRET").unwrap();
@@ -2776,12 +2785,56 @@ async fn the_access_inbox_gathers_what_is_waiting_on_you() {
 async fn a_workspace_is_created_shared_and_narrows_its_sessions_over_http() {
     let h = Harness::start_with_principals().await;
 
-    let (status, created) = h
+    // A workspace is a place, not just a label: the directory is required...
+    let (status, refused) = h
         .post_as(Some("alice-token"), "/v1/workspaces", json!({ "name": "project" }))
+        .await;
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["error"]["code"], "invalid_input");
+
+    // ...and when only the directory is given, the name is the folder it points at.
+    let (status, defaulted) = h
+        .post_as(
+            Some("alice-token"),
+            "/v1/workspaces",
+            json!({ "directory": "projects/named-from-folder" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{defaulted}");
+    assert_eq!(defaulted["workspace"]["name"], "named-from-folder");
+    assert_eq!(defaulted["workspace"]["directory"], "projects/named-from-folder");
+
+    let (status, created) = h
+        .post_as(
+            Some("alice-token"),
+            "/v1/workspaces",
+            json!({ "directory": "projects/demo", "name": "project" }),
+        )
         .await;
     assert_eq!(status, 200, "{created}");
     let ws = created["workspace"]["id"].as_str().unwrap().to_string();
     assert_eq!(created["workspace"]["owner"]["user_id"], "alice");
+    assert_eq!(created["workspace"]["directory"], "projects/demo");
+
+    // One directory, one workspace: a second record pointing at the same folder would be a way into
+    // the first one's files, so it is refused rather than accepted and hoped about.
+    let (status, clash) = h
+        .post_as(
+            Some("alice-token"),
+            "/v1/workspaces",
+            json!({ "directory": "projects/demo", "name": "another" }),
+        )
+        .await;
+    assert_eq!(status, 409, "{clash}");
+    // And a directory that climbs out of the node root is not a workspace at all.
+    let (status, escaped) = h
+        .post_as(
+            Some("alice-token"),
+            "/v1/workspaces",
+            json!({ "directory": "../outside" }),
+        )
+        .await;
+    assert_eq!(status, 400, "{escaped}");
 
     // The list carries the caller's own role, so a console can say what they may do.
     let (_, list) = h.get_as(Some("alice-token"), "/v1/workspaces").await;

@@ -76,16 +76,17 @@ before any identity is sent, so a client knows whether to ask for one.
 ### Workspaces
 
 A workspace owns sessions and their files; access is decided there and inherited by every session of
-it, and each workspace is a directory (`<workspace_root>/<ws_id>/`) that its sessions' filesystem
-capabilities are jailed to. `docs/decisions.md` D20 has the reasoning. The session-level access
-routes (`/v1/sessions/{id}/access`, `.../access-requests`, `.../capabilities`) still exist and
+it, and each workspace works in a directory **it chooses at creation** - a folder under
+`<workspace_root>`, or an absolute path inside it - which is the only filesystem its sessions'
+capabilities can reach. `docs/decisions.md` D20 has the reasoning. The session-level access routes
+(`/v1/sessions/{id}/access`, `.../access-requests`, `.../capabilities`) still exist and
 **delegate to the session's workspace**, returning `scope: "workspace"` plus the workspace record that
 actually changed, so a client that asked about a session is told where the change landed.
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | `/v1/workspaces` | - | `{workspaces:[{workspace, workspace_role, can, session_count}], total}` - every workspace, with the caller's own role |
-| POST | `/v1/workspaces` | `{name}` | `{workspace}` owned by the caller |
+| POST | `/v1/workspaces` | `{directory, name?}` | `{workspace}` owned by the caller. `directory` is required: a folder under the node's workspace root (or an absolute path inside it), created if missing, and **not** derived from the name. `name` defaults to the directory's last segment. One directory, one workspace (`409` otherwise); `..` and anything outside the root are refused (`400`) |
 | GET | `/v1/workspaces/{id}` | - | `{workspace, workspace_role, can, sessions:[SessionSummary]}`; `403` without a role |
 | PATCH | `/v1/workspaces/{id}` | `{name}` | `{workspace}` - rename; the directory is the id, so nothing moves |
 | GET | `/v1/workspaces/{id}/sessions` | - | `{workspace_id, sessions, total}` - the conversations in it |

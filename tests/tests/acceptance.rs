@@ -686,7 +686,11 @@ async fn a_workspace_owns_its_sessions_and_shares_them_with_one_decision() {
     let alice = Principal::new("alice", Some("node-x".into()), vec![]);
     let bob = Principal::new("bob", None, vec![]);
 
-    let workspace = kernel.sessions.create_workspace("alice's project", &alice).await.unwrap();
+    let workspace = kernel
+        .sessions
+        .create_workspace("alice's project", "projects/alice", &alice)
+        .await
+        .unwrap();
     let session = kernel
         .sessions
         .create_session_in(&workspace.id, "alice", "first conversation", None)
@@ -736,15 +740,31 @@ async fn a_workspace_owns_its_sessions_and_shares_them_with_one_decision() {
 async fn one_workspace_cannot_reach_another_workspace_files() {
     let kernel = kernel().await;
     let alice = Principal::new("alice", Some("node-x".into()), vec![]);
-    let ws_a = kernel.sessions.create_workspace("A", &alice).await.unwrap();
-    let ws_b = kernel.sessions.create_workspace("B", &alice).await.unwrap();
+    let ws_a = kernel.sessions.create_workspace("A", "projects/a", &alice).await.unwrap();
+    let ws_b = kernel.sessions.create_workspace("B", "projects/b", &alice).await.unwrap();
     let session_a = kernel.sessions.create_session_in(&ws_a.id, "alice", "a", None).await.unwrap();
     let session_b = kernel.sessions.create_session_in(&ws_b.id, "alice", "b", None).await.unwrap();
 
-    // A file that exists in A's directory and nowhere else.
-    let dir_a = kernel.policy.workspace_root().join(ws_a.id.as_str());
+    // A file that exists in A's directory and nowhere else. Written straight into the directory the
+    // workspace chose - which is what proves the jail follows the choice rather than the id.
+    let dir_a = kernel.policy.workspace_root().join("projects/a");
     std::fs::create_dir_all(&dir_a).unwrap();
     std::fs::write(dir_a.join("only-a.txt"), "alice's file").unwrap();
+
+    // One directory, one workspace: two records pointing at the same folder would be one workspace's
+    // files reachable from the other, and nothing downstream would catch it.
+    let clash = kernel
+        .sessions
+        .create_workspace("A copy", "projects/a", &alice)
+        .await
+        .unwrap_err();
+    assert_eq!(clash.kind, agentos_core::ErrorKind::Conflict, "{clash}");
+    let outside = kernel
+        .sessions
+        .create_workspace("escaping", "../outside", &alice)
+        .await
+        .unwrap_err();
+    assert_eq!(outside.kind, agentos_core::ErrorKind::InvalidInput, "{outside}");
 
     let read = kernel
         .mesh

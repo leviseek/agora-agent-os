@@ -145,7 +145,7 @@ impl Kernel {
         // --- policy + capabilities -------------------------------------------------
         // One root, one directory per workspace, resolved per call. A single jail here would be one
         // workspace's files reachable from every other.
-        let workspaces = Arc::new(WorkspaceRegistry::new(&config.policy.workspace_root)?);
+        let workspaces = Arc::new(WorkspaceRegistry::new(&config.policy.workspace_root)? .with_store(store.clone()));
         let workspace_resolver: Arc<dyn WorkspaceResolver> = workspaces.clone();
         let policy = Arc::new(PolicyEngine::new(config.policy.clone()));
         let registry = Arc::new(CapabilityRegistry::new());
@@ -265,6 +265,7 @@ impl Kernel {
             artifacts: artifacts.clone(),
             checkpoints: checkpoints.clone(),
             workspaces: workspace_resolver.clone(),
+            workspace_root: config.policy.workspace_root.clone(),
             spec: AgentSpec {
                 allowed_capabilities: vec![],
                 max_steps: config.policy.max_steps_per_run,

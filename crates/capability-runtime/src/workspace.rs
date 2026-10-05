@@ -8,7 +8,10 @@
 //! 4. reads and writes are additionally gated by the capability permission set.
 
 use agentos_core::error::{Result, RuntimeError};
+use agentos_core::model::WorkspaceRecord;
 use agentos_core::WorkspaceId;
+use agentos_storage::store::{collections, Collection, Store};
+use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -173,8 +176,9 @@ pub struct WorkspaceEntry {
 /// which is exactly where its files already are. That keeps an upgrade from moving anybody's files;
 /// it is also the one case where a session can still see a sibling workspace's directory, and it
 /// disappears once every session has a workspace (see docs/decisions.md D20).
+#[async_trait]
 pub trait WorkspaceResolver: Send + Sync + std::fmt::Debug {
-    fn resolve(&self, workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>>;
+    async fn resolve(&self, workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>>;
 }
 
 /// One fixed jail, for tests and for a runtime that has a single workspace.
@@ -189,22 +193,45 @@ impl FixedWorkspaceResolver {
     }
 }
 
+#[async_trait]
 impl WorkspaceResolver for FixedWorkspaceResolver {
-    fn resolve(&self, _workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>> {
+    async fn resolve(&self, _workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>> {
         Ok(self.workspace.clone())
     }
 }
 
 /// The real thing: a node root, one directory per workspace, jails created on first use and kept.
 ///
-/// The directory is the workspace id rather than its name, so renaming a workspace never moves a
-/// file and two workspaces can never collide on a name. Ids are unique per node, so the mapping is
-/// injective without a lock around it beyond the cache itself.
-#[derive(Debug)]
+/// A workspace's directory is **chosen**, not derived: it is whatever the record says (falling back
+/// to the id for a record written before that was a choice). The directory must stay inside the
+/// node's root - a workspace rooted at the root itself, or outside it, would be a way to read every
+/// other workspace's files, which is the whole thing this exists to prevent.
 pub struct WorkspaceRegistry {
     root: PathBuf,
     legacy: Arc<Workspace>,
+    /// Where the workspace records live, so an id can be turned into its directory. Absent in a
+    /// runtime wired without storage (and in tests): then a workspace is jailed by its id, which is
+    /// where workspaces created before directories were a choice already live.
+    store: Option<Arc<dyn Store>>,
+    /// Workspace id -> the directory its record names, learned from the store once per workspace.
+    directories: RwLock<HashMap<String, String>>,
+    /// Canonical directory -> jail. Keyed by the directory, not the id: the directory is what the
+    /// jail *is*, so a call naming a different one is a different jail (or a refusal) rather than a
+    /// cache hit that quietly returns somebody else's folder.
     jails: RwLock<HashMap<String, Arc<Workspace>>>,
+}
+
+// Written out rather than derived: a store handle is not inspectable, and a `Debug` that printed one
+// would be noise on every line that logs a resolver.
+impl std::fmt::Debug for WorkspaceRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceRegistry")
+            .field("root", &self.root)
+            .field("has_store", &self.store.is_some())
+            .field("known_workspaces", &self.directories.read().len())
+            .field("jails", &self.jails.read().len())
+            .finish()
+    }
 }
 
 impl WorkspaceRegistry {
@@ -213,33 +240,100 @@ impl WorkspaceRegistry {
         Ok(Self {
             root: legacy.root().to_path_buf(),
             legacy,
+            store: None,
+            directories: RwLock::new(HashMap::new()),
             jails: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Read the workspace records from this store to learn each workspace's directory.
+    pub fn with_store(mut self, store: Arc<dyn Store>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The jail for a workspace id. Created on first use, cached afterwards: constructing a jail
-    /// canonicalises the path on disk, and doing that on every capability call would be an IO
-    /// operation per call for no gain.
-    pub fn jail_for(&self, workspace: &WorkspaceId) -> Result<Arc<Workspace>> {
-        if let Some(existing) = self.jails.read().get(workspace.as_str()) {
+    /// The directory a workspace works in, as its record says it (or its id, for a record written
+    /// before the directory was a choice).
+    pub async fn directory_of(&self, workspace: &WorkspaceId) -> Option<String> {
+        let store = self.store.as_ref()?;
+        let collection: Collection<WorkspaceRecord> = Collection::new(collections::WORKSPACES);
+        let record = collection.load(store.as_ref(), workspace.as_str()).await.ok().flatten()?;
+        Some(record.directory_name().to_string())
+    }
+
+    /// The jail for a chosen directory. Created on first use and cached by the directory it
+    /// resolves to, because constructing a jail canonicalises a path on disk and doing that on every
+    /// capability call would be an IO operation per call for no gain. A workspace's directory never
+    /// changes - renaming a workspace renames nothing on disk - so the cache cannot go stale.
+    pub fn jail_for(&self, directory: &str) -> Result<Arc<Workspace>> {
+        let jail = Arc::new(self.open_jail(directory)?);
+        let key = jail.root().to_string_lossy().to_string();
+        if let Some(existing) = self.jails.read().get(&key) {
             return Ok(existing.clone());
         }
-        let jail = Arc::new(Workspace::new(self.root.join(workspace.as_str()))?);
-        self.jails.write().insert(workspace.as_str().to_string(), jail.clone());
+        self.jails.write().insert(key, jail.clone());
+        Ok(jail)
+    }
+
+    /// Open (creating if needed) the jail for a directory, and refuse anything that is not a
+    /// strict descendant of the node root.
+    fn open_jail(&self, directory: &str) -> Result<Workspace> {
+        let requested = Path::new(directory);
+        if requested.components().any(|part| matches!(part, Component::ParentDir)) {
+            return Err(RuntimeError::policy_denied(format!(
+                "a workspace directory may not climb out of the node root: {directory}"
+            )));
+        }
+        let target = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.root.join(requested)
+        };
+        let jail = Workspace::new(&target)?;
+        if jail.root() == self.root {
+            return Err(RuntimeError::policy_denied(format!(
+                "a workspace directory must be inside the node root, not the root itself: {directory}"
+            )));
+        }
+        if !jail.root().starts_with(&self.root) {
+            return Err(RuntimeError::policy_denied(format!(
+                "a workspace directory must live under {}: {directory}",
+                self.root.display()
+            )));
+        }
         Ok(jail)
     }
 }
 
+#[async_trait]
 impl WorkspaceResolver for WorkspaceRegistry {
-    fn resolve(&self, workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>> {
-        match workspace {
-            Some(id) => self.jail_for(id),
-            None => Ok(self.legacy.clone()),
+    async fn resolve(&self, workspace: Option<&WorkspaceId>) -> Result<Arc<Workspace>> {
+        let Some(id) = workspace else {
+            return Ok(self.legacy.clone());
+        };
+        if let Some(directory) = self.directories.read().get(id.as_str()).cloned() {
+            return self.jail_for(&directory);
         }
+        let directory = match self.directory_of(id).await {
+            Some(directory) => directory,
+            // No store at all (tests, a runtime wired without storage): jail by id, which is where a
+            // workspace created before directories were a choice lives. With a store, an id nobody
+            // created is not a workspace - refusing is better than handing it a directory the record
+            // does not name.
+            None if self.store.is_none() => id.as_str().to_string(),
+            None => {
+                return Err(RuntimeError::not_found(format!("workspace {id} does not exist"))
+                    .with_detail("workspace_id", id.as_str()))
+            }
+        };
+        self.directories
+            .write()
+            .insert(id.as_str().to_string(), directory.clone());
+        self.jail_for(&directory)
     }
 }
 
@@ -302,15 +396,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agentos-registry-{}", agentos_core::now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = WorkspaceRegistry::new(&dir).unwrap();
-        let a = WorkspaceId::new();
-        let b = WorkspaceId::new();
 
-        let jail_a = registry.jail_for(&a).unwrap();
-        let jail_b = registry.jail_for(&b).unwrap();
+        // The jail follows the chosen directory, not the id.
+        let jail_a = registry.jail_for("projects/a").unwrap();
+        let jail_b = registry.jail_for("projects/b").unwrap();
         assert!(jail_a.root().starts_with(std::fs::canonicalize(&dir).unwrap()));
+        assert!(jail_a.root().ends_with("projects/a"));
         assert_ne!(jail_a.root(), jail_b.root());
-        // The same id resolves to the same jail, so a cached path is the path a later call gets.
-        assert_eq!(registry.jail_for(&a).unwrap().root(), jail_a.root());
+
+        // A directory that leaves the root, or is the root, is not a workspace.
+        assert!(registry.jail_for("../escape").is_err());
+        assert!(registry.jail_for(".").is_err());
 
         // This is the whole point: A writing a file does not make it visible to B, and a relative
         // path out of A's jail is refused before any IO happens.
@@ -319,7 +415,7 @@ mod tests {
         assert!(jail_a.resolve("../only-a.txt").is_err());
 
         // A session with no workspace keeps the node root, where its files already are.
-        let legacy = registry.resolve(None).unwrap();
+        let legacy = registry.resolve(None).await.unwrap();
         assert_eq!(legacy.root(), std::fs::canonicalize(&dir).unwrap());
     }
 }

@@ -497,7 +497,16 @@ pub async fn revoke_access(
 
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkspaceRequest {
-    pub name: String,
+    /// The directory this workspace works in: a folder under the node's workspace root, or an
+    /// absolute path inside it. Required - a workspace is a place, not just a label. Kept optional in
+    /// the type so a missing one is this runtime's own 400 with a sentence, not the JSON extractor's
+    /// 422 with a serde message.
+    #[serde(default)]
+    pub directory: Option<String>,
+    /// What a human reads. Defaults to the last segment of the directory, because that is what people
+    /// call a project anyway; editable afterwards, and never used as a path.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -572,11 +581,33 @@ pub async fn create_workspace(
     Json(body): Json<CreateWorkspaceRequest>,
 ) -> ApiResult<Json<Value>> {
     let me = principal.map(|value| value.0).unwrap_or_else(agentos_core::model::Principal::operator);
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(ApiError(RuntimeError::invalid_input("a workspace name must not be empty")));
+    let directory = body.directory.as_deref().map(str::trim).unwrap_or("");
+    if directory.is_empty() {
+        return Err(ApiError(
+            RuntimeError::invalid_input(
+                "a workspace needs a directory: name the folder under the workspace root (or an \
+                 absolute path inside it)",
+            )
+            .with_detail("field", "directory"),
+        ));
     }
-    let record = state.kernel.sessions.create_workspace(name, &me).await?;
+    // The common case is one field: type the folder, press create. The name comes from the last
+    // segment of the path and can be changed in the same breath or later - the directory never follows
+    // it, so nothing moves when somebody renames a workspace.
+    let name = match body.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None => directory
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(directory)
+            .to_string(),
+    };
+    let record = state
+        .kernel
+        .sessions
+        .create_workspace(&name, directory, &me)
+        .await?;
     Ok(Json(json!({ "workspace": record })))
 }
 
